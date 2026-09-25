@@ -2,10 +2,12 @@
  * setstadium.js
  *
  * Set your team stadium, or set any team stadium as organizer.
- * Captain/VC can set their own team's stadium. Organizers can set any team.
+ * Captain/VC can set their own team's stadium (including per-tournament teams
+ * they captain). Organizers can set any team.
  *
  * Usage:  .setstadium <stadium name>
- *         .setstadium <team name> <stadium name>  (organizer only)
+ *         .setstadium team=<Team Name> <stadium name>   (pick one of your teams)
+ *         .setstadium <team name> <stadium name>        (organizer only)
  * Slash:  /setstadium stadium:<name> [team:<name>]
  *
  * Aliases: stadium
@@ -16,14 +18,14 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const { Team } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { escapeRegex } = require('../../utils/stringHelpers');
+const { Team } = require('../../models/Tournament');
+const { parseTeamToken, resolveManagedTeam } = require('../../utils/teamResolver');
 
 module.exports = {
     name: 'setstadium',
     description: 'Set your team stadium, or set any team stadium as organizer.',
-    usage: '.setstadium [team name] <stadium name>',
+    usage: '.setstadium [team=<name>] <stadium name> | Organizer: .setstadium <team name> <stadium name>',
     aliases: ['stadium'],
     hidden: false,
     cooldown: 5,
@@ -38,7 +40,7 @@ module.exports = {
         )
         .addStringOption(opt =>
             opt.setName('team')
-                .setDescription('Organizer only: team name')
+                .setDescription('Team name (captain: one of your teams • organizer: any team)')
                 .setRequired(false)
         ),
 
@@ -50,26 +52,36 @@ module.exports = {
         try {
             if (!message.guild) return;
 
-            const organizer = await isOrganizer(message.guild.id, message.author.id);
+            const guildId = message.guild.id;
+            const userId = message.author.id;
+            const organizer = await isOrganizer(guildId, userId);
 
             if (!args.length) {
                 return message.reply(
                     '❓ Usage:\n' +
                     'Captain: `.setstadium Santiago Bernabeu`\n' +
+                    'Captain, specific team: `.setstadium team=Bravo Santiago Bernabeu`\n' +
                     'Organizer: `.setstadium Falcons Santiago Bernabeu`'
                 );
             }
 
-            const parsed = organizer
-                ? await parseOrganizerTeamAndValue(message.guild.id, args)
-                : {
-                    teamName: null,
-                    value: args.join(' ').trim()
+            const token = await parseTeamToken(guildId, userId, args);
+
+            let parsed;
+            if (organizer && !token.teamName) {
+                // Organizer legacy flexible parsing (match leading args to any team)
+                parsed = await parseOrganizerTeamAndValue(guildId, args);
+            } else {
+                const rest = token.teamName ? token.rest : args;
+                parsed = {
+                    teamName: token.teamName,
+                    value: rest.join(' ').trim()
                 };
+            }
 
             return await runSetStadium({
                 guild: message.guild,
-                userId: message.author.id,
+                userId,
                 organizer,
                 teamName: parsed.teamName,
                 stadiumName: parsed.value,
@@ -120,17 +132,45 @@ module.exports = {
 
 /**
  * Set a team's stadium.
- * Captain/VC path: resolve team from user's membership.
- * Organizer path: resolve team by name argument.
+ * Team resolution via resolveManagedTeam (organizer: any, captain: own teams).
  */
 async function runSetStadium({ guild, userId, organizer, teamName, stadiumName, reply }) {
-    const team = await resolveTeam({ guild, userId, organizer, teamName });
+    const resolved = await resolveManagedTeam({
+        guildId: guild.id,
+        userId,
+        organizer,
+        teamName
+    });
 
-    if (!team) {
+    if (resolved.status === 'ambiguous') {
+        const list = resolved.teams.map(t => `• **${t.name}**`).join('\n');
         return reply({
-            content: organizer && teamName
-                ? `❌ Team not found: \`${teamName}\``
-                : '🚫 Only **Team Captains / Vice Captains** can set their own stadium. Organizers can use `.setstadium <team name> <stadium name>`.'
+            content:
+                `🤔 You manage more than one team:\n${list}\n\n` +
+                `Specify which one:\n` +
+                `Prefix: \`.setstadium team=<Team Name> <stadium name>\`\n` +
+                `Slash: \`/setstadium stadium:<name> team:<Team Name>\``
+        });
+    }
+
+    if (resolved.status === 'not_found') {
+        return reply({ content: `❌ Team not found: \`${resolved.teamName}\`` });
+    }
+
+    if (resolved.status === 'not_yours') {
+        const list = resolved.teams.length
+            ? `\nYour teams:\n${resolved.teams.map(t => `• **${t.name}**`).join('\n')}`
+            : '';
+        return reply({
+            content: `🚫 **${resolved.teamName}** is not one of your teams.${list}`
+        });
+    }
+
+    if (!resolved.team) {
+        return reply({
+            content: organizer
+                ? '🚫 Organizers must name a team: `.setstadium <team name> <stadium name>`.'
+                : '🚫 You are not a **Team Captain / Vice Captain** of any team yet.'
         });
     }
 
@@ -144,6 +184,7 @@ async function runSetStadium({ guild, userId, organizer, teamName, stadiumName, 
         return reply({ content: '❌ Stadium name is too long. Keep it under 80 characters.' });
     }
 
+    const team = resolved.team;
     team.stadium = cleanName;
     await team.save();
 
@@ -162,37 +203,6 @@ async function runSetStadium({ guild, userId, organizer, teamName, stadiumName, 
 /* ====================================================
    HELPERS
 ==================================================== */
-
-/**
- * Resolve which team to operate on.
- * Organizer + teamName → find by name.
- * Otherwise → find by captain/VC membership.
- */
-async function resolveTeam({ guild, userId, organizer, teamName }) {
-    if (organizer && teamName) {
-        return Team.findOne({
-            guildId: guild.id,
-            name: {
-                $regex: new RegExp(`^${escapeRegex(teamName)}$`, 'i')
-            }
-        });
-    }
-
-    // Captain or vice captain
-    let team = await Team.findOne({
-        guildId: guild.id,
-        captainID: userId
-    });
-
-    if (!team) {
-        team = await Team.findOne({
-            guildId: guild.id,
-            viceCaptainID: userId
-        });
-    }
-
-    return team;
-}
 
 /**
  * For prefix organizer usage, try to match the first N args to a known team name.

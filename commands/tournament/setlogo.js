@@ -2,11 +2,13 @@
  * setlogo.js
  *
  * Set your team logo, or set any team logo as organizer.
- * Captain/VC can set their own team's logo. Organizers can set any team.
+ * Captain/VC can set their own team's logo (including per-tournament teams
+ * they captain). Organizers can set any team.
  * Accepts image URLs or Discord attachments.
  *
  * Usage:  .setlogo <image link>  (or attach image)
- *         .setlogo <team name> <image link>  (organizer only)
+ *         .setlogo team=<Team Name> <image link>   (pick one of your teams)
+ *         .setlogo <team name> <image link>        (organizer only)
  * Slash:  /setlogo [image_url] [team:<name>]
  *
  * Aliases: logo
@@ -17,14 +19,13 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const { Team } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { escapeRegex } = require('../../utils/stringHelpers');
+const { parseTeamToken, resolveManagedTeam } = require('../../utils/teamResolver');
 
 module.exports = {
     name: 'setlogo',
     description: 'Set your team logo, or set any team logo as organizer.',
-    usage: '.setlogo [team name] <image link> OR upload attachment',
+    usage: '.setlogo [team=<name>] <image link> (or attach) | Organizer: .setlogo <team name> <image link>',
     aliases: ['logo'],
     hidden: false,
     cooldown: 5,
@@ -39,7 +40,7 @@ module.exports = {
         )
         .addStringOption(opt =>
             opt.setName('team')
-                .setDescription('Organizer only: team name')
+                .setDescription('Team name (captain: one of your teams • organizer: any team)')
                 .setRequired(false)
         ),
 
@@ -51,32 +52,46 @@ module.exports = {
         try {
             if (!message.guild) return;
 
-            const organizer = await isOrganizer(message.guild.id, message.author.id);
+            const guildId = message.guild.id;
+            const userId = message.author.id;
+            const organizer = await isOrganizer(guildId, userId);
 
             let logoURL = null;
             let teamName = null;
+            let rest = args;
 
-            if (message.attachments.first()) {
-                logoURL = message.attachments.first().url;
+            // Optional explicit team= token (works for captains and organizers)
+            const token = await parseTeamToken(guildId, userId, args);
+            if (token.teamName) {
+                teamName = token.teamName;
+                rest = token.rest;
+            }
 
-                if (organizer && args.length) {
-                    teamName = args.join(' ').trim();
+            if (organizer && !teamName) {
+                // Organizer legacy flexible parsing
+                if (message.attachments.first()) {
+                    logoURL = message.attachments.first().url;
+                    if (args.length) teamName = args.join(' ').trim();
+                } else {
+                    const urlIndex = args.findIndex(arg => /^https?:\/\//i.test(arg));
+                    if (urlIndex !== -1) {
+                        logoURL = args[urlIndex];
+                        if (urlIndex > 0) teamName = args.slice(0, urlIndex).join(' ').trim();
+                    }
                 }
             } else {
-                const urlIndex = args.findIndex(arg => /^https?:\/\//i.test(arg));
-
-                if (urlIndex !== -1) {
-                    logoURL = args[urlIndex];
-
-                    if (organizer && urlIndex > 0) {
-                        teamName = args.slice(0, urlIndex).join(' ').trim();
-                    }
+                // Captain (or organizer with team= token)
+                if (message.attachments.first()) {
+                    logoURL = message.attachments.first().url;
+                } else {
+                    const urlIndex = rest.findIndex(arg => /^https?:\/\//i.test(arg));
+                    if (urlIndex !== -1) logoURL = rest[urlIndex];
                 }
             }
 
             return await runSetLogo({
                 guild: message.guild,
-                userId: message.author.id,
+                userId,
                 organizer,
                 teamName,
                 logoURL,
@@ -127,17 +142,45 @@ module.exports = {
 
 /**
  * Set a team's logo.
- * Captain/VC path: resolve team from user's membership.
- * Organizer path: resolve team by name argument.
+ * Team resolution via resolveManagedTeam (organizer: any, captain: own teams).
  */
 async function runSetLogo({ guild, userId, organizer, teamName, logoURL, reply }) {
-    const team = await resolveTeam({ guild, userId, organizer, teamName });
+    const resolved = await resolveManagedTeam({
+        guildId: guild.id,
+        userId,
+        organizer,
+        teamName
+    });
 
-    if (!team) {
+    if (resolved.status === 'ambiguous') {
+        const list = resolved.teams.map(t => `• **${t.name}**`).join('\n');
         return reply({
-            content: organizer && teamName
-                ? `❌ Team not found: \`${teamName}\``
-                : '🚫 Only **Team Captains / Vice Captains** can set their own logo. Organizers can use `.setlogo <team name> <image link>`.'
+            content:
+                `🤔 You manage more than one team:\n${list}\n\n` +
+                `Specify which one:\n` +
+                `Prefix: \`.setlogo team=<Team Name> <image_link>\` (or attach the image)\n` +
+                `Slash: \`/setlogo team:<Team Name> image_url:<link>\``
+        });
+    }
+
+    if (resolved.status === 'not_found') {
+        return reply({ content: `❌ Team not found: \`${resolved.teamName}\`` });
+    }
+
+    if (resolved.status === 'not_yours') {
+        const list = resolved.teams.length
+            ? `\nYour teams:\n${resolved.teams.map(t => `• **${t.name}**`).join('\n')}`
+            : '';
+        return reply({
+            content: `🚫 **${resolved.teamName}** is not one of your teams.${list}`
+        });
+    }
+
+    if (!resolved.team) {
+        return reply({
+            content: organizer
+                ? '🚫 Organizers must name a team: `.setlogo <team name> <image link>`.'
+                : '🚫 You are not a **Team Captain / Vice Captain** of any team yet.'
         });
     }
 
@@ -145,8 +188,9 @@ async function runSetLogo({ guild, userId, organizer, teamName, logoURL, reply }
         return reply({
             content:
                 '❓ Usage:\n' +
-                'Captain: `.setlogo <image_link>` or attach image with `.setlogo`\n' +
-                'Organizer: `.setlogo <team name> <image_link>` or attach image with `.setlogo <team name>`'
+                'Captain: `.setlogo <image_link>` (or attach an image)\n' +
+                'Captain, specific team: `.setlogo team=<Team Name> <image_link>`\n' +
+                'Organizer: `.setlogo <team name> <image_link>` (or attach with the team name)'
         });
     }
 
@@ -158,6 +202,7 @@ async function runSetLogo({ guild, userId, organizer, teamName, logoURL, reply }
         });
     }
 
+    const team = resolved.team;
     team.logoURL = logoURL;
     await team.save();
 
@@ -174,37 +219,6 @@ async function runSetLogo({ guild, userId, organizer, teamName, logoURL, reply }
 /* ====================================================
    HELPERS
 ==================================================== */
-
-/**
- * Resolve which team to operate on.
- * Organizer + teamName → find by name.
- * Otherwise → find by captain/VC membership.
- */
-async function resolveTeam({ guild, userId, organizer, teamName }) {
-    if (organizer && teamName) {
-        return Team.findOne({
-            guildId: guild.id,
-            name: {
-                $regex: new RegExp(`^${escapeRegex(teamName)}$`, 'i')
-            }
-        });
-    }
-
-    // Captain or vice captain
-    let team = await Team.findOne({
-        guildId: guild.id,
-        captainID: userId
-    });
-
-    if (!team) {
-        team = await Team.findOne({
-            guildId: guild.id,
-            viceCaptainID: userId
-        });
-    }
-
-    return team;
-}
 
 /** Check if a URL points to a valid image format. */
 function isValidImageUrl(url) {

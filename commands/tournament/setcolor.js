@@ -2,10 +2,12 @@
  * setcolor.js
  *
  * Set your team color, or set any team color as organizer.
- * Captain/VC can set their own team's color. Organizers can set any team.
+ * Captain/VC can set their own team's color (including per-tournament teams
+ * they captain). Organizers can set any team.
  *
  * Usage:  .setcolor <color name OR hex>
- *         .setcolor <team name> <color>  (organizer only)
+ *         .setcolor team=<Team Name> <color>   (pick one of your teams)
+ *         .setcolor <team name> <color>        (organizer only)
  * Slash:  /setcolor color:<color> [team:<name>]
  *
  * Aliases: teamcolor
@@ -16,14 +18,13 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const { Team } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { escapeRegex } = require('../../utils/stringHelpers');
+const { parseTeamToken, resolveManagedTeam } = require('../../utils/teamResolver');
 
 module.exports = {
     name: 'setcolor',
     description: 'Set your team color, or set any team color as organizer.',
-    usage: '.setcolor [team name] <color name OR hex>',
+    usage: '.setcolor [team=<name>] <color name OR hex> | Organizer: .setcolor <team name> <color>',
     aliases: ['teamcolor'],
     hidden: false,
     cooldown: 5,
@@ -38,7 +39,7 @@ module.exports = {
         )
         .addStringOption(opt =>
             opt.setName('team')
-                .setDescription('Organizer only: team name')
+                .setDescription('Team name (captain: one of your teams • organizer: any team)')
                 .setRequired(false)
         ),
 
@@ -50,24 +51,46 @@ module.exports = {
         try {
             if (!message.guild) return;
 
-            const organizer = await isOrganizer(message.guild.id, message.author.id);
+            const guildId = message.guild.id;
+            const userId = message.author.id;
+            const organizer = await isOrganizer(guildId, userId);
 
             if (!args.length) {
                 return message.reply(
                     '❓ Usage:\n' +
                     'Captain: `.setcolor red`\n' +
+                    'Captain, specific team: `.setcolor team=Bravo red`\n' +
                     'Organizer: `.setcolor Falcons red`'
                 );
             }
 
-            const colorInput = args[args.length - 1];
-            const teamName = organizer && args.length > 1
-                ? args.slice(0, -1).join(' ').trim()
-                : null;
+            let colorInput;
+            let teamName;
+
+            if (organizer) {
+                // Organizer: last arg is the color, the rest is the team name
+                colorInput = args[args.length - 1];
+                teamName = args.length > 1 ? args.slice(0, -1).join(' ').trim() : null;
+            } else {
+                // Captain: optional team= token, last remaining arg is the color
+                const token = await parseTeamToken(guildId, userId, args);
+                const rest = token.teamName ? token.rest : args;
+
+                if (!rest.length) {
+                    return message.reply(
+                        '❓ Usage:\n' +
+                        'Captain: `.setcolor red`\n' +
+                        'Captain, specific team: `.setcolor team=Bravo red`'
+                    );
+                }
+
+                colorInput = rest[rest.length - 1];
+                teamName = token.teamName;
+            }
 
             return await runSetColor({
                 guild: message.guild,
-                userId: message.author.id,
+                userId,
                 organizer,
                 teamName,
                 colorInput,
@@ -160,17 +183,45 @@ function parseColorInput(input) {
 
 /**
  * Set a team's color.
- * Captain/VC path: resolve team from user's membership.
- * Organizer path: resolve team by name argument.
+ * Team resolution via resolveManagedTeam (organizer: any, captain: own teams).
  */
 async function runSetColor({ guild, userId, organizer, teamName, colorInput, reply }) {
-    const team = await resolveTeam({ guild, userId, organizer, teamName });
+    const resolved = await resolveManagedTeam({
+        guildId: guild.id,
+        userId,
+        organizer,
+        teamName
+    });
 
-    if (!team) {
+    if (resolved.status === 'ambiguous') {
+        const list = resolved.teams.map(t => `• **${t.name}**`).join('\n');
         return reply({
-            content: organizer && teamName
-                ? `❌ Team not found: \`${teamName}\``
-                : '🚫 Only **Team Captains / Vice Captains** can set their own color. Organizers can use `.setcolor <team name> <color>`.'
+            content:
+                `🤔 You manage more than one team:\n${list}\n\n` +
+                `Specify which one:\n` +
+                `Prefix: \`.setcolor team=<Team Name> <color>\`\n` +
+                `Slash: \`/setcolor color:<color> team:<Team Name>\``
+        });
+    }
+
+    if (resolved.status === 'not_found') {
+        return reply({ content: `❌ Team not found: \`${resolved.teamName}\`` });
+    }
+
+    if (resolved.status === 'not_yours') {
+        const list = resolved.teams.length
+            ? `\nYour teams:\n${resolved.teams.map(t => `• **${t.name}**`).join('\n')}`
+            : '';
+        return reply({
+            content: `🚫 **${resolved.teamName}** is not one of your teams.${list}`
+        });
+    }
+
+    if (!resolved.team) {
+        return reply({
+            content: organizer
+                ? '🚫 Organizers must name a team: `.setcolor <team name> <color>`.'
+                : '🚫 You are not a **Team Captain / Vice Captain** of any team yet.'
         });
     }
 
@@ -184,6 +235,7 @@ async function runSetColor({ guild, userId, organizer, teamName, colorInput, rep
         });
     }
 
+    const team = resolved.team;
     team.color = parsed.hex;
     await team.save();
 
@@ -199,37 +251,4 @@ async function runSetColor({ guild, userId, organizer, teamName, colorInput, rep
     return reply({ embeds: [embed] });
 }
 
-/* ====================================================
-   HELPERS
-==================================================== */
 
-/**
- * Resolve which team to operate on.
- * Organizer + teamName → find by name.
- * Otherwise → find by captain/VC membership.
- */
-async function resolveTeam({ guild, userId, organizer, teamName }) {
-    if (organizer && teamName) {
-        return Team.findOne({
-            guildId: guild.id,
-            name: {
-                $regex: new RegExp(`^${escapeRegex(teamName)}$`, 'i')
-            }
-        });
-    }
-
-    // Captain or vice captain
-    let team = await Team.findOne({
-        guildId: guild.id,
-        captainID: userId
-    });
-
-    if (!team) {
-        team = await Team.findOne({
-            guildId: guild.id,
-            viceCaptainID: userId
-        });
-    }
-
-    return team;
-}
