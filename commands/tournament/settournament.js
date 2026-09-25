@@ -67,6 +67,12 @@ module.exports = {
         .addIntegerOption(opt => opt.setName('pointsdraw').setDescription('Points for draw').setRequired(false))
         .addIntegerOption(opt => opt.setName('pointsloss').setDescription('Points for loss').setRequired(false))
         .addBooleanOption(opt => opt.setName('registrationopen').setDescription('Registration open?').setRequired(false))
+        .addBooleanOption(opt =>
+            opt
+                .setName('manualregistration')
+                .setDescription('Manual registration: no auto-sync, captains register per-tournament')
+                .setRequired(false)
+        )
         .addStringOption(opt =>
             opt.setName('currentphase')
                 .setDescription('Current phase')
@@ -155,6 +161,7 @@ module.exports = {
                 pointsDraw: interaction.options.getInteger('pointsdraw') ?? undefined,
                 pointsLoss: interaction.options.getInteger('pointsloss') ?? undefined,
                 registrationOpen: interaction.options.getBoolean('registrationopen') ?? undefined,
+                manualRegistration: interaction.options.getBoolean('manualregistration') ?? undefined,
                 currentPhase: interaction.options.getString('currentphase') ?? undefined,
                 captainRoleId: captainRole?.id ?? undefined,
                 tournamentPlayerRoleId: playerRole?.id ?? undefined
@@ -190,12 +197,25 @@ async function runSetup({ guild, tournamentKey, data, reply }) {
 
     const sync = await syncAllTeamsToTournament(guild.id, settings);
 
+    let syncLine;
+
+    if (settings.manualRegistration === true) {
+        syncLine =
+            '🖐️ **Manual registration mode ON** — existing teams were NOT auto-synced.\n' +
+            'Captains must register per-tournament:\n' +
+            '`/register team_name:<Team Name> tournament:' + settings.tournamentKey + '`\n' +
+            '`/addplayer user:<@user> tournament:' + settings.tournamentKey + '`';
+    } else {
+        syncLine =
+            `🔄 Auto-synced teams: **${sync.syncedTeams}**\n` +
+            `🔄 Auto-synced players: **${sync.syncedPlayers}**`;
+    }
+
     return reply({
         content:
             `✅ **Tournament saved successfully.**\n\n` +
             `${buildSummary(settings)}\n\n` +
-            `🔄 Auto-synced teams: **${sync.syncedTeams}**\n` +
-            `🔄 Auto-synced players: **${sync.syncedPlayers}**`
+            syncLine
     });
 }
 
@@ -217,6 +237,7 @@ function buildUpdatePayload(guildId, tournamentKey, data) {
     if (typeof data.pointsDraw !== 'undefined') payload.pointsDraw = data.pointsDraw;
     if (typeof data.pointsLoss !== 'undefined') payload.pointsLoss = data.pointsLoss;
     if (typeof data.registrationOpen !== 'undefined') payload.registrationOpen = data.registrationOpen;
+    if (typeof data.manualRegistration !== 'undefined') payload.manualRegistration = data.manualRegistration;
     if (typeof data.currentPhase !== 'undefined') payload.currentPhase = data.currentPhase;
     if (typeof data.captainRoleId !== 'undefined') payload.captainRoleId = data.captainRoleId;
     if (typeof data.tournamentPlayerRoleId !== 'undefined') payload.tournamentPlayerRoleId = data.tournamentPlayerRoleId;
@@ -267,6 +288,7 @@ function normalizeAliases(data) {
         pointsdraw: 'pointsDraw',
         pointsloss: 'pointsLoss',
         registrationopen: 'registrationOpen',
+        manualregistration: 'manualRegistration',
         currentphase: 'currentPhase'
     };
 
@@ -327,6 +349,7 @@ function buildSummary(settings) {
         `**Knockouts:** ${settings.hasKnockout ? 'Yes' : 'No'}`,
         `**Current Phase:** ${settings.currentPhase}`,
         `**Registration Open:** ${settings.registrationOpen ? 'Yes' : 'No'}`,
+        `**Manual Registration:** ${settings.manualRegistration ? 'Yes' : 'No'}`,
         `**Captain Role:** ${settings.captainRoleId ? `<@&${settings.captainRoleId}>` : 'None'}`,
         `**Player Role:** ${settings.tournamentPlayerRoleId ? `<@&${settings.tournamentPlayerRoleId}>` : 'None'}`
     ].join('\n');

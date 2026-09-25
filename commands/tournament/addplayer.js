@@ -5,10 +5,16 @@
  * Captain or Vice Captain only. Creates a global Player record,
  * syncs to active tournaments, and optionally assigns the tournament player role.
  *
+ * With the optional `tournament` option, the player is added to your team
+ * in ONE specific tournament (manual registration mode). Conflict checks are
+ * per-tournament, so a player who is on a team in another tournament can
+ * still join your team here — their global profile stays on their original
+ * team.
+ *
  * If no player name is given, the Discord username is used automatically.
  *
- * Usage: .addplayer @user [Player Name]
- * Slash: /addplayer user:<user> [player_name:<name>]
+ * Usage: .addplayer @user [Player Name] [tournament=<key>]
+ * Slash: /addplayer user:<user> [player_name:<name>] [tournament:<key>]
  *
  * Aliases: ap
  */
@@ -19,14 +25,20 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const { Player, Team, TournamentSettings } = require('../../models/Tournament');
+const {
+    Player,
+    Team,
+    TournamentSettings,
+    TournamentTeam,
+    TournamentPlayer
+} = require('../../models/Tournament');
 const { syncPlayerToOpenTournaments } = require('../../utils/tournamentSync');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
 
 module.exports = {
     name: 'addplayer',
     description: 'Add a player to your global team.',
-    usage: '.addplayer @user [Player Name]',
+    usage: '.addplayer @user [Player Name] [tournament=<key>]',
     aliases: ['ap'],
     hidden: false,
     cooldown: 3,
@@ -44,6 +56,12 @@ module.exports = {
             opt.setName('player_name')
                 .setDescription('Player display name (defaults to Discord username)')
                 .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt
+                .setName('tournament')
+                .setDescription('Optional: add to your team in ONE specific tournament (manual registration)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -58,13 +76,11 @@ module.exports = {
                 || await getUserFromArgs(message, args);
 
             if (!target) {
-                return message.reply('❓ Usage: `.addplayer @user [Player Name]`');
+                return message.reply('❓ Usage: `.addplayer @user [Player Name] [tournament=<key>]`');
             }
 
             // Build custom name: strip mention tokens from args, join the rest
-            const cleanArgs = args
-                .map(a => a.replace(/<@!?\d+>/, '').trim())
-                .filter(Boolean);
+            const { tournamentKey, cleanArgs } = parseAddPlayerArgs(args);
             const customName = cleanArgs.join(' ').trim() || null;
 
             return await runAddPlayer({
@@ -72,6 +88,7 @@ module.exports = {
                 captainUserId: message.author.id,
                 targetUser: target,
                 customName,
+                tournamentKey,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -90,12 +107,14 @@ module.exports = {
 
             const target = interaction.options.getUser('user');
             const customName = interaction.options.getString('player_name') || null;
+            const tournamentKey = interaction.options.getString('tournament')?.toLowerCase() || null;
 
             return await runAddPlayer({
                 guild: interaction.guild,
                 captainUserId: interaction.user.id,
                 targetUser: target,
                 customName,
+                tournamentKey,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -114,15 +133,73 @@ module.exports = {
 };
 
 /* ====================================================
-   CORE LOGIC
+   PREFIX PARSING
 ==================================================== */
 
 /**
- * Add a new player to a team.
- * Validates: name length, actor is captain/VC, target not already registered,
- * target is not a captain of another team.
+ * Split prefix args into: the `tournament=<key>` token (optional) and the
+ * remaining name parts (mention tokens stripped).
  */
-async function runAddPlayer({ guild, captainUserId, targetUser, customName, reply }) {
+function parseAddPlayerArgs(args) {
+    let tournamentKey = null;
+    const cleanArgs = [];
+
+    for (const arg of args) {
+        if (arg.toLowerCase().startsWith('tournament=')) {
+            tournamentKey = arg.split('=')[1]?.trim().toLowerCase() || null;
+            continue;
+        }
+        const cleaned = arg.replace(/<@!?\d+>/, '').trim();
+        if (cleaned) cleanArgs.push(cleaned);
+    }
+
+    return { tournamentKey, cleanArgs };
+}
+
+/* ====================================================
+   CORE LOGIC
+==================================================== */
+
+async function runAddPlayer({
+    guild,
+    captainUserId,
+    targetUser,
+    customName,
+    tournamentKey,
+    reply
+}) {
+    if (tournamentKey) {
+        return runTournamentAddPlayer({
+            guild,
+            captainUserId,
+            targetUser,
+            customName,
+            tournamentKey,
+            reply
+        });
+    }
+
+    return runGlobalAddPlayer({
+        guild,
+        captainUserId,
+        targetUser,
+        customName,
+        reply
+    });
+}
+
+/**
+ * GLOBAL addplayer (original behavior):
+ * Validates: name length, actor is captain/VC, target not already
+ * registered globally, target is not a captain of another team.
+ */
+async function runGlobalAddPlayer({
+    guild,
+    captainUserId,
+    targetUser,
+    customName,
+    reply
+}) {
     const targetUserId = targetUser.id;
 
     /* ── Resolve player name: custom or Discord username ── */
@@ -233,6 +310,269 @@ async function runAddPlayer({ guild, captainUserId, targetUser, customName, repl
     return reply({ embeds: [embed] });
 }
 
+/**
+ * TOURNAMENT addplayer (manual registration mode):
+ * Adds a player to your team in ONE specific tournament only.
+ *
+ * - Captain/VC is resolved per-tournament (TournamentTeam.captainID /
+ *   viceCaptainID), with a fallback to the global team captain/VC.
+ * - Conflict checks are per-tournament: a player who is on a team in
+ *   ANOTHER tournament can still join here.
+ * - The target's global profile is only created when they have none;
+ *   otherwise it stays on their original team.
+ */
+async function runTournamentAddPlayer({
+    guild,
+    captainUserId,
+    targetUser,
+    customName,
+    tournamentKey,
+    reply
+}) {
+    const targetUserId = targetUser.id;
+
+    /* ── Resolve player name: custom or Discord username ── */
+    const cleanName = (customName && customName.trim()) || targetUser.username || 'Unknown';
+
+    if (cleanName.length < 2) {
+        return reply({ content: '❌ Please provide a valid player name (at least 2 characters).' });
+    }
+
+    /* ── Resolve tournament ── */
+    const tournament = await TournamentSettings.findOne({
+        guildId: guild.id,
+        tournamentKey
+    });
+
+    if (!tournament) {
+        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    }
+
+    if (tournament.currentPhase === 'completed') {
+        return reply({
+            content: `❌ **${tournament.name}** is already completed.`
+        });
+    }
+
+    /* ── Self-add check ── */
+    if (targetUserId === captainUserId) {
+        return reply({ content: '❌ You are already a player of this team in this tournament.' });
+    }
+
+    /* ── Resolve actor's team in THIS tournament ── */
+    let entry = await TournamentTeam.findOne({
+        guildId: guild.id,
+        tournamentId: tournament._id,
+        isActive: true,
+        $or: [
+            { captainID: captainUserId },
+            { viceCaptainID: captainUserId }
+        ]
+    }).populate('teamId');
+
+    let team = entry?.teamId || null;
+    let usedGlobalFallback = false;
+
+    if (!team) {
+        /* Fallback: actor's global team, if it has an entry in this tournament. */
+        const globalTeam = await Team.findOne({
+            guildId: guild.id,
+            $or: [
+                { captainID: captainUserId },
+                { viceCaptainID: captainUserId }
+            ]
+        });
+
+        if (globalTeam) {
+            entry = await TournamentTeam.findOne({
+                guildId: guild.id,
+                tournamentId: tournament._id,
+                teamId: globalTeam._id
+            }).populate('teamId');
+
+            if (entry) {
+                team = entry.teamId;
+                usedGlobalFallback = true;
+            }
+        }
+    }
+
+    if (!team || !entry) {
+        return reply({
+            content:
+                `🚫 You are not a captain or vice captain of a team in ` +
+                `**${tournament.name}**.\n` +
+                `Register your team first: \`/register team_name:<Team Name> tournament:${tournament.tournamentKey}\``
+        });
+    }
+
+    if (!entry.isActive) {
+        return reply({
+            content: `❌ **${team.name}** is not active in **${tournament.name}**.`
+        });
+    }
+
+    /* ── Per-tournament conflict: target already a player in this tournament ── */
+    const targetPlayer = await Player.findOne({
+        guildId: guild.id,
+        discordID: targetUserId
+    }).populate('teamId');
+
+    if (targetPlayer) {
+        const targetTourPlayer = await TournamentPlayer.findOne({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            playerId: targetPlayer._id,
+            isActive: true
+        });
+
+        if (targetTourPlayer) {
+            const linkedTeam = targetTourPlayer.teamNameSnapshot || 'another team';
+            return reply({
+                content:
+                    `❌ <@${targetUserId}> is already on **${linkedTeam}** in ` +
+                    `**${tournament.name}**.\n` +
+                    `One team per tournament.`
+            });
+        }
+
+        /* Per-tournament conflict: target captains another team here. */
+        const targetCaptainEntry = await TournamentTeam.findOne({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            isActive: true,
+            captainID: targetUserId
+        });
+
+        if (targetCaptainEntry && String(targetCaptainEntry.teamId) !== String(team._id)) {
+            return reply({
+                content:
+                    `❌ <@${targetUserId}> already captains ` +
+                    `**${targetCaptainEntry.teamNameSnapshot}** in **${tournament.name}**.`
+            });
+        }
+    }
+
+    /* ── Ensure the target has a global player record ── */
+    let player = targetPlayer;
+    let affiliationNote = null;
+
+    if (!player) {
+        player = await Player.create({
+            guildId: guild.id,
+            name: cleanName,
+            discordID: targetUserId,
+            discordUsername: targetUser.username?.toLowerCase() || null,
+            teamId: team._id,
+            teamNameSnapshot: team.name,
+            isCaptain: false,
+            isViceCaptain: false
+        });
+    } else if (
+        String(player.teamId?._id || '') !== String(team._id) &&
+        (player.teamId || String(player.teamNameSnapshot || '').toUpperCase() === 'FREE AGENT')
+    ) {
+        /*
+         * The target belongs to a DIFFERENT global team (in another
+         * tournament). Leave the global record untouched; membership in
+         * this tournament is stored on the TournamentPlayer entry below.
+         */
+        affiliationNote =
+            `<@${targetUserId}> stays on **${player.teamId?.name || player.teamNameSnapshot}** globally — ` +
+            `they join **${team.name}** for **${tournament.name}** only.`;
+    } else {
+        /*
+         * No team yet (free agent) or already on this team — keep/align
+         * the global record with this team.
+         */
+        if (!player.teamId || String(player.teamNameSnapshot || '').toUpperCase() === 'FREE AGENT') {
+            await Player.updateOne(
+                { _id: player._id },
+                {
+                    $set: {
+                        teamId: team._id,
+                        teamNameSnapshot: team.name
+                    }
+                }
+            );
+        }
+    }
+
+    /* ── Create / reactivate the tournament player entry ── */
+    await TournamentPlayer.findOneAndUpdate(
+        {
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            playerId: player._id
+        },
+        {
+            $set: {
+                guildId: guild.id,
+                tournamentId: tournament._id,
+                playerId: player._id,
+                teamId: team._id,
+                playerNameSnapshot: player.name || cleanName,
+                teamNameSnapshot: team.name,
+                isActive: true
+            },
+            $setOnInsert: {
+                isCaptain: false,
+                isViceCaptain: false,
+                stats: {
+                    played: 0,
+                    goals: 0,
+                    assists: 0,
+                    saves: 0,
+                    tackles: 0,
+                    interceptions: 0,
+                    yc: 0,
+                    rc: 0,
+                    mvps: 0
+                }
+            }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    /* ── Assign tournament player role (from THIS tournament's settings) ── */
+    const targetMember = await guild.members.fetch(targetUserId).catch(() => null);
+
+    const roleResult = await tryAssignRole({
+        guild,
+        member: targetMember,
+        roleId: tournament.tournamentPlayerRoleId || ''
+    });
+
+    /* ── Response ── */
+    const embed = new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle(`🏃 PLAYER ADDED — ${tournament.name}`)
+        .setDescription(
+            `${tournament.emoji || '🏆'} **${player.name}** joined **${team.name}** in **${tournament.name}**\n` +
+            `Key: \`${tournament.tournamentKey}\`\n` +
+            `👤 Linked to: <@${targetUserId}>\n` +
+            (affiliationNote ? `\nℹ️ ${affiliationNote}` : '')
+        )
+        .addFields(
+            {
+                name: 'Scope',
+                value:
+                    usedGlobalFallback
+                        ? 'Added via your global team in this tournament.'
+                        : 'Added to your team in this tournament only (manual registration).',
+                inline: false
+            },
+            {
+                name: 'Tournament Player Role',
+                value: buildRoleStatusText(roleResult),
+                inline: false
+            }
+        )
+        .setTimestamp();
+
+    return reply({ embeds: [embed] });
+}
+
 /* ====================================================
    ROLE ASSIGNMENT
 ==================================================== */
@@ -277,6 +617,7 @@ function buildRoleStatusText(result) {
         case 'role_too_high': return `Role too high: <@&${result.role.id}>`;
         case 'managed_role': return 'Managed role cannot be assigned';
         case 'member_missing': return 'Member not found';
+        case 'bot_member_missing': return 'Bot member missing';
         case 'assign_failed': return `Failed to assign: <@&${result.role.id}>`;
         default: return 'Unknown';
     }

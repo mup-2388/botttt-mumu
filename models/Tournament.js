@@ -117,6 +117,16 @@ const tournamentSettingsSchema = new mongoose.Schema(
             default: true
         },
 
+        // Manual registration mode: auto-sync (settournament / register /
+        // addplayer) will NOT add teams or players to this tournament.
+        // Captains must explicitly register via:
+        //   /register team_name:<name> tournament:<key>
+        //   /addplayer user:<user> tournament:<key>
+        manualRegistration: {
+            type: Boolean,
+            default: false
+        },
+
         captainRoleId: {
             type: String,
             default: ''
@@ -359,6 +369,19 @@ const tournamentTeamSchema = new mongoose.Schema(
             default: ''
         },
 
+        // Per-tournament captain / vice captain.
+        // Lets a user captain a team in this tournament even if they
+        // manage a different team in another tournament.
+        captainID: {
+            type: String,
+            default: null
+        },
+
+        viceCaptainID: {
+            type: String,
+            default: null
+        },
+
         groupKey: {
             type: String,
             default: null
@@ -385,6 +408,10 @@ const tournamentTeamSchema = new mongoose.Schema(
 tournamentTeamSchema.index(
     { guildId: 1, tournamentId: 1, teamId: 1 },
     { unique: true }
+);
+
+tournamentTeamSchema.index(
+    { guildId: 1, tournamentId: 1, captainID: 1 }
 );
 
 /*

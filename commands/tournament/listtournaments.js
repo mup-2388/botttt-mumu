@@ -118,7 +118,9 @@ async function runList({ guild, reply }) {
             `${tournament.emoji || '🏆'} **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n` +
             `Phase: **${tournament.currentPhase || 'setup'}**\n` +
-            `Teams: **${teamCount}** • Players: **${playerCount}**`
+            `Teams: **${teamCount}** • Players: **${playerCount}**\n` +
+            `Registration: **${tournament.registrationOpen ? 'Open' : 'Closed'}**` +
+            (tournament.manualRegistration ? ` • 🖐️ Manual (no auto-sync)` : '')
         );
     });
 
