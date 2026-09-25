@@ -59,6 +59,54 @@ async function getManagedTeams(guildId, userId) {
 }
 
 /**
+ * Every team this user CAPTAINS (global captain only — not VC),
+ * plus teams where they are the per-tournament captain.
+ * Global teams first, then alphabetical.
+ */
+async function getCaptainTeams(guildId, userId) {
+    const globalTeams = await Team.find({ guildId, captainID: userId });
+
+    const ids = new Set(globalTeams.map(t => String(t._id)));
+
+    const tourEntries = await TournamentTeam.find({
+        guildId,
+        isActive: true,
+        captainID: userId
+    });
+    for (const entry of tourEntries) {
+        if (entry.teamId) ids.add(String(entry.teamId));
+    }
+
+    const teams = [];
+    for (const id of ids) {
+        const team = await Team.findOne({ guildId, _id: id });
+        if (team) teams.push(team);
+    }
+
+    const globalIds = new Set(globalTeams.map(t => String(t._id)));
+    teams.sort((a, b) => {
+        const aGlobal = globalIds.has(String(a._id)) ? 0 : 1;
+        const bGlobal = globalIds.has(String(b._id)) ? 0 : 1;
+        if (aGlobal !== bGlobal) return aGlobal - bGlobal;
+        return a.name.localeCompare(b.name);
+    });
+
+    return teams;
+}
+
+/** Does this user captain this team (globally or in any active tournament)? */
+async function isCaptainOfTeam(userId, team) {
+    if (String(team.captainID || '') === String(userId)) return true;
+    const entry = await TournamentTeam.findOne({
+        guildId: team.guildId,
+        teamId: team._id,
+        isActive: true,
+        captainID: userId
+    });
+    return !!entry;
+}
+
+/**
  * Parse an optional `team=<Name>` token from prefix args.
  * The name may span several args ("team=New Warriors <value>…"); the longest
  * match against the user's managed team names wins.
@@ -151,6 +199,8 @@ async function resolveManagedTeam({ guildId, userId, organizer, teamName }) {
 
 module.exports = {
     getManagedTeams,
+    getCaptainTeams,
+    isCaptainOfTeam,
     parseTeamToken,
     resolveManagedTeam
 };
