@@ -26,6 +26,7 @@ const {
 
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
+const { optionalStep } = require('../../utils/optionalStep');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 module.exports = {
@@ -83,7 +84,9 @@ module.exports = {
             });
         } catch (error) {
             console.error('[removeteamfromtournament] prefix error:', error);
-            return message.reply('❌ Failed to remove team from tournament.');
+            return message.reply(
+                '❌ Failed to remove team from tournament.\n`' + String(error?.message || error).slice(0, 200) + '`'
+            );
         }
     },
 
@@ -108,11 +111,18 @@ module.exports = {
         } catch (error) {
             console.error('[removeteamfromtournament] slash error:', error);
 
+            const reason = String(error?.message || error).slice(0, 200);
+
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ Failed to remove team from tournament.');
+                return interaction.editReply(
+                    '❌ Failed to remove team from tournament.\n`' + reason + '`'
+                );
             }
 
-            return interaction.reply({ content: '❌ Failed to remove team from tournament.', ephemeral: true });
+            return interaction.reply({
+                content: '❌ Failed to remove team from tournament.\n`' + reason + '`',
+                ephemeral: true
+            });
         }
     }
 };
@@ -151,11 +161,29 @@ async function runRemove({ guild, tournamentKey, teamName, reply }) {
     const entry = await TournamentTeam.findOne({
         guildId: guild.id,
         tournamentId: tournament._id,
-        teamId: team._id
+        teamId: team._id,
+        isActive: { $ne: false }
     });
 
     if (!entry) {
-        return reply({ content: `❌ **${team.name}** is not in **${tournament.name}**.` });
+        const existing = await TournamentTeam.findOne({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            teamId: team._id
+        })
+            .lean()
+            .catch(() => null);
+
+        if (existing) {
+            return reply({
+                content:
+                    `ℹ️ **${team.name}** is already out of **${tournament.name}** — nothing changed.`
+            });
+        }
+
+        return reply({
+            content: `ℹ️ **${team.name}** is not part of **${tournament.name}** — nothing to remove.`
+        });
     }
 
     /* ── Deactivate tournament team ── */
@@ -172,12 +200,19 @@ async function runRemove({ guild, tournamentKey, teamName, reply }) {
         { $set: { isActive: false } }
     );
 
-    /* ── Apply walkovers to remaining fixtures ── */
-    const walkoverResult = await applyWalkovers({
-        guildId: guild.id,
-        tournament,
-        withdrawnTeam: team
-    });
+    /* ── Apply walkovers to remaining fixtures (optional follow-up) ──
+       The team is already withdrawn above, so a failure here must not turn
+       the command into "❌ Failed to remove team from tournament". */
+    const walkoverResult = await optionalStep(
+        'removeteamfromtournament: walkovers',
+        () =>
+            applyWalkovers({
+                guildId: guild.id,
+                tournament,
+                withdrawnTeam: team
+            }),
+        { updatedFixtures: 0, opponentWins: 0, withdrawnLosses: 0, failed: true }
+    );
 
     /* ── Response ── */
     const embed = new EmbedBuilder()
@@ -190,10 +225,11 @@ async function runRemove({ guild, tournamentKey, teamName, reply }) {
         )
         .addFields({
             name: 'Walkovers Applied',
-            value:
-                `Fixtures reported 3-0: **${walkoverResult.updatedFixtures}**\n` +
-                `Opponent standing wins: **${walkoverResult.opponentWins}**\n` +
-                `Withdrawn team losses: **${walkoverResult.withdrawnLosses}**`,
+            value: walkoverResult.failed
+                ? '⚠️ Walkover step failed — fixtures were left unchanged (see the bot console).'
+                : `Fixtures reported 3-0: **${walkoverResult.updatedFixtures}**\n` +
+                  `Opponent standing wins: **${walkoverResult.opponentWins}**\n` +
+                  `Withdrawn team losses: **${walkoverResult.withdrawnLosses}**`,
             inline: false
         })
         .setTimestamp();
