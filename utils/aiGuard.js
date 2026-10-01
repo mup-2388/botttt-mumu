@@ -64,8 +64,18 @@ function detectManipulation(text) {
         .replace(/[’‘`´]/g, "'")
         .replace(/\s+/g, ' ');
 
+    /* "r e p e a t @ e v e r y o n e" — de-space before matching so people
+       cannot sneak the word past the patterns by spacing it out. */
+    const despaced = normalised.replace(/\s+/g, '');
+
     for (const { re, reason } of BAIT_PATTERNS) {
         if (re.test(normalised)) return { flagged: true, reason };
+
+        /* Only the ping-word patterns get the de-spaced pass: matching ordinary
+           sentences without spaces would create false positives. */
+        if (/everyone|here|mass.?ping|ping.?all/i.source && re.test(despaced)) {
+            return { flagged: true, reason };
+        }
     }
 
     return { flagged: false, reason: null };
