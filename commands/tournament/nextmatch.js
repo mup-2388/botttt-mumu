@@ -33,6 +33,7 @@ const {
 } = require('../../utils/getTournament');
 
 const { prettyPhase } = require('../../utils/displayHelpers');
+const { resolveUserTeam } = require('../../utils/tournamentContext');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 const PAGE_SIZE = 4;
@@ -109,15 +110,18 @@ async function runNextMatch({
     teamNameInput,
     reply
 }) {
-    const team = await resolveTeam({ guild, userId, teamNameInput });
+    const resolvedTeam = await resolveTeamForUser({ guild, userId, teamNameInput });
 
-    if (!team) {
+    if (!resolvedTeam?.team) {
         return reply({
             content: teamNameInput
                 ? `🚫 Team not found: \`${teamNameInput}\`.`
-                : '❌ You are not linked to a team. Use `.nm <Team Name>`.'
+                : '❌ You are not linked to a team yet.\n' +
+                  'Use `.nm <Team Name>` to see a team\'s fixtures (e.g. `.nm Reds`).'
         });
     }
+
+    const team = resolvedTeam.team;
 
     const tournaments = await getSelectableTournaments(guild.id);
 
@@ -125,7 +129,9 @@ async function runNextMatch({
         return reply({ content: '📭 No active tournaments found.' });
     }
 
-    let tournament = await getDefaultTournament(guild.id);
+    // Prefer the tournament the team was found in (so a roster-only player
+    // sees THEIR fixtures instead of an empty list from the default tournament).
+    let tournament = resolvedTeam.tournament || await getDefaultTournament(guild.id);
     if (!tournament) tournament = tournaments[0];
 
     let state = await buildState({
@@ -256,37 +262,38 @@ async function buildState({
     };
 }
 
-async function resolveTeam({
+/**
+ * Find the team the command should show.
+ *
+ * With a team name → that team.
+ * Without one → the team the user is on, using the SAME resolution as the
+ * other commands: their team in the tournament (default first), then the
+ * global player record, then any roster / captain entry. Checking only
+ * `Player.teamId` is what used to make roster-only players look "unlinked".
+ *
+ * Returns { team, tournament } (tournament may be null).
+ */
+async function resolveTeamForUser({
     guild,
     userId,
     teamNameInput
 }) {
     if (teamNameInput) {
-        return Team.findOne({
+        const team = await Team.findOne({
             guildId: guild.id,
             name: {
                 $regex: new RegExp(`^${escapeRegex(teamNameInput.trim())}$`, 'i')
             }
         });
+
+        return team ? { team, tournament: null } : null;
     }
 
-    const player = await Player.findOne({
-        guildId: guild.id,
-        discordID: userId
-    }).populate('teamId');
+    const resolved = await resolveUserTeam(guild.id, userId);
 
-    if (player?.teamId) return player.teamId;
+    if (!resolved?.team) return null;
 
-    if (player?.teamNameSnapshot) {
-        return Team.findOne({
-            guildId: guild.id,
-            name: {
-                $regex: new RegExp(`^${escapeRegex(player.teamNameSnapshot)}$`, 'i')
-            }
-        });
-    }
-
-    return null;
+    return { team: resolved.team, tournament: resolved.tournament || null };
 }
 
 async function buildScheduleEmbed(state) {
