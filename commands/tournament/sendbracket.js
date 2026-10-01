@@ -23,7 +23,11 @@ const {
 const { Fixture } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase } = require('../../utils/displayHelpers');
-const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
+const {
+    getDefaultTournament,
+    getTournamentByKey,
+    extractTournamentFromArgs
+} = require('../../utils/getTournament');
 
 module.exports = {
     name: 'sendbracket',
@@ -55,9 +59,13 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            const tournament = args[0]
-                ? await getTournamentByKey(message.guild.id, args[0].toLowerCase())
-                : await getDefaultTournament(message.guild.id);
+            const parsed = await extractTournamentFromArgs(message.guild.id, args);
+
+            if (parsed.explicit && parsed.error) {
+                return message.reply(parsed.error);
+            }
+
+            const tournament = parsed.tournament;
 
             if (!tournament) {
                 return message.reply('❌ Tournament not found.');

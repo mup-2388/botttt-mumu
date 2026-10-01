@@ -26,6 +26,7 @@ const {
 const { getUserFromArgs } = require('../../utils/stringHelpers');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { getDefaultTournament } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'delete-player',
@@ -149,7 +150,8 @@ async function runDeletePlayer({ guild, targetUserId, reply }) {
     ).catch(() => null);
 
     /* ── Remove tournament player role from Discord ── */
-    const settings = await TournamentSettings.findOne({ guildId: guild.id }).catch(() => null);
+    const settings = await getDefaultTournament(guild.id, { includeCompleted: true })
+        .catch(() => null);
     const targetMember = await guild.members.fetch(targetUserId).catch(() => null);
     const roleResult = await tryRemoveRole({
         guild,

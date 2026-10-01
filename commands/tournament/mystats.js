@@ -39,6 +39,7 @@ const {
 const {
     getDefaultTournament,
     getSelectableTournaments,
+    getDefaultTournamentKey,
     getTournamentByKey
 } = require('../../utils/getTournament');
 
@@ -153,14 +154,19 @@ async function getAllCompetitions(guildId) {
 
     const competitions = [];
 
+    const defaultKey = await getDefaultTournamentKey(guildId).catch(() => null);
+
     for (const t of tournaments) {
+        const isDefault = defaultKey && String(t.tournamentKey).toLowerCase() === defaultKey;
+
         competitions.push({
             type: 'tournament',
             key: t.tournamentKey,
             name: t.name || t.tournamentKey,
             doc: t,
+            isDefault,
             value: `tournament:${t.tournamentKey}`,
-            label: `[TOURN] ${truncate(t.name || t.tournamentKey, 70)}`,
+            label: `[TOURN${isDefault ? ' · DEFAULT' : ''}] ${truncate(t.name || t.tournamentKey, 70)}`,
             description: `Key: ${t.tournamentKey}`,
             emoji: t.emoji || '🏆',
             createdAt: t.createdAt
@@ -182,10 +188,10 @@ async function getAllCompetitions(guildId) {
         });
     }
 
-    // Sort: tournaments first? Actually sort by createdAt desc but keep grouping? We'll sort by type then createdAt
-    // For simplicity, sort by createdAt desc overall
+    // Default tournament ALWAYS first (dropdown opens on it), then newest first.
     competitions.sort((a, b) => {
-        // Events and tournaments mixed, newest first
+        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+
         const da = new Date(a.createdAt || 0).getTime();
         const db = new Date(b.createdAt || 0).getTime();
         return db - da;

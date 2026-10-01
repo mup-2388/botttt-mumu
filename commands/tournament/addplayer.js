@@ -276,7 +276,9 @@ async function attemptGlobalAdd({ guild, captainUserId, team, targetUser, custom
 
     const sync = await syncPlayerToOpenTournaments(guild.id, player);
 
-    const newestSettings = await TournamentSettings.findOne({
+    const defaultForRoles = await getDefaultTournament(guild.id);
+
+    const newestSettings = defaultForRoles || await TournamentSettings.findOne({
         guildId: guild.id,
         registrationOpen: true,
         currentPhase: 'registration'

@@ -25,12 +25,13 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 module.exports = {
     name: 'removeteamfromtournament',
     description: 'Remove a team from a tournament and give opponents 3-0 walkover wins.',
-    usage: '.removeteamfromtournament <key> <team name>',
+    usage: '.removeteamfromtournament [key] <team name>',
     aliases: ['removefromtour', 'rtt', 'removetourteam'],
     hidden: false,
     cooldown: 5,
@@ -40,14 +41,14 @@ module.exports = {
         .setName('removeteamfromtournament')
         .setDescription('Remove a team from a specific tournament')
         .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
-        .addStringOption(opt =>
             opt.setName('team')
                 .setDescription('Team name')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -62,14 +63,22 @@ module.exports = {
                 return message.reply('🚫 You are not authorized.');
             }
 
-            if (args.length < 2) {
-                return message.reply('❓ Usage: `.removeteamfromtournament <key> <team name>`');
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            if (!parsedKey.rest.length) {
+                return message.reply(
+                    '❓ Usage: `.removeteamfromtournament [key] <team name>`\n' +
+                    'Without a key the server default tournament is used.'
+                );
             }
 
             return await runRemove({
                 guild: message.guild,
-                tournamentKey: args[0].toLowerCase(),
-                teamName: args.slice(1).join(' '),
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
+                teamName: parsedKey.rest.join(' '),
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -92,7 +101,7 @@ module.exports = {
 
             return await runRemove({
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 teamName: interaction.options.getString('team'),
                 reply: payload => interaction.editReply(payload)
             });
@@ -120,14 +129,13 @@ module.exports = {
  */
 async function runRemove({ guild, tournamentKey, teamName, reply }) {
     /* ── Find tournament ── */
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     /* ── Find team ── */
     const team = await Team.findOne({

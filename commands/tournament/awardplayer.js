@@ -18,6 +18,7 @@ const {
 
 const { Player, TournamentSettings, UserProfile } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
 
 /** Valid award types with display labels */
@@ -31,7 +32,7 @@ const VALID_AWARDS = {
 module.exports = {
     name: 'awardplayer',
     description: 'Award a player.',
-    usage: '.awardplayer <key> @user <award>',
+    usage: '.awardplayer [key] @user <award>',
     aliases: ['giveaward', 'awarduser'],
     hidden: false,
     cooldown: 5,
@@ -40,11 +41,6 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('awardplayer')
         .setDescription('Award a player')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
         .addUserOption(opt =>
             opt.setName('user')
                 .setDescription('Target user')
@@ -60,6 +56,11 @@ module.exports = {
                     { name: 'Golden Glove', value: 'golden_glove' },
                     { name: 'Playmaker', value: 'playmaker' }
                 )
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -74,22 +75,28 @@ module.exports = {
                 return message.reply('🚫 You are not authorized.');
             }
 
-            // Args: [key, user_or_username, award_type]
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            // Args: [key] user_or_username award_type
             // Pass only the user-position args to getUserFromArgs
             const user = message.mentions.users.first()
-                || await getUserFromArgs(message, args.slice(1, -1));
+                || await getUserFromArgs(message, parsedKey.rest.slice(0, -1));
 
-            const award = args[args.length - 1]?.toLowerCase();
+            const award = parsedKey.rest[parsedKey.rest.length - 1]?.toLowerCase();
 
-            if (!args.length || !user || !VALID_AWARDS[award]) {
+            if (!parsedKey.rest.length || !user || !VALID_AWARDS[award]) {
                 return message.reply(
-                    '❓ Usage: `.awardplayer <key> @user <ballon_dor/golden_boot/golden_glove/playmaker>`'
+                    '❓ Usage: `.awardplayer [key] @user <ballon_dor/golden_boot/golden_glove/playmaker>`\n' +
+                    'Without a key the server default tournament is used.'
                 );
             }
 
             return await runAward({
                 guild: message.guild,
-                tournamentKey: args[0].toLowerCase(),
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 discordID: user.id,
                 awardType: award,
                 reply: payload => message.reply(payload)
@@ -114,7 +121,7 @@ module.exports = {
 
             return await runAward({
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 discordID: interaction.options.getUser('user').id,
                 awardType: interaction.options.getString('award'),
                 reply: payload => interaction.editReply(payload)
@@ -141,14 +148,13 @@ module.exports = {
  */
 async function runAward({ guild, tournamentKey, discordID, awardType, reply }) {
     // ── Find tournament ──
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     // ── Find player ──
     const player = await Player.findOne({

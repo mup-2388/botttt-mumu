@@ -26,6 +26,7 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { getDefaultTournament } = require('../../utils/getTournament');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 module.exports = {
@@ -262,7 +263,10 @@ async function runDeleteTeam({ guild, teamName, reply }) {
 
 /** Remove tournament player + captain roles from all affected members. */
 async function removeTeamRoles({ guild, playerDiscordIds, captainId }) {
-    const settings = await TournamentSettings.find({ guildId: guild.id }).lean().catch(() => []);
+    const defaultTournament = await getDefaultTournament(guild.id, { includeCompleted: true })
+        .catch(() => null);
+
+    const settings = defaultTournament ? [defaultTournament] : [];
 
     const captainRoleIds = [
         ...new Set(settings.map(s => s.captainRoleId).filter(Boolean))

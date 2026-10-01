@@ -4,8 +4,10 @@
  * Send a DM to every player on your team (captain/VC only).
  * Skips the sender, tracks delivery success/failure.
  *
- * Usage:  .mt <message>
- * Slash:  /messageteam message:<message>
+ * Works for the server's DEFAULT tournament unless `tournament=<key>` is given.
+ *
+ * Usage:  .mt <message> [tournament=<key>]
+ * Slash:  /messageteam message:<message> [tournament:<key>]
  *
  * Aliases: mt
  */
@@ -16,7 +18,9 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const { Team, Player } = require('../../models/Tournament');
+const { TournamentPlayer } = require('../../models/Tournament');
+const { extractTournamentFromArgs } = require('../../utils/getTournament');
+const { resolveActorTeam, sameId } = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'messageteam',
@@ -33,6 +37,11 @@ module.exports = {
             opt.setName('message')
                 .setDescription('Message to send')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -43,16 +52,22 @@ module.exports = {
         try {
             if (!message.guild) return;
 
-            const content = args.join(' ').trim();
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const content = parsedKey.rest.join(' ').trim();
 
             if (!content) {
-                return message.reply('❓ Usage: `.mt Your message here`');
+                return message.reply('❓ Usage: `.mt Your message here [tournament=<key>]`');
             }
 
             return await runMessageTeam({
                 guild: message.guild,
                 captainId: message.author.id,
                 content,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -75,6 +90,7 @@ module.exports = {
                 guild: interaction.guild,
                 captainId: interaction.user.id,
                 content,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -94,41 +110,40 @@ module.exports = {
 ==================================================== */
 
 /**
- * DM every player on the actor's team.
- * 1. Find team via captain/VC lookup
- * 2. Load all players
- * 3. Send DM embed to each (skip sender)
+ * DM every player on the actor's team IN THE TOURNAMENT.
+ * 1. Resolve the tournament (explicit key, else the server default)
+ * 2. Find the actor's team there (captain / VC only)
+ * 3. Load the tournament roster
+ * 4. Send DM embed to each (skip sender)
  */
-async function runMessageTeam({ guild, captainId, content, reply }) {
-    /* ── Find team where actor is captain or VC ── */
-    let team = await Team.findOne({
+async function runMessageTeam({ guild, captainId, content, tournamentKey = null, reply }) {
+    const { tournament, ctx, error } = await resolveActorTeam({
         guildId: guild.id,
-        captainID: captainId
+        userId: captainId,
+        tournamentKey,
+        need: 'manage',
+        noun: 'message your team'
     });
 
-    let isViceCaptain = false;
+    if (error) return reply({ content: error });
 
-    if (!team) {
-        team = await Team.findOne({
-            guildId: guild.id,
-            viceCaptainID: captainId
-        });
+    const team = ctx.team;
+    const isViceCaptain = ctx.isVice;
 
-        if (team) isViceCaptain = true;
-    }
-
-    if (!team) {
-        return reply({ content: '❌ You are not registered as a team captain or vice captain.' });
-    }
-
-    /* ── Load all players on the team ── */
-    const players = await Player.find({
+    /* ── Load the team's roster in this tournament ── */
+    const entries = await TournamentPlayer.find({
         guildId: guild.id,
-        teamId: team._id
-    });
+        tournamentId: tournament._id,
+        teamId: team._id,
+        isActive: true
+    }).populate('playerId');
+
+    const players = entries
+        .map(e => e.playerId)
+        .filter(Boolean);
 
     if (!players.length) {
-        return reply({ content: '❌ No players found in your team.' });
+        return reply({ content: `❌ No players found in **${team.name}** for **${tournament.name}**.` });
     }
 
     /* ── Send DM to each player (skip sender) ── */
@@ -141,7 +156,7 @@ async function runMessageTeam({ guild, captainId, content, reply }) {
         .setColor(0xFEBE10)
         .setTitle(`📢 Team Message — ${team.name}`)
         .setDescription(content)
-        .setFooter({ text: `Sent by your ${senderRole}` })
+        .setFooter({ text: `Sent by your ${senderRole} • ${tournament.name}` })
         .setTimestamp();
 
     for (const player of players) {

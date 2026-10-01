@@ -24,7 +24,7 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const { TournamentPlayer } = require('../../models/Tournament');
+const { Player, TournamentPlayer } = require('../../models/Tournament');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
 const { extractTournamentFromArgs } = require('../../utils/getTournament');
 const {
@@ -66,44 +66,89 @@ module.exports = {
        PREFIX
     ================================================ */
 
-    async execute(message, args) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
 
-            const target =
-                message.mentions.users.first() ||
-                await getUserFromArgs(message);
+            const guildId = message.guild.id;
 
-            if (!target) {
-                return message.reply('❓ Usage: `.nick @user <new nickname>` or `.nick @user reset`');
-            }
+            /*
+             * Parse from the ARGUMENT LIST, never from message.content:
+             * the raw content still contains the command name, which used to
+             * leak into the nickname (".nick @user Bro" → "nick Bro").
+             *
+             * Accepted: .nick @user <nickname>
+             *           .nick @user <nickname> tournament=<key>
+             *           .nick @user reset
+             */
+            const parsedKey = await extractTournamentFromArgs(guildId, args, { tokenOnly: true });
 
-            // Optional tournament=<key> token (never a loose word — nicknames are free text)
-            const parsedKey = await extractTournamentFromArgs(
-                message.guild.id,
-                message.content.split(/\s+/),
-                { tokenOnly: true }
-            );
             if (parsedKey.explicit && parsedKey.error) {
                 return message.reply(parsedKey.error);
             }
-            const explicitKey = parsedKey.explicit ? parsedKey.tournament?.tournamentKey : null;
 
-            // Extract nickname from args after the command and mention
-            const mentionRegex = /<@!?\d+>/;
-            const afterMention = message.content.replace(mentionRegex, '').trim();
-            const nickParts = afterMention
-                .split(/\s+/)
-                .filter(arg =>
-                    !arg.startsWith('.') &&
-                    !arg.startsWith('<@') &&
-                    !/^(tournament|key|t)=/i.test(arg)
+            // Everything that cannot be part of a nickname
+            let tokens = parsedKey.rest
+                .filter(arg => !/^<@!?\d+>$/.test(arg))          // mentions
+                .filter(arg => !/^\d{17,20}$/.test(arg))         // raw user IDs
+                .filter(arg => !/^(tournament|key|t)=/i.test(arg));
+
+            /* ── Resolve the target user ── */
+            const mentioned = message.mentions.users.first();
+
+            let target = mentioned;
+            let nicknameTokens = tokens;
+
+            if (!target) {
+                // Try the longest prefix first so "alice Bro" → user "alice", nick "Bro"
+                for (let k = tokens.length; k >= 1; k--) {
+                    const candidate = await getUserFromArgs(message, tokens.slice(0, k))
+                        .catch(() => null);
+
+                    if (candidate?.id) {
+                        target = candidate;
+                        nicknameTokens = tokens.slice(k);
+                        break;
+                    }
+                }
+            }
+
+            if (!target) {
+                return message.reply(
+                    '❓ Usage: `.nick @user <new nickname>` or `.nick @user reset`'
                 );
+            }
 
-            const nickname = nickParts.join(' ').trim();
+            /* ── Strip tokens that were only there to name the target ── */
+            if (!mentioned && nicknameTokens.length === tokens.length) {
+                const player = await Player.findOne({
+                    guildId,
+                    discordID: target.id
+                }).lean();
+
+                const names = [
+                    target.username,
+                    target.displayName,
+                    player?.name,
+                    player?.discordUsername
+                ]
+                    .filter(Boolean)
+                    .map(n => String(n).toLowerCase());
+
+                for (let k = Math.min(tokens.length, 5); k >= 1; k--) {
+                    if (names.includes(tokens.slice(0, k).join(' ').toLowerCase())) {
+                        nicknameTokens = tokens.slice(k);
+                        break;
+                    }
+                }
+            }
+
+            const nickname = nicknameTokens.join(' ').trim();
 
             if (!nickname) {
-                return message.reply('❓ Usage: `.nick @user <new nickname>` or `.nick @user reset`');
+                return message.reply(
+                    '❓ Usage: `.nick @user <new nickname>` or `.nick @user reset`'
+                );
             }
 
             return await runNick({
@@ -111,7 +156,7 @@ module.exports = {
                 actorId: message.author.id,
                 targetUser: target,
                 nickname,
-                tournamentKey: explicitKey,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {

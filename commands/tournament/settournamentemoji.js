@@ -21,11 +21,12 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'settournamentemoji',
     description: 'Set emoji for a tournament.',
-    usage: '.settournamentemoji <tournamentKey> <emoji>',
+    usage: '.settournamentemoji [tournamentKey] <emoji>',
     aliases: ['stemoji', 'tournamentemoji'],
     hidden: false,
     cooldown: 3,
@@ -35,14 +36,14 @@ module.exports = {
         .setName('settournamentemoji')
         .setDescription('Set tournament emoji')
         .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
-        .addStringOption(opt =>
             opt.setName('emoji')
                 .setDescription('Emoji or emoji code')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -57,18 +58,23 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            if (args.length < 2) {
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const emoji = parsedKey.rest.join(' ').trim();
+
+            if (!emoji) {
                 return message.reply(
-                    '❓ Usage: `.settournamentemoji <tournamentKey> <emoji>`'
+                    '❓ Usage: `.settournamentemoji [tournamentKey] <emoji>`\n' +
+                    'Without a key the server default tournament is used.'
                 );
             }
 
-            const key = args[0].toLowerCase();
-            const emoji = args.slice(1).join(' ').trim();
-
             return await runCommand({
                 guildId: message.guild.id,
-                key,
+                key: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 emoji,
                 reply: payload => message.reply(payload)
             });
@@ -95,7 +101,7 @@ module.exports = {
 
             return await runCommand({
                 guildId: interaction.guild.id,
-                key: interaction.options.getString('key').toLowerCase(),
+                key: interaction.options.getString('key')?.toLowerCase() || null,
                 emoji: interaction.options.getString('emoji').trim(),
                 reply: payload => interaction.editReply(payload)
             });
@@ -120,16 +126,13 @@ async function runCommand({
     emoji,
     reply
 }) {
-    const tournament = await TournamentSettings.findOne({
-        guildId,
-        tournamentKey: key
-    });
+    const resolved = await resolveTournament(guildId, key);
 
-    if (!tournament) {
-        return reply({
-            content: `❌ Tournament \`${key}\` not found.`
-        });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     tournament.emoji = emoji;
     await tournament.save();
