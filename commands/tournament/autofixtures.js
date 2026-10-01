@@ -26,12 +26,13 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 const { buildRoundRobinFixtures, getNextMatchNumber } = require('../../utils/fixtureBuilder');
 
 module.exports = {
     name: 'autofixtures',
     description: 'Auto-generate fixtures for a specific tournament.',
-    usage: '.autofixtures <tournamentKey> [--force]',
+    usage: '.autofixtures [tournamentKey] [--force]',
     aliases: ['generatefixtures', 'fixturesauto'],
     hidden: false,
     cooldown: 5,
@@ -40,14 +41,14 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('autofixtures')
         .setDescription('Auto-generate tournament fixtures')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key, example: league-s1')
-                .setRequired(true)
-        )
         .addBooleanOption(opt =>
             opt.setName('force')
                 .setDescription('Delete existing fixtures and regenerate')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
                 .setRequired(false)
         ),
 
@@ -63,16 +64,16 @@ module.exports = {
                 return message.reply('🚫 You are not authorized to use this command.');
             }
 
-            if (!args.length) {
-                return message.reply('❓ Usage: `.autofixtures <tournamentKey> [--force]`');
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
             }
 
-            const tournamentKey = args[0].toLowerCase();
             const force = args.includes('--force');
 
             return await runAutoFixtures({
                 guild: message.guild,
-                tournamentKey,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 force,
                 reply: payload => message.reply(payload)
             });
@@ -96,7 +97,7 @@ module.exports = {
 
             return await runAutoFixtures({
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 force: interaction.options.getBoolean('force') ?? false,
                 reply: payload => interaction.editReply(payload)
             });
@@ -127,14 +128,13 @@ module.exports = {
  */
 async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
     // ── Find tournament ──
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     // ── Check existing fixtures ──
     const existingCount = await Fixture.countDocuments({

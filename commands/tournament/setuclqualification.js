@@ -18,11 +18,12 @@ const {
 
 const { TournamentSettings } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'setuclqualification',
     description: 'Set league UCL qualification spots.',
-    usage: '.setuclqualification <tournamentKey> <spots>',
+    usage: '.setuclqualification [tournamentKey] <spots>',
     aliases: ['setucl', 'uclspots'],
     hidden: false,
     cooldown: 3,
@@ -31,15 +32,15 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('setuclqualification')
         .setDescription('Set league UCL qualification spots')
-        .addStringOption(opt =>
-            opt.setName('tournament')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
         .addIntegerOption(opt =>
             opt.setName('spots')
                 .setDescription('Number of UCL spots')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -54,18 +55,23 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            const tournamentKey = args[0]?.toLowerCase();
-            const spots = Number(args[1]);
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
 
-            if (!tournamentKey || Number.isNaN(spots) || spots < 0) {
+            const spots = Number(parsedKey.rest[0]);
+
+            if (Number.isNaN(spots) || spots < 0) {
                 return message.reply(
-                    '❓ Usage: `.setuclqualification <tournamentKey> <spots>`'
+                    '❓ Usage: `.setuclqualification [tournamentKey] <spots>`\n' +
+                    'Without a key the server default tournament is used.'
                 );
             }
 
             return await runUpdateUclQualification({
                 guildId: message.guild.id,
-                tournamentKey,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 spots,
                 reply: payload => message.reply(payload)
             });
@@ -90,7 +96,7 @@ module.exports = {
 
             await interaction.deferReply({ ephemeral: true });
 
-            const tournamentKey = interaction.options.getString('tournament').toLowerCase();
+            const tournamentKey = interaction.options.getString('tournament')?.toLowerCase() || null;
             const spots = interaction.options.getInteger('spots');
 
             return await runUpdateUclQualification({
@@ -119,15 +125,17 @@ module.exports = {
 ==================================================== */
 
 async function runUpdateUclQualification({ guildId, tournamentKey, spots, reply }) {
+    const resolved = await resolveTournament(guildId, tournamentKey);
+
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
+    }
+
     const tournament = await TournamentSettings.findOneAndUpdate(
-        { guildId, tournamentKey },
+        { guildId, _id: resolved.tournament._id },
         { $set: { uclQualificationSpots: spots } },
         { new: true }
     );
-
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
-    }
 
     const embed = new EmbedBuilder()
         .setColor(0x3498DB)

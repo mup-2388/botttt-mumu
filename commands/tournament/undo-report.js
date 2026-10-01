@@ -46,15 +46,15 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('undo-report')
         .setDescription('Undo a reported fixture')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Optional tournament key')
-                .setRequired(false)
-        )
         .addIntegerOption(opt =>
             opt.setName('match')
                 .setDescription('Match number')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Optional tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================

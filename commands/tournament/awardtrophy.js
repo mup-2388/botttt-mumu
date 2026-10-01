@@ -27,7 +27,7 @@ const {
     UserProfile
 } = require('../../models/Tournament');
 
-const { getTournamentByKey } = require('../../utils/getTournament');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
@@ -40,7 +40,7 @@ const TROPHY_TYPES = {
 module.exports = {
     name: 'awardtrophy',
     description: 'Award a tournament trophy to a team and its players.',
-    usage: '.awardtrophy <tournamentKey> <team name> <champion|runner_up>',
+    usage: '.awardtrophy [tournamentKey] <team name> <champion|runner_up>',
     aliases: ['give-trophy', 'givetrophy', 'trophyaward'],
     hidden: false,
     cooldown: 5,
@@ -49,11 +49,6 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('awardtrophy')
         .setDescription('Award a trophy to a tournament team')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
         .addStringOption(opt =>
             opt.setName('team')
                 .setDescription('Team name')
@@ -67,6 +62,11 @@ module.exports = {
                     { name: 'Winner', value: 'champion' },
                     { name: 'Runner Up', value: 'runner_up' }
                 )
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -81,20 +81,25 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            if (args.length < 3) {
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            if (parsedKey.rest.length < 2) {
                 return message.reply(
-                    '❓ Usage: `.awardtrophy <tournamentKey> <team name> <champion|runner_up>`\n' +
-                    'Example: `.awardtrophy league-s1 Simgas champion`'
+                    '❓ Usage: `.awardtrophy [tournamentKey] <team name> <champion|runner_up>`\n' +
+                    'Example: `.awardtrophy league-s1 Simgas champion`\n' +
+                    'Without a key the server default tournament is used.'
                 );
             }
 
-            const tournamentKey = args[0].toLowerCase();
-            const type = args[args.length - 1].toLowerCase();
-            const teamName = args.slice(1, -1).join(' ').trim();
+            const type = parsedKey.rest[parsedKey.rest.length - 1].toLowerCase();
+            const teamName = parsedKey.rest.slice(0, -1).join(' ').trim();
 
             return await runAwardTrophy({
                 guild: message.guild,
-                tournamentKey,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 teamName,
                 type,
                 reply: payload => message.reply(payload)
@@ -119,7 +124,7 @@ module.exports = {
 
             return await runAwardTrophy({
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 teamName: interaction.options.getString('team'),
                 type: interaction.options.getString('type'),
                 reply: payload => interaction.editReply(payload)
@@ -154,11 +159,14 @@ async function runAwardTrophy({ guild, tournamentKey, teamName, type, reply }) {
     }
 
     // ── Find tournament ──
-    const tournament = await getTournamentByKey(guild.id, tournamentKey, { includeCompleted: true });
+    // Awards are usually handed out after the tournament ended → include completed
+    const resolved = await resolveTournament(guild.id, tournamentKey, { includeCompleted: true });
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     // ── Find team (case-insensitive) ──
     const team = await Team.findOne({

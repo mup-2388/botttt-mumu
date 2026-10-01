@@ -38,6 +38,8 @@ const {
 
 const { escapeRegex } = require('../../utils/stringHelpers');
 const { parseColor } = require('../../utils/displayHelpers');
+const { resolveTournament } = require('../../utils/getTournament');
+const { getUserTeamInTournament } = require('../../utils/tournamentContext');
 
 const DEFAULT_TROPHY_EMOJI = '<:_Trophy:1507987705311793152>';
 
@@ -109,7 +111,26 @@ module.exports = {
 ==================================================== */
 
 async function runMyTeam({ guild, viewerId, requestedTeamName, reply }) {
-    const teams = await getAllTeamsForUser(guild.id, viewerId);
+    let teams = await getAllTeamsForUser(guild.id, viewerId);
+
+    /*
+     * Default selection = the team the user is on in the server's DEFAULT
+     * tournament (never a leftover team from an old tournament).
+     */
+    if (!requestedTeamName && teams.length > 1) {
+        const resolved = await resolveTournament(guild.id, null);
+
+        if (resolved.tournament) {
+            const ctx = await getUserTeamInTournament(guild.id, resolved.tournament, viewerId);
+
+            if (ctx) {
+                const idx = teams.findIndex(t => String(t._id) === String(ctx.team._id));
+                if (idx > 0) {
+                    teams = [teams[idx], ...teams.slice(0, idx), ...teams.slice(idx + 1)];
+                }
+            }
+        }
+    }
 
     /* ── Resolve which team to show ── */
     let team;

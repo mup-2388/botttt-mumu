@@ -18,13 +18,14 @@ const {
 
 const { Team, TournamentSettings } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 const { syncTeamToTournament } = require('../../utils/tournamentSync');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 module.exports = {
     name: 'addteamtotournament',
     description: 'Manually add/re-add a team to a tournament.',
-    usage: '.addteamtotournament <key> <team name> [group]',
+    usage: '.addteamtotournament [key] <team name> [group]',
     aliases: ['jointournament', 'jointour', 'att'],
     hidden: true,
     cooldown: 5,
@@ -34,11 +35,6 @@ module.exports = {
         .setName('addteamtotournament')
         .setDescription('Manually add/re-add a team to a tournament')
         .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
-        .addStringOption(opt =>
             opt.setName('team')
                 .setDescription('Team name')
                 .setRequired(true)
@@ -46,6 +42,11 @@ module.exports = {
         .addStringOption(opt =>
             opt.setName('group')
                 .setDescription('Optional group key (e.g. A, B)')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
                 .setRequired(false)
         ),
 
@@ -61,25 +62,33 @@ module.exports = {
                 return message.reply('🚫 You are not authorized.');
             }
 
-            if (args.length < 2) {
-                return message.reply('❓ Usage: `.addteamtotournament <key> <team name> [group]`');
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
             }
 
-            const tournamentKey = args[0].toLowerCase();
+            const rest = parsedKey.rest;
+
+            if (!rest.length) {
+                return message.reply(
+                    '❓ Usage: `.addteamtotournament [key] <team name> [group]`\n' +
+                    'Without a key the server default tournament is used.'
+                );
+            }
 
             // Detect optional group key at the end (single letter)
             let groupKey = null;
-            let teamName = args.slice(1).join(' ').trim();
+            let teamName = rest.join(' ').trim();
 
-            const last = args[args.length - 1];
-            if (args.length >= 3 && /^[A-Za-z]$/.test(last)) {
+            const last = rest[rest.length - 1];
+            if (rest.length >= 2 && /^[A-Za-z]$/.test(last)) {
                 groupKey = last.toUpperCase();
-                teamName = args.slice(1, -1).join(' ').trim();
+                teamName = rest.slice(0, -1).join(' ').trim();
             }
 
             return await runAdd({
                 guild: message.guild,
-                tournamentKey,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 teamName,
                 groupKey,
                 reply: payload => message.reply(payload)
@@ -107,7 +116,7 @@ module.exports = {
 
             return await runAdd({
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 teamName: interaction.options.getString('team'),
                 groupKey: interaction.options.getString('group')?.toUpperCase() || null,
                 reply: payload => interaction.editReply(payload)
@@ -137,14 +146,13 @@ module.exports = {
  */
 async function runAdd({ guild, tournamentKey, teamName, groupKey, reply }) {
     // ── Find tournament ──
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     // ── Find team (case-insensitive) ──
     const team = await Team.findOne({

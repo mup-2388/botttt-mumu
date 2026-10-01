@@ -2,11 +2,11 @@
  * freeagent.js
  *
  * Make a registered player a free agent without deleting their stats.
- * Removes them from their current team across all active tournaments.
+ * Removes them from their team IN THE DEFAULT TOURNAMENT (or `tournament=<key>`).
  * Cannot be used on a team captain — change captain first.
  *
- * Usage:  .freeagent @user
- * Slash:  /freeagent user:<user>
+ * Usage:  .freeagent @user [tournament=<key>]
+ * Slash:  /freeagent user:<user> [tournament:<key>]
  *
  * Aliases: fa, makefreeagent
  */
@@ -17,20 +17,22 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const {
-    Team,
-    Player,
-    TournamentPlayer,
-    TournamentSettings
-} = require('../../models/Tournament');
+const { Player } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const {
+    sameId,
+    effectiveCaptainId,
+    getUserTeamInTournament,
+    assignPlayerToTeamInTournament
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'freeagent',
     description: 'Make a player a free agent without deleting stats.',
-    usage: '.freeagent @user',
+    usage: '.freeagent @user [tournament=<key>]',
     aliases: ['fa', 'makefreeagent'],
     hidden: false,
     cooldown: 5,
@@ -43,13 +45,18 @@ module.exports = {
             opt.setName('user')
                 .setDescription('Player to make free agent')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
        PREFIX
     ================================================ */
 
-    async execute(message) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
 
@@ -57,17 +64,23 @@ module.exports = {
                 return message.reply('🚫 You are not authorized.');
             }
 
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
             const target =
                 message.mentions.users.first() ||
-                await getUserFromArgs(message);
+                await getUserFromArgs(message, parsedKey.rest);
 
             if (!target) {
-                return message.reply('❌ Usage: `.freeagent @user`');
+                return message.reply('❌ Usage: `.freeagent @user [tournament=<key>]`');
             }
 
             return await runFreeAgent({
                 guild: message.guild,
                 targetUser: target,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -93,6 +106,7 @@ module.exports = {
             return await runFreeAgent({
                 guild: interaction.guild,
                 targetUser: target,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -112,31 +126,39 @@ module.exports = {
 ==================================================== */
 
 /**
- * Convert a player to a free agent:
- * 1. Validate player exists and has a team
- * 2. Block if player is captain (must change captain first)
- * 3. Update TournamentPlayer entries in all active tournaments
- * 4. Update global Player record
+ * Convert a player to a free agent IN THE TOURNAMENT:
+ * 1. Resolve tournament (explicit key, else the server default)
+ * 2. Validate player exists and has a team there
+ * 3. Block if player is captain (must change captain first)
+ * 4. Update the tournament roster entry (global record follows when it should)
  */
-async function runFreeAgent({ guild, targetUser, reply }) {
-    /* ── Find player with populated team ── */
+async function runFreeAgent({ guild, targetUser, tournamentKey = null, reply }) {
+    const resolved = await resolveTournament(guild.id, tournamentKey);
+    if (!resolved.tournament) return reply({ content: resolved.error });
+
+    const tournament = resolved.tournament;
+
     const player = await Player.findOne({
         guildId: guild.id,
         discordID: targetUser.id
-    }).populate('teamId');
+    });
 
     if (!player) {
         return reply({ content: `❌ ${targetUser} is not registered as a player.` });
     }
 
-    const oldTeam = player.teamId;
+    const ctx = await getUserTeamInTournament(guild.id, tournament, targetUser.id);
 
-    if (!oldTeam) {
-        return reply({ content: `❌ ${targetUser} is already a **FREE AGENT**.` });
+    if (!ctx) {
+        return reply({
+            content: `❌ ${targetUser} is already a **FREE AGENT** in **${tournament.name}**.`
+        });
     }
 
+    const oldTeam = ctx.team;
+
     /* ── Block captain from becoming free agent directly ── */
-    if (player.isCaptain || String(oldTeam.captainID) === String(targetUser.id)) {
+    if (ctx.isCaptain || sameId(effectiveCaptainId(ctx.entry, oldTeam), targetUser.id)) {
         return reply({
             content:
                 `❌ ${targetUser} is captain of **${oldTeam.name}**.\n` +
@@ -144,76 +166,26 @@ async function runFreeAgent({ guild, targetUser, reply }) {
         });
     }
 
-    /* ── Update tournament entries ── */
-    const tournamentPlayersUpdated = await releaseFromActiveTournaments({
+    await assignPlayerToTeamInTournament({
         guildId: guild.id,
-        playerId: player._id
+        tournament,
+        player,
+        newTeam: null,
+        oldTeamId: oldTeam._id
     });
-
-    /* ── Update global player record ── */
-    await Player.updateOne(
-        { _id: player._id },
-        {
-            $set: {
-                teamId: null,
-                teamNameSnapshot: 'FREE AGENT',
-                isCaptain: false,
-                isViceCaptain: false
-            }
-        }
-    );
 
     /* ── Response ── */
     const embed = new EmbedBuilder()
         .setColor(0x95A5A6)
         .setTitle('✅ Free Agent Updated')
         .setDescription(
-            `${targetUser} is now a **FREE AGENT**.\n` +
+            `${targetUser} is now a **FREE AGENT** in **${tournament.name}**.\n` +
             `Removed from **${oldTeam.name}**.`
         )
         .setFooter({
-            text: `Tournament records updated: ${tournamentPlayersUpdated}`
+            text: `Tournament: ${tournament.tournamentKey}`
         })
         .setTimestamp();
 
     return reply({ embeds: [embed] });
-}
-
-/* ====================================================
-   TOURNAMENT SYNC
-==================================================== */
-
-/**
- * Remove a player from their team in all active tournament entries.
- * Sets them as free agent within each tournament.
- */
-async function releaseFromActiveTournaments({ guildId, playerId }) {
-    const activeTournaments = await TournamentSettings.find({
-        guildId,
-        currentPhase: { $ne: 'completed' }
-    }).select('_id').lean();
-
-    const activeTournamentIds = activeTournaments.map(t => t._id);
-
-    if (!activeTournamentIds.length) return 0;
-
-    const result = await TournamentPlayer.updateMany(
-        {
-            guildId,
-            playerId,
-            tournamentId: { $in: activeTournamentIds },
-            isActive: true
-        },
-        {
-            $set: {
-                teamId: null,
-                tournamentTeamId: null,
-                teamNameSnapshot: 'FREE AGENT',
-                isCaptain: false,
-                isViceCaptain: false
-            }
-        }
-    );
-
-    return result.modifiedCount || 0;
 }

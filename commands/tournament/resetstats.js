@@ -22,11 +22,12 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'resetstats',
     description: 'Reset tournament player stats and/or team standings.',
-    usage: '.resetstats <tournamentKey> confirm [--players|--teams|--all]',
+    usage: '.resetstats [tournamentKey] confirm [--players|--teams|--all]',
     hidden: false,
     cooldown: 5,
     userPermissions: [PermissionFlagsBits.SendMessages],
@@ -34,11 +35,6 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('resetstats')
         .setDescription('Reset stats for a specific tournament')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
         .addBooleanOption(opt =>
             opt.setName('confirm')
                 .setDescription('Required safety confirmation')
@@ -53,6 +49,11 @@ module.exports = {
                     { name: 'Teams Only', value: 'teams' },
                     { name: 'All Tournament Stats', value: 'all' }
                 )
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -67,7 +68,7 @@ module.exports = {
                 return message.reply('🚫 **Access Denied.** This is a high-level admin command.');
             }
 
-            const parsed = parsePrefixArgs(args);
+            const parsed = await parsePrefixArgs(message.guild.id, args);
             if (!parsed.ok) return message.reply(parsed.error);
 
             const waitMsg = await message.reply('⏳ **Resetting tournament stats...** Please wait.');
@@ -84,6 +85,11 @@ module.exports = {
             });
         } catch (error) {
             console.error('[resetstats] prefix error:', error);
+
+            if (String(error?.message || '').startsWith('❌')) {
+                return message.reply(error.message);
+            }
+
             return message.reply('❌ **Database Error:** Failed to reset statistics.');
         }
     },
@@ -114,7 +120,7 @@ module.exports = {
 
             const result = await runReset({
                 guildId: interaction.guild.id,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 mode: interaction.options.getString('mode') || 'all'
             });
 
@@ -128,11 +134,15 @@ module.exports = {
         } catch (error) {
             console.error('[resetstats] slash error:', error);
 
+            const friendly = String(error?.message || '').startsWith('❌')
+                ? error.message
+                : '❌ **Database Error:** Failed to reset statistics.';
+
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ **Database Error:** Failed to reset statistics.');
+                return interaction.editReply(friendly);
             }
 
-            return interaction.reply({ content: '❌ **Database Error:** Failed to reset statistics.', ephemeral: true });
+            return interaction.reply({ content: friendly, ephemeral: true });
         }
     }
 };
@@ -141,39 +151,47 @@ module.exports = {
    PREFIX ARG PARSER
 ==================================================== */
 
-function parsePrefixArgs(args) {
+async function parsePrefixArgs(guildId, args) {
     if (!args.length) {
         return {
             ok: false,
             error:
-                '❌ Usage: `.resetstats <tournamentKey> confirm [--players|--teams|--all]`\n' +
-                'Example: `.resetstats league-s1 confirm --all`'
+                '❌ Usage: `.resetstats [tournamentKey] confirm [--players|--teams|--all]`\n' +
+                'Example: `.resetstats league-s1 confirm --all`\n' +
+                'Without a key the server default tournament is used.'
         };
     }
 
-    const tournamentKey = args[0]?.toLowerCase();
-    const confirm = args[1]?.toLowerCase() === 'confirm';
+    const parsedKey = await extractTournamentFromArgs(guildId, args);
 
-    if (!tournamentKey || !confirm) {
+    if (parsedKey.explicit && parsedKey.error) {
+        return { ok: false, error: parsedKey.error };
+    }
+
+    const confirm = parsedKey.rest.some(a => String(a).toLowerCase() === 'confirm');
+    const rest = parsedKey.rest.filter(a => String(a).toLowerCase() !== 'confirm');
+
+    let mode = 'all';
+    for (const arg of rest) {
+        const value = String(arg).replace(/^--/, '').toLowerCase();
+        if (['players', 'teams', 'all'].includes(value)) mode = value;
+    }
+
+    if (!confirm) {
         return {
             ok: false,
             error:
-                '⚠️ **CRITICAL ACTION**\n' +
-                'This resets stats for one tournament only.\n\n' +
-                'Use:\n' +
-                '`.resetstats <tournamentKey> confirm --all`\n' +
-                '`.resetstats <tournamentKey> confirm --players`\n' +
-                '`.resetstats <tournamentKey> confirm --teams`'
+                '⚠️ You must add `confirm` to run this reset.\n\n' +
+                'Example: `.resetstats league-s1 confirm --all`\n' +
+                'Default tournament: `.resetstats confirm --all`'
         };
     }
 
-    let mode = 'all';
-
-    if (args.includes('--players')) mode = 'players';
-    if (args.includes('--teams')) mode = 'teams';
-    if (args.includes('--all')) mode = 'all';
-
-    return { ok: true, tournamentKey, mode };
+    return {
+        ok: true,
+        tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
+        mode
+    };
 }
 
 /* ====================================================
@@ -182,11 +200,13 @@ function parsePrefixArgs(args) {
 
 /** Reset player stats, team standings, or both for a tournament. */
 async function runReset({ guildId, tournamentKey, mode }) {
-    const tournament = await TournamentSettings.findOne({ guildId, tournamentKey });
+    const resolved = await resolveTournament(guildId, tournamentKey);
 
-    if (!tournament) {
-        throw new Error(`Tournament not found: ${tournamentKey}`);
+    if (!resolved.tournament) {
+        throw new Error(resolved.error || `❌ Tournament \`${tournamentKey}\` not found.`);
     }
+
+    const tournament = resolved.tournament;
 
     let playerResult = { matchedCount: 0, modifiedCount: 0 };
     let teamResult = { matchedCount: 0, modifiedCount: 0 };

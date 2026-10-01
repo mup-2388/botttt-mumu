@@ -32,14 +32,27 @@ async function syncAllTeamsToTournament(guildId, tournament) {
 }
 
 async function syncTeamToOpenTournaments(guildId, team) {
-    // Manual registration tournaments are excluded — teams join those
-    // explicitly via /register ... tournament:<key>.
-    const tournaments = await TournamentSettings.find({
+    /*
+     * Only the server's DEFAULT tournament is auto-synced. Other tournaments
+     * in the same server keep their own rosters (they are filled explicitly
+     * with /register … tournament:<key> or /addplayer … tournament:<key>),
+     * so a new tournament never inherits an older tournament's teams.
+     *
+     * Manual registration tournaments are excluded as well.
+     */
+    const { getDefaultTournamentKey } = require('./getTournament');
+    const defaultKey = await getDefaultTournamentKey(guildId);
+
+    const query = {
         guildId,
         registrationOpen: true,
         currentPhase: 'registration',
         manualRegistration: { $ne: true }
-    });
+    };
+
+    if (defaultKey) query.tournamentKey = defaultKey;
+
+    const tournaments = await TournamentSettings.find(query);
 
     let syncedTournaments = 0;
     let syncedPlayers = 0;

@@ -33,11 +33,6 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('fixfixture')
         .setDescription('Repair a fixture')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Optional tournament key')
-                .setRequired(false)
-        )
         .addIntegerOption(opt =>
             opt.setName('match')
                 .setDescription('Match number')
@@ -61,7 +56,12 @@ module.exports = {
                     { name: 'Custom', value: 'custom' }
                 )
         )
-        .addStringOption(opt => opt.setName('group').setDescription('New group key').setRequired(false)),
+        .addStringOption(opt => opt.setName('group').setDescription('New group key').setRequired(false))
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Optional tournament key (default: the default tournament)')
+                .setRequired(false)
+        ),
 
     /* ================================================
        PREFIX

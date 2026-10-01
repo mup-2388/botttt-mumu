@@ -20,7 +20,9 @@ const {
 } = require('discord.js');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { parseTeamToken, resolveManagedTeam } = require('../../utils/teamResolver');
+const { resolveManagedTeamInTournament } = require('../../utils/teamResolver');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const { parseTeamTokenInTournament } = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'setlogo',
@@ -42,6 +44,11 @@ module.exports = {
             opt.setName('team')
                 .setDescription('Team name (captain: one of your teams • organizer: any team)')
                 .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -58,10 +65,26 @@ module.exports = {
 
             let logoURL = null;
             let teamName = null;
-            let rest = args;
 
-            // Optional explicit team= token (works for captains and organizers)
-            const token = await parseTeamToken(guildId, userId, args);
+            // Optional tournament=<key> token (never a loose word)
+            const parsedKey = await extractTournamentFromArgs(guildId, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const resolvedTournament = await resolveTournament(
+                guildId,
+                parsedKey.explicit ? parsedKey.tournament.tournamentKey : null
+            );
+            if (!resolvedTournament.tournament) {
+                return message.reply(resolvedTournament.error);
+            }
+            const tournament = resolvedTournament.tournament;
+
+            let rest = parsedKey.rest;
+
+            // Optional explicit team= token (matches teams registered in the tournament)
+            const token = await parseTeamTokenInTournament(guildId, tournament, rest);
             if (token.teamName) {
                 teamName = token.teamName;
                 rest = token.rest;
@@ -71,12 +94,12 @@ module.exports = {
                 // Organizer legacy flexible parsing
                 if (message.attachments.first()) {
                     logoURL = message.attachments.first().url;
-                    if (args.length) teamName = args.join(' ').trim();
+                    if (rest.length) teamName = rest.join(' ').trim();
                 } else {
-                    const urlIndex = args.findIndex(arg => /^https?:\/\//i.test(arg));
+                    const urlIndex = rest.findIndex(arg => /^https?:\/\//i.test(arg));
                     if (urlIndex !== -1) {
-                        logoURL = args[urlIndex];
-                        if (urlIndex > 0) teamName = args.slice(0, urlIndex).join(' ').trim();
+                        logoURL = rest[urlIndex];
+                        if (urlIndex > 0) teamName = rest.slice(0, urlIndex).join(' ').trim();
                     }
                 }
             } else {
@@ -95,6 +118,7 @@ module.exports = {
                 organizer,
                 teamName,
                 logoURL,
+                tournament,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -118,6 +142,7 @@ module.exports = {
                 userId: interaction.user.id,
                 organizer,
                 teamName: interaction.options.getString('team'),
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 logoURL: interaction.options.getString('image_url'),
                 reply: payload => interaction.editReply(payload)
             });
@@ -144,13 +169,28 @@ module.exports = {
  * Set a team's logo.
  * Team resolution via resolveManagedTeam (organizer: any, captain: own teams).
  */
-async function runSetLogo({ guild, userId, organizer, teamName, logoURL, reply }) {
-    const resolved = await resolveManagedTeam({
+async function runSetLogo({ guild, userId, organizer, teamName, logoURL, tournament = null, tournamentKey = null, reply }) {
+    if (!tournament) {
+        const r = await resolveTournament(guild.id, tournamentKey);
+        if (!r.tournament) return reply({ content: r.error });
+        tournament = r.tournament;
+    }
+
+    const resolved = await resolveManagedTeamInTournament({
         guildId: guild.id,
+        tournament,
         userId,
         organizer,
         teamName
     });
+
+    if (resolved.status === 'none') {
+        return reply({
+            content:
+                `❌ You are not the captain or vice captain of a team in **${tournament.name}**.` +
+                (tournamentKey ? '' : '\nManaging a team in another tournament? Add `tournament=<key>`.')
+        });
+    }
 
     if (resolved.status === 'ambiguous') {
         const list = resolved.teams.map(t => `• **${t.name}**`).join('\n');

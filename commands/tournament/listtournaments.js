@@ -18,7 +18,9 @@ const {
 const {
     TournamentSettings,
     TournamentTeam,
-    TournamentPlayer
+    TournamentPlayer,
+    EventSettings,
+    ServerConfig
 } = require('../../models/Tournament');
 
 module.exports = {
@@ -88,7 +90,15 @@ async function runList({ guild, reply }) {
         guildId: guild.id
     }).sort({ createdAt: -1 }).lean();
 
-    if (!tournaments.length) {
+    const config = await ServerConfig.findOne({ guildId: guild.id }).lean();
+    const defaultKey = String(config?.defaultTournamentKey || '').toLowerCase();
+
+    const events = await EventSettings.find({ guildId: guild.id })
+        .sort({ createdAt: -1 })
+        .lean()
+        .catch(() => []);
+
+    if (!tournaments.length && !events.length) {
         return reply({ content: '📭 No tournaments found.' });
     }
 
@@ -114,8 +124,11 @@ async function runList({ guild, reply }) {
         const teamCount = teamCountMap.get(String(tournament._id)) || 0;
         const playerCount = playerCountMap.get(String(tournament._id)) || 0;
 
+        const isDefault = tournament.tournamentKey &&
+            String(tournament.tournamentKey).toLowerCase() === defaultKey;
+
         return (
-            `${tournament.emoji || '🏆'} **${tournament.name}**\n` +
+            `${tournament.emoji || '🏆'} **${tournament.name}**${isDefault ? ' ⭐ **DEFAULT**' : ''}\n` +
             `Key: \`${tournament.tournamentKey}\`\n` +
             `Phase: **${tournament.currentPhase || 'setup'}**\n` +
             `Teams: **${teamCount}** • Players: **${playerCount}**\n` +
@@ -124,10 +137,34 @@ async function runList({ guild, reply }) {
         );
     });
 
+    const eventLines = events.map(ev => {
+        const status = ev.isActive === false
+            ? '🔴 closed'
+            : ev.channelId ? `🟢 bound to <#${ev.channelId}>` : '🟡 unbound';
+
+        return (
+            `${ev.emoji || '🏆'} **${ev.name || ev.eventKey}** [EVENT]\n` +
+            `Key: \`${ev.eventKey}\`\n` +
+            `Status: ${status}`
+        );
+    });
+
     const embed = new EmbedBuilder()
         .setColor(0xFEBE10)
-        .setTitle('🏟️ SERVER TOURNAMENTS')
-        .setDescription(lines.join('\n\n'))
+        .setTitle('🏟️ SERVER TOURNAMENTS & EVENTS')
+        .setDescription(
+            [
+                lines.join('\n\n'),
+                eventLines.length ? eventLines.join('\n\n') : null
+            ]
+                .filter(Boolean)
+                .join('\n\n━━━━━━━━━━━━━━━\n\n') || 'Nothing configured yet.'
+        )
+        .setFooter({
+            text: defaultKey
+                ? `Default tournament: ${defaultKey} • commands without a key use it`
+                : 'No default tournament set — use .setdefaulttournament <key>'
+        })
         .setTimestamp();
 
     return reply({ embeds: [embed] });

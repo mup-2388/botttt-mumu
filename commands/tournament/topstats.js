@@ -169,7 +169,10 @@ async function getAllCompetitions(guildId) {
         });
     }
 
+    // Default tournament ALWAYS first (dropdown opens on it), then newest first.
     competitions.sort((a, b) => {
+        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+
         const da = new Date(a.createdAt || 0).getTime();
         const db = new Date(b.createdAt || 0).getTime();
         return db - da;

@@ -34,6 +34,7 @@ const {
     enrollTeamInTournament
 } = require('../../utils/tournamentSync');
 const { escapeRegex } = require('../../utils/stringHelpers');
+const { getDefaultTournament } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'register',
@@ -156,6 +157,24 @@ async function runRegister({
             user,
             teamNameInput,
             tournamentKey,
+            reply
+        });
+    }
+
+    /*
+     * No key given → the server's DEFAULT tournament.
+     * Only when this server has no tournament at all do we keep the old
+     * global registration behavior.
+     */
+    const defaultTournament = await getDefaultTournament(guild.id);
+
+    if (defaultTournament) {
+        return runTournamentRegister({
+            guild,
+            member,
+            user,
+            teamNameInput,
+            tournamentKey: defaultTournament.tournamentKey,
             reply
         });
     }
@@ -291,8 +310,12 @@ async function runGlobalRegister({ guild, member, user, teamNameInput, reply }) 
     /* ── Sync to open tournaments ── */
     const sync = await syncTeamToOpenTournaments(guild.id, createdTeam);
 
-    /* ── Assign Discord roles ── */
-    const newestSettings = await TournamentSettings.findOne({
+    /* ── Assign Discord roles ──
+       Auto-sync only touches the server's DEFAULT tournament, so its roles are
+       the right ones here (never a random older tournament's roles). */
+    const defaultForRoles = await getDefaultTournament(guild.id);
+
+    const newestSettings = defaultForRoles || await TournamentSettings.findOne({
         guildId: guild.id,
         registrationOpen: true,
         currentPhase: 'registration'
