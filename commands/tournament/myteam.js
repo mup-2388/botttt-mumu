@@ -39,7 +39,7 @@ const {
 const { escapeRegex } = require('../../utils/stringHelpers');
 const { parseColor } = require('../../utils/displayHelpers');
 const { resolveTournament } = require('../../utils/getTournament');
-const { getUserTeamInTournament } = require('../../utils/tournamentContext');
+const { getUserTeamInTournament, getUserTeams } = require('../../utils/tournamentContext');
 
 const DEFAULT_TROPHY_EMOJI = '<:_Trophy:1507987705311793152>';
 
@@ -224,59 +224,12 @@ async function runMyTeam({ guild, viewerId, requestedTeamName, reply }) {
  *  - teams they joined in a specific tournament (active TournamentPlayer)
  */
 async function getAllTeamsForUser(guildId, userId) {
-    const player = await Player.findOne({
-        guildId,
-        discordID: userId
-    }).populate('teamId');
-
-    const ids = new Set();
-
-    if (player?.teamId?._id) ids.add(String(player.teamId._id));
-
-    // Global captain / VC teams
-    const capTeams = await Team.find({
-        guildId,
-        $or: [{ captainID: userId }, { viceCaptainID: userId }]
-    });
-    for (const t of capTeams) ids.add(String(t._id));
-
-    // Per-tournament captain / VC entries
-    const tourCapEntries = await TournamentTeam.find({
-        guildId,
-        isActive: true,
-        $or: [{ captainID: userId }, { viceCaptainID: userId }]
-    });
-    for (const e of tourCapEntries) {
-        if (e.teamId) ids.add(String(e.teamId));
-    }
-
-    // Per-tournament memberships
-    if (player) {
-        const tourMemberships = await TournamentPlayer.find({
-            guildId,
-            playerId: player._id,
-            isActive: true
-        });
-        for (const m of tourMemberships) {
-            if (m.teamId) ids.add(String(m.teamId));
-        }
-    }
-
-    const teams = [];
-    for (const id of ids) {
-        const t = await Team.findOne({ guildId, _id: id });
-        if (t) teams.push(t);
-    }
-
-    // Global team first, then alphabetical
-    const globalId = player?.teamId?._id ? String(player.teamId._id) : null;
-    teams.sort((a, b) => {
-        if (String(a._id) === globalId) return -1;
-        if (String(b._id) === globalId) return 1;
-        return a.name.localeCompare(b.name);
-    });
-
-    return teams;
+    /*
+     * Shared resolver: global Player.teamId + global captain / VC +
+     * per-tournament captain / VC + per-tournament roster entries, ordered
+     * default-tournament team first. Never a stale team from an old tournament.
+     */
+    return getUserTeams(guildId, userId);
 }
 
 /** Map teamId -> tournament names (active entries), for dropdown descriptions. */

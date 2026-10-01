@@ -27,7 +27,8 @@ const {
     TournamentPlayer
 } = require('../models/Tournament');
 
-const { resolveTournament } = require('./getTournament');
+const { resolveTournament, getDefaultTournament } = require('./getTournament');
+const { escapeRegex } = require('./stringHelpers');
 
 function sameId(a, b) {
     return a != null && b != null && String(a) === String(b);
@@ -385,6 +386,152 @@ async function assignPlayerToTeamInTournament({
     return tp;
 }
 
+/**
+ * All teams a user is attached to, ANYWHERE:
+ *   • global Player.teamId
+ *   • global captain / vice captain (Team.captainID / viceCaptainID)
+ *   • any tournament roster entry (TournamentPlayer, isActive)
+ *   • any per-tournament captain / vice captain entry (TournamentTeam)
+ *
+ * Teams from the DEFAULT tournament come first, then the global team, then the
+ * rest alphabetically — so callers can just take [0].
+ */
+async function getUserTeams(guildId, userId) {
+    if (!guildId || !userId) return [];
+
+    const uid = String(userId);
+    const ids = new Set();
+
+    const player = await Player.findOne({ guildId, discordID: uid });
+
+    if (player?.teamId) ids.add(String(player.teamId));
+
+    // Global captain / VC
+    const globalCaptainTeams = await Team.find({
+        guildId,
+        $or: [{ captainID: uid }, { viceCaptainID: uid }]
+    })
+        .select('_id')
+        .lean();
+
+    for (const t of globalCaptainTeams) ids.add(String(t._id));
+
+    // Per-tournament captain / VC
+    const tournamentCaptainEntries = await TournamentTeam.find({
+        guildId,
+        isActive: true,
+        $or: [{ captainID: uid }, { viceCaptainID: uid }]
+    })
+        .select('teamId')
+        .lean();
+
+    for (const e of tournamentCaptainEntries) {
+        if (e.teamId) ids.add(String(e.teamId));
+    }
+
+    // Per-tournament roster membership
+    if (player) {
+        const memberships = await TournamentPlayer.find({
+            guildId,
+            playerId: player._id,
+            isActive: true,
+            teamId: { $ne: null }
+        })
+            .select('teamId')
+            .lean();
+
+        for (const m of memberships) {
+            if (m.teamId) ids.add(String(m.teamId));
+        }
+    }
+
+    if (!ids.size) return [];
+
+    const teams = await Team.find({ guildId, _id: { $in: [...ids] } });
+
+    if (!teams.length) return [];
+
+    // Which of these teams are in the default tournament?
+    const defaultTournament = await getDefaultTournament(guildId).catch(() => null);
+    let defaultTeamIds = new Set();
+
+    if (defaultTournament) {
+        const entries = await TournamentTeam.find({
+            guildId,
+            tournamentId: defaultTournament._id,
+            isActive: true
+        })
+            .select('teamId')
+            .lean()
+            .catch(() => []);
+
+        defaultTeamIds = new Set(entries.map(e => String(e.teamId)));
+    }
+
+    const globalTeamId = player?.teamId ? String(player.teamId) : null;
+
+    const rank = t => {
+        if (defaultTeamIds.has(String(t._id))) return 0;
+        if (globalTeamId && String(t._id) === globalTeamId) return 1;
+        return 2;
+    };
+
+    return teams.sort((a, b) => {
+        const diff = rank(a) - rank(b);
+        return diff !== 0 ? diff : a.name.localeCompare(b.name);
+    });
+}
+
+/**
+ * The single team a user "is on", used by commands like `.nextmatch` /
+ * `.myteam` when no team name is given.
+ *
+ * Order: default tournament team → global team → any other team.
+ * Returns { team, tournament, source } or null.
+ */
+async function resolveUserTeam(guildId, userId, options = {}) {
+    if (!guildId || !userId) return null;
+
+    /* 1. The team they are on in the tournament (default unless a key is given) */
+    const tournament = options.tournament
+        || (await resolveTournament(guildId, options.tournamentKey || null).catch(() => null))?.tournament;
+
+    if (tournament) {
+        const ctx = await getUserTeamInTournament(guildId, tournament, userId).catch(() => null);
+
+        if (ctx?.team) {
+            return { team: ctx.team, tournament, ctx, source: 'tournament' };
+        }
+    }
+
+    /* 2. Global player record */
+    const player = await Player.findOne({ guildId, discordID: String(userId) });
+
+    if (player?.teamId) {
+        const team = await Team.findOne({ guildId, _id: player.teamId });
+
+        if (team) return { team, tournament: null, ctx: null, source: 'global' };
+    }
+
+    /* 3. Anything else (old rosters, captain entries, name snapshot) */
+    const teams = await getUserTeams(guildId, userId);
+
+    if (teams.length) {
+        return { team: teams[0], tournament: null, ctx: null, source: 'fallback' };
+    }
+
+    if (player?.teamNameSnapshot && String(player.teamNameSnapshot).toUpperCase() !== 'FREE AGENT') {
+        const team = await Team.findOne({
+            guildId,
+            name: { $regex: new RegExp(`^${escapeRegex(player.teamNameSnapshot)}$`, 'i') }
+        });
+
+        if (team) return { team, tournament: null, ctx: null, source: 'snapshot' };
+    }
+
+    return null;
+}
+
 module.exports = {
     assignPlayerToTeamInTournament,
     parseTeamTokenInTournament,
@@ -398,5 +545,7 @@ module.exports = {
     getUserTeamInTournament,
     getTournamentRoster,
     getRosterMembership,
-    getManagedTeamsInTournament
+    getManagedTeamsInTournament,
+    getUserTeams,
+    resolveUserTeam
 };
