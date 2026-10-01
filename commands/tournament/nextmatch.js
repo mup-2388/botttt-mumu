@@ -33,6 +33,8 @@ const {
 } = require('../../utils/getTournament');
 
 const { prettyPhase } = require('../../utils/displayHelpers');
+const { slotEmoji, vsLine } = require('../../utils/ai/emojiSlots');
+const { isReserved, reservedBadge } = require('../../utils/reservedMatches');
 const { resolveUserTeam } = require('../../utils/tournamentContext');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
@@ -314,9 +316,9 @@ async function buildScheduleEmbed(state) {
     const gd = (stats.gf || 0) - (stats.ga || 0);
     const tournamentEmoji = tournament.emoji || '🏆';
 
-    const nextPending = fixtures.find(f =>
-        f.status === 'Pending' || f.status === 'Live'
-    );
+    /* A reserved match is still up next — it just has no fixed day. */
+    const nextPending = fixtures.find(f => isReserved(f)) ||
+        fixtures.find(f => f.status === 'Pending' || f.status === 'Live');
 
     const embed = new EmbedBuilder()
         .setColor(parseColor(team.color))
@@ -362,12 +364,15 @@ async function buildScheduleEmbed(state) {
         });
 
         embed.addFields({
-            name: '⏭️ Next Match',
+            name: `${slotEmoji('calendar', guild.id) || '⏭️'} Next Match`,
             value:
-                `**${nextPending.homeTeam} vs ${nextPending.awayTeam}**\n` +
+                `**${vsLine(nextPending.homeTeam, nextPending.awayTeam, guild.id)}**\n` +
                 `🏷️ ${nextPending.roundLabel || prettyPhase(nextPending.phase)}\n` +
                 `👑 Opp. Captain: ${opponentTeam?.captainID ? `<@${opponentTeam.captainID}>` : 'Not Assigned'}\n` +
-                `📍 Status: **${nextPending.status}**`,
+                `📍 Status: **${nextPending.status}**` +
+                (isReserved(nextPending)
+                    ? `\n${reservedBadge(nextPending, { guildId: guild.id })}\n_This one is reserved — play it whenever you can._`
+                    : ''),
             inline: false
         });
     } else {
@@ -443,13 +448,18 @@ function buildFixtureLine(fixture, index, teamName) {
     if (isCompleted) {
         const home = fixture.result?.home ?? '-';
         const away = fixture.result?.away ?? '-';
-        score = ` — **${home}-${away}**`;
+        const goal = slotEmoji('goals', fixture.guildId);
+        score = ` — **${goal} ${home}-${away} ${goal}**`;
     }
+
+    const badge = reservedBadge(fixture, { guildId: fixture.guildId });
 
     return (
         `${statusEmoji} **#${index} • ${fixture.roundLabel || prettyPhase(fixture.phase)}**\n` +
-        `${sideEmoji} **${fixture.homeTeam} vs ${fixture.awayTeam}**${score}\n` +
-        `📍 ${fixture.status}`
+        `${sideEmoji} **${vsLine(fixture.homeTeam, fixture.awayTeam, fixture.guildId)}**${score}\n` +
+        `📍 ${fixture.status}` +
+        (badge ? `\n${badge}` : '') +
+        (isReserved(fixture) ? `\n   _Play it whenever — then report the score._` : '')
     );
 }
 

@@ -1,13 +1,16 @@
 /**
- * scout.js
+ * teamreport.js
  *
- * AI scouting report on a team: how they play, their danger man, their weak
- * spot and a one-line plan to beat them — built from real database facts.
+ * Team report: how they play, their danger man, their weak spot and a one-line
+ * plan to beat them — built from real database facts.
  *
- * Usage:  .scout <team name> [tournament=<key>]
- * Slash:  /scout team:<name> [tournament:<key>]
+ * (Named `teamreport`, not `scout`: "scouting" sounds like a club scouting a
+ *  player, this is a report on a whole team.)
  *
- * Aliases: scoutreport, opposition
+ * Usage:  .teamreport <team name> [tournament=<key>]
+ * Slash:  /teamreport team:<name> [tournament:<key>]
+ *
+ * Aliases: treport, opposition
  */
 
 const {
@@ -17,25 +20,26 @@ const {
 } = require('discord.js');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { slotEmoji, vsLine } = require('../../utils/ai/emojiSlots');
 const { extractTournamentFromArgs } = require('../../utils/getTournament');
 const { runTool } = require('../../utils/ai/tournamentTools');
-const { buildScoutProse } = require('../../utils/ai/announcements');
+const { buildTeamReportProse } = require('../../utils/ai/announcements');
 
 module.exports = {
-    name: 'scout',
-    description: 'AI scouting report on any team.',
-    usage: '.scout <team name>',
-    aliases: ['scoutreport', 'opposition'],
+    name: 'teamreport',
+    description: 'Team report: form, danger men and what is next for any team.',
+    usage: '.teamreport <team name>',
+    aliases: ['treport', 'opposition'],
     hidden: false,
     cooldown: 10,
     userPermissions: [PermissionFlagsBits.SendMessages],
 
     data: new SlashCommandBuilder()
-        .setName('scout')
-        .setDescription('AI scouting report on a team')
+        .setName('teamreport')
+        .setDescription('Team report: form, danger men and what is next')
         .addStringOption(opt =>
             opt.setName('team')
-                .setDescription('Team to scout')
+                .setDescription('Team to analyse')
                 .setRequired(true)
         )
         .addStringOption(opt =>
@@ -57,18 +61,18 @@ module.exports = {
             const teamName = parsedKey.rest.join(' ').trim();
 
             if (!teamName) {
-                return message.reply('❓ Usage: `.scout <team name>` — e.g. `.scout Reds`.');
+                return message.reply('❓ Usage: `.teamreport <team name>` — e.g. `.teamreport Reds`.');
             }
 
-            return runScout({
+            return runTeamReport({
                 guild: message.guild,
                 teamName,
                 tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: p => message.reply(p)
             });
         } catch (error) {
-            console.error('[scout] prefix error:', error);
-            return message.reply('❌ Failed to build the scouting report.');
+            console.error('[teamreport] prefix error:', error);
+            return message.reply('❌ Failed to build the team report.');
         }
     },
 
@@ -76,16 +80,16 @@ module.exports = {
         try {
             await interaction.deferReply();
 
-            return runScout({
+            return runTeamReport({
                 guild: interaction.guild,
                 teamName: interaction.options.getString('team'),
                 tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: p => interaction.editReply(p)
             });
         } catch (error) {
-            console.error('[scout] slash error:', error);
+            console.error('[teamreport] slash error:', error);
 
-            const payload = { content: '❌ Failed to build the scouting report.' };
+            const payload = { content: '❌ Failed to build the team report.' };
 
             if (interaction.deferred || interaction.replied) return interaction.editReply(payload);
             return interaction.reply({ ...payload, ephemeral: true });
@@ -97,15 +101,15 @@ module.exports = {
    CORE
 ==================================================== */
 
-async function runScout({ guild, teamName, tournamentKey, reply }) {
+async function runTeamReport({ guild, teamName, tournamentKey, reply }) {
     const ctx = { guildId: guild.id, userId: null, tournamentKey };
-    const facts = await runTool('scout_report', { team: teamName }, ctx);
+    const facts = await runTool('team_report', { team: teamName }, ctx);
 
     if (facts?.error) {
         return reply({ content: `❌ ${facts.error}` });
     }
 
-    const prose = await buildScoutProse({
+    const prose = await buildTeamReportProse({
         guildId: guild.id,
         teamName: facts.team,
         facts
@@ -114,7 +118,7 @@ async function runScout({ guild, teamName, tournamentKey, reply }) {
     const table = facts.table;
     const embed = new EmbedBuilder()
         .setColor(0xFEBE10)
-        .setTitle(`🔍 SCOUT REPORT — ${String(facts.team).toUpperCase()}`)
+        .setTitle(`${slotEmoji('report', guild.id) || '📋'} TEAM REPORT — ${String(facts.team).toUpperCase()}`)
         .setDescription(
             (prose || 'No report available right now — here are the raw numbers.') +
             (facts.tournament ? `\n\n_${facts.tournament}_` : '')
@@ -123,10 +127,10 @@ async function runScout({ guild, teamName, tournamentKey, reply }) {
 
     if (table) {
         embed.addFields({
-            name: '📊 League',
+            name: `${slotEmoji('goals', guild.id)} League`,
             value:
                 `Position: **${table.position}** · ${table.played} played · **${table.points} pts**\n` +
-                `${table.wins}W ${table.draws}D ${table.losses}L · GF ${table.gf} GA ${table.ga} (${table.gd >= 0 ? '+' : ''}${table.gd})`,
+                `${table.wins}W ${table.draws}D ${table.losses}L · ${slotEmoji('goals', guild.id)} GF ${table.gf} GA ${table.ga} (${table.gd >= 0 ? '+' : ''}${table.gd})`,
             inline: false
         });
     }
@@ -141,23 +145,26 @@ async function runScout({ guild, teamName, tournamentKey, reply }) {
 
     const stars = [];
 
-    if (facts.topScorer) stars.push(`⚽ ${facts.topScorer.player} (${facts.topScorer.value})`);
-    if (facts.topCreator) stars.push(`🎯 ${facts.topCreator.player} (${facts.topCreator.value})`);
-    if (facts.keeper) stars.push(`🧤 ${facts.keeper.player} (${facts.keeper.value})`);
+    if (facts.topScorer) stars.push(`${slotEmoji('goals', guild.id)} ${facts.topScorer.player} (${facts.topScorer.value})`);
+    if (facts.topCreator) stars.push(`${slotEmoji('assists', guild.id)} ${facts.topCreator.player} (${facts.topCreator.value})`);
+    if (facts.keeper) stars.push(`${slotEmoji('saves', guild.id)} ${facts.keeper.player} (${facts.keeper.value})`);
     if (stars.length) embed.addFields({ name: '⭐ Danger men', value: stars.join('\n'), inline: true });
 
     if (facts.recentResults?.length) {
         embed.addFields({
-            name: '🗓️ Recent',
-            value: facts.recentResults.slice(0, 5).map(r => `**${r.score}** vs ${r.opponent} (${r.outcome})`).join('\n'),
+            name: `${slotEmoji('calendar', guild.id)} Recent`,
+            value: facts.recentResults.slice(0, 5).map(r => `**${r.score}** · ${vsLine(facts.team, r.opponent, guild.id)} (${r.outcome})`).join('\n'),
             inline: false
         });
     }
 
     if (facts.upcoming?.length) {
         embed.addFields({
-            name: '⏭️ Next up',
-            value: facts.upcoming.slice(0, 3).map(f => `#${f.matchNumber} vs **${f.opponent}** (${f.homeAway})`).join('\n'),
+            name: `${slotEmoji('calendar', guild.id) || '⏭️'} Next up`,
+            value: facts.upcoming.slice(0, 3).map(f =>
+                `#${f.matchNumber} · ${vsLine(facts.team, f.opponent, guild.id)} (${f.homeAway})` +
+                (f.reserved ? ` · ${slotEmoji('reserve', guild.id)} Reserved` : '')
+            ).join('\n'),
             inline: false
         });
     }

@@ -3,7 +3,7 @@
  *
  * Parses the way people actually type match times in this server:
  *   "9:30pm", "21:30", "today 9:30pm", "tomorrow 9 pm", "day after tomorrow 9",
- *   "25/10 21:00", "25-10-2026 21:00", "25 Oct 9:30pm", "in 2h", "in 90m", "now"
+ *   "25/10 21:00", "25-10-2026 21:00", "25 Oct 9:30pm", "sunday 9pm", "in 2h", "now"
  *
  * Times are IST (UTC+05:30, no DST) unless the text says utc/gmt.
  */
@@ -15,6 +15,19 @@ const MONTHS = {
     may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9,
     september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12
 };
+
+/* 0 = Sunday … 6 = Saturday (IST weekday numbers) */
+const WEEKDAYS = {
+    sunday: 0, sun: 0,
+    monday: 1, mon: 1,
+    tuesday: 2, tues: 2, tue: 2,
+    wednesday: 3, weds: 3, wed: 3,
+    thursday: 4, thurs: 4, thu: 4,
+    friday: 5, fri: 5,
+    saturday: 6, sat: 6
+};
+
+const WEEKDAY_RE = /\b(sunday|sun|monday|mon|tuesday|tues|tue|wednesday|weds|wed|thursday|thurs|thu|friday|fri|saturday|sat)\b/;
 
 /** The calendar parts of an instant, as seen in IST. */
 function istParts(date = new Date()) {
@@ -118,6 +131,24 @@ function parseScheduleTime(input, { now = new Date() } = {}) {
     else if (/\btomorrow\b|\btmr\b|\btmrw\b/.test(text)) { dayOffsetWord = 1; base = addDays(parts, 1); }
     else if (/\btoday\b|\btonight\b|\btonite\b/.test(text)) { dayOffsetWord = 0; base = addDays(parts, 0); }
 
+    /* weekday: "sunday 9pm" → the next time that weekday comes round */
+    const weekdayMatch = text.match(WEEKDAY_RE);
+    const weekdayTarget = weekdayMatch ? WEEKDAYS[weekdayMatch[1]] : null;
+
+    if (!base && weekdayTarget != null) {
+        const peek = parseTimeOfDay(text);
+        let delta = (weekdayTarget - parts.weekday + 7) % 7;
+
+        /* Same weekday named: keep today only if that time is still ahead. */
+        if (delta === 0) {
+            const todayAt = istToUtc(parts.y, parts.mo, parts.d, peek ? peek.h : 21, peek ? peek.mi : 0);
+
+            if (!peek || todayAt.getTime() <= now.getTime() + 60_000) delta = 7;
+        }
+
+        base = addDays(parts, delta);
+    }
+
     if (!base) {
         /* 25/10 , 25-10, 25.10 (optionally with a year) */
         let m = text.match(/\b(\d{1,2})[/\-.](\d{1,2})(?:[/\-.](\d{2,4}))?\b/);
@@ -155,7 +186,7 @@ function parseScheduleTime(input, { now = new Date() } = {}) {
         : istToUtc(base.y, base.mo, base.d, tod ? tod.h : 21, tod ? tod.mi : 0);
 
     /* "8pm" said at 9pm → they mean tomorrow (only when no explicit date) */
-    if (!dayOffsetWord && !/\b(today|tonight)\b/.test(text) && date.getTime() < now.getTime() - 60_000) {
+    if (!dayOffsetWord && weekdayTarget == null && !/\b(today|tonight)\b/.test(text) && date.getTime() < now.getTime() - 60_000) {
         if (!tod) return { ok: false, error: 'that time already passed today — did you mean tomorrow?' };
 
         const next = istToUtc(base.y, base.mo, base.d + 1, tod.h, tod.mi);

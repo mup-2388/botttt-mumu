@@ -88,6 +88,16 @@ async function route(question, ctx, teams) {
     const teamName = extractTeamName(q, teams);
     const metric = metricFromQuestion(q);
 
+    /* Reserved/postponed fixtures are normal pending fixtures with an explicit
+       flag; fetch enough facts for the model to distinguish them from scheduled. */
+    if (/\b(reserv(ed|ation)|postpon(ed|ponement)|held over)\b/i.test(lower)) {
+        const number = lower.match(/\b(?:match\s*)?#?(\d{1,4})\b/);
+
+        if (number) calls.push({ tool: 'fixture_info', args: { matchNumber: Number(number[1]) } });
+        else if (teamName) calls.push({ tool: 'team_schedule', args: { team: teamName } });
+        else calls.push({ tool: 'upcoming_fixtures', args: { limit: 20 } });
+    }
+
     /* Who am I / my stuff */
     if (/\b(my|me|i|our|we|us)\b/i.test(lower) && /(stat|goals?|assists?|saves?|tackles?|interceptions?|mvps?|points?|record)/i.test(lower)) {
         calls.push({ tool: 'my_stats', args: { metric: metric || 'goals' } });
@@ -133,8 +143,8 @@ async function route(question, ctx, teams) {
         calls.push({ tool: 'squad', args: { team: teamName } });
     }
 
-    if (teamName && /(scout|how (do|can) we beat|weakness|strength|preview|analyse|analyze)/i.test(lower)) {
-        calls.push({ tool: 'scout_report', args: { team: teamName } });
+    if (teamName && /(team ?report|treport|opposition|how (do|can) we beat|weakness|strength|preview|analyse|analyze)/i.test(lower)) {
+        calls.push({ tool: 'team_report', args: { team: teamName } });
     }
 
     if (teamName && /(schedule|fixtures?|when (do|does) .* play|next games?)/i.test(lower)) {

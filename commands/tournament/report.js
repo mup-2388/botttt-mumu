@@ -15,6 +15,8 @@ const {
     PermissionFlagsBits,
     EmbedBuilder,
     ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
     StringSelectMenuBuilder,
     ModalBuilder,
     TextInputBuilder,
@@ -33,6 +35,9 @@ const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase } = require('../../utils/displayHelpers');
 const { refreshLiveMasterSchedules } = require('./master-schedule');
 const { refreshLiveBracket } = require('./sendbracket');
+const { slotEmoji, vsLine } = require('../../utils/ai/emojiSlots');
+const { markReserved, reservedBadge, isReserved } = require('../../utils/reservedMatches');
+const { parseScheduleTime, discordFull, discordRelative } = require('../../utils/istTime');
 
 /** Max fixtures shown in the menu */
 const FIXTURE_LIMIT = 15;
@@ -40,26 +45,50 @@ const GROUP_FIXTURE_LIMIT = 25;
 
 module.exports = {
     name: 'report',
-    description: 'Interactively report a match result.',
-    usage: '.report',
+    description: 'Report a score or mark an unplayed fixture as reserved.',
+    usage: '.report | .report <match> reserved [at <IST time>]',
     cooldown: 5,
     hidden: true,
     userPermissions: [PermissionFlagsBits.SendMessages],
 
     data: new SlashCommandBuilder()
         .setName('report')
-        .setDescription('Interactively report a match result'),
+        .setDescription('Report a match result or reserve an unplayed fixture'),
 
     /* ================================================
        PREFIX
     ================================================ */
 
-    async execute(message) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
 
             if (!(await isOrganizer(message.guild.id, message.author.id))) {
                 return message.reply('🚫 You are not authorized to use this command.');
+            }
+
+            /*
+             * Quick path — a match that could not be played today:
+             *   .report 12 reserved [at sunday 9pm] [reason:"rain"]
+             */
+            const wantsReserved = (args || []).some(a => /^(reserved|reserve|postponed?)$/i.test(String(a)));
+            const matchArg = (args || []).map(a => String(a)).find(a => /^\d{1,4}$/.test(a));
+
+            if (wantsReserved) {
+                return reserveFromReport({
+                    client: message.client,
+                    guild: message.guild,
+                    args: (args || []).filter(a => !/^(reserved|reserve|postponed?)$/i.test(String(a))),
+                    actorId: message.author.id,
+                    reply: payload => message.reply(payload)
+                });
+            }
+
+            if (matchArg && !wantsReserved && (args || []).length === 1) {
+                return message.reply(
+                    `ℹ️ To mark match #${matchArg} as reserved, use \`.report ${matchArg} reserved\` ` +
+                    '(optionally add `at sunday 9pm`). To report a score, run `.report` and select the fixture.'
+                );
             }
 
             return await startReportMenu({
@@ -125,15 +154,18 @@ async function startReportMenu({ client, guild, userId, reply }) {
         return reply({ content: '📭 No active tournaments found.' });
     }
 
-    let tournament = await getDefaultTournament(guild.id);
-    if (!tournament) tournament = tournaments[0];
+    const tournament = await getDefaultTournament(guild.id);
+
+    if (!tournament) {
+        return reply({ content: '⚠️ No default tournament is set. Set a default tournament, then run `.report` again.' });
+    }
 
     let selectedGroup = 'all';
     let pendingFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
 
     // ── Send initial menu ──
     const msg = await reply({
-        embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup)],
+        embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup, guild.id)],
         components: await buildMenuComponents(tournaments, tournament, pendingFixtures, guild.id, selectedGroup)
     });
 
@@ -151,6 +183,22 @@ async function startReportMenu({ client, guild, userId, reply }) {
                 return interaction.reply({
                     content: 'Not your report menu.',
                     ephemeral: true
+                });
+            }
+
+            // ── Reserve button → modal for match number / new day / reason ──
+            if (interaction.isButton() && interaction.customId === 'report_reserve') {
+                return handleReserveButton({
+                    interaction,
+                    client,
+                    guild,
+                    tournament,
+                    msg,
+                    selectedGroup,
+                    tournaments,
+                    onFixtureUpdated: (updated) => {
+                        pendingFixtures = updated;
+                    }
                 });
             }
 
@@ -173,7 +221,7 @@ async function startReportMenu({ client, guild, userId, reply }) {
                 pendingFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
 
                 return interaction.update({
-                    embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup)],
+                    embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup, guild.id)],
                     components: await buildMenuComponents(tournaments, tournament, pendingFixtures, guild.id, selectedGroup)
                 });
             }
@@ -184,7 +232,7 @@ async function startReportMenu({ client, guild, userId, reply }) {
                 pendingFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
 
                 return interaction.update({
-                    embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup)],
+                    embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup, guild.id)],
                     components: await buildMenuComponents(tournaments, tournament, pendingFixtures, guild.id, selectedGroup)
                 });
             }
@@ -313,7 +361,7 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
         const updatedFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
 
         await msg.edit({
-            embeds: [buildMenuEmbed(tournament, updatedFixtures, selectedGroup)],
+            embeds: [buildMenuEmbed(tournament, updatedFixtures, selectedGroup, guild.id)],
             components: await buildMenuComponents(tournaments, tournament, updatedFixtures, guild.id, selectedGroup)
         }).catch(() => null);
     } catch (error) {
@@ -324,6 +372,260 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
             ephemeral: true
         }).catch(() => null);
     }
+}
+
+/* ====================================================
+   RESERVE A FIXTURE — REPORT MENU BUTTON + PREFIX SHORTCUT
+==================================================== */
+
+/**
+ * Prefix shortcut, in the same `.report` command:
+ *   .report 12 reserved [at sunday 9pm] [reason:"rain"]
+ */
+async function reserveFromReport({ client, guild, args = [], actorId, reply }) {
+    const parsed = await extractTournamentFromArgs(guild.id, args);
+
+    if (parsed.explicit && parsed.error) return reply({ content: parsed.error });
+    if (!parsed.tournament) return reply({ content: parsed.error || '📭 No default tournament is set.' });
+
+    const rest = [...(parsed.rest || [])];
+    const numberIndex = rest.findIndex(token => /^#?\d{1,4}$/.test(String(token)));
+
+    if (numberIndex < 0) {
+        return reply({ content: '❓ Use `.report <match number> reserved` — e.g. `.report 12 reserved`.' });
+    }
+
+    const matchNumber = Number(String(rest.splice(numberIndex, 1)[0]).replace(/^#/, ''));
+    let details = rest.join(' ').trim();
+    let reason = null;
+    const reasonMatch = details.match(/\breason\s*[=:]\s*("[^"]*"|'[^']*'|[^\s]+)/i);
+
+    if (reasonMatch) {
+        reason = reasonMatch[1].replace(/^["']|["']$/g, '').trim();
+        details = details.replace(reasonMatch[0], ' ').trim();
+    }
+
+    const timeText = details.replace(/^\s*(?:at|on)\s+/i, '').trim();
+
+    let result;
+
+    try {
+        result = await setFixtureReserved({
+            client,
+            guild,
+            tournament: parsed.tournament,
+            matchNumber,
+            timeText,
+            reason,
+            actorId
+        });
+    } catch (error) {
+        console.error('[report] prefix reserve error:', error?.message || error);
+        return reply({ content: '❌ Could not save the reservation. No changes were confirmed.' });
+    }
+
+    if (!result.ok) return reply({ content: `❌ ${result.error}` });
+
+    return reply({ content: buildReservationConfirmation(result, guild.id) });
+}
+
+/** Button opens a modal so organizers can reserve any pending/live fixture. */
+async function handleReserveButton({
+    interaction,
+    client,
+    guild,
+    tournament,
+    msg,
+    selectedGroup,
+    tournaments,
+    onFixtureUpdated
+}) {
+    const modalId = `report_reserve_${String(tournament._id).slice(-20)}_${Date.now()}`;
+
+    const matchInput = new TextInputBuilder()
+        .setCustomId('match_number')
+        .setLabel('Match number')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(5)
+        .setPlaceholder('Example: 12');
+
+    const timeInput = new TextInputBuilder()
+        .setCustomId('new_day')
+        .setLabel('New day/time in IST (optional)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(100)
+        .setPlaceholder('sunday 9pm, tomorrow 21:00, or leave blank');
+
+    const reasonInput = new TextInputBuilder()
+        .setCustomId('reason')
+        .setLabel('Reason (optional)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setMaxLength(200)
+        .setPlaceholder('Rain, no-show, venue issue…');
+
+    const modal = new ModalBuilder()
+        .setCustomId(modalId)
+        .setTitle('Mark a match as reserved')
+        .addComponents(
+            new ActionRowBuilder().addComponents(matchInput),
+            new ActionRowBuilder().addComponents(timeInput),
+            new ActionRowBuilder().addComponents(reasonInput)
+        );
+
+    await interaction.showModal(modal);
+
+    const submitted = await interaction.awaitModalSubmit({
+        time: 5 * 60 * 1000,
+        filter: modalInteraction =>
+            modalInteraction.customId === modalId &&
+            modalInteraction.user.id === interaction.user.id
+    }).catch(() => null);
+
+    if (!submitted) return;
+
+    const rawMatchNumber = submitted.fields.getTextInputValue('match_number').trim().replace(/^#/, '');
+    const matchNumber = /^\d{1,4}$/.test(rawMatchNumber) ? Number(rawMatchNumber) : null;
+    const timeText = submitted.fields.getTextInputValue('new_day').trim() || null;
+    const reason = submitted.fields.getTextInputValue('reason').trim() || null;
+
+    await submitted.deferReply({ ephemeral: true });
+
+    if (!matchNumber) {
+        return submitted.editReply({ content: '❌ Enter a valid match number, such as `12`.' });
+    }
+
+    let result;
+
+    try {
+        result = await setFixtureReserved({
+            client,
+            guild,
+            tournament,
+            matchNumber,
+            timeText,
+            reason,
+            actorId: submitted.user.id
+        });
+    } catch (error) {
+        console.error('[report] reserve failed:', error?.message || error);
+        return submitted.editReply({ content: '❌ Could not save that reservation. No changes were confirmed.' });
+    }
+
+    if (!result.ok) {
+        return submitted.editReply({ content: `❌ ${result.error}` });
+    }
+
+    await submitted.editReply({ content: buildReservationConfirmation(result, guild.id) });
+
+    try {
+        const updatedFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
+        onFixtureUpdated?.(updatedFixtures);
+
+        await msg.edit({
+            embeds: [buildMenuEmbed(tournament, updatedFixtures, selectedGroup, guild.id)],
+            components: await buildMenuComponents(tournaments, tournament, updatedFixtures, guild.id, selectedGroup)
+        });
+    } catch (error) {
+        console.error('[report] reserve menu refresh failed:', error?.message || error);
+    }
+}
+
+/** Shared by the prefix and menu flows. All facts come from the selected fixture. */
+async function setFixtureReserved({ client, guild, tournament, matchNumber, timeText = null, reason = null, actorId }) {
+    const matches = await Fixture.find({
+        guildId: guild.id,
+        tournamentId: tournament._id,
+        matchNumber
+    }).limit(2);
+
+    if (!matches.length) {
+        return { ok: false, error: `Match #${matchNumber} was not found in ${tournament.name}.` };
+    }
+
+    if (matches.length > 1) {
+        return { ok: false, error: `Match number #${matchNumber} is duplicated in ${tournament.name}; fix the fixture numbering before reserving it.` };
+    }
+
+    const fixture = matches[0];
+
+    if (fixture.status === 'Played') {
+        return { ok: false, error: `Match #${matchNumber} has already been played; it cannot be reserved.` };
+    }
+
+    if (!['Pending', 'Live', 'Cancelled'].includes(fixture.status)) {
+        return { ok: false, error: `Match #${matchNumber} is ${String(fixture.status || 'not pending').toLowerCase()}, so it cannot be reserved.` };
+    }
+
+    let until = null;
+
+    if (timeText) {
+        const parsedTime = parseScheduleTime(timeText);
+
+        if (!parsedTime.ok) {
+            return { ok: false, error: `${parsedTime.error}. Try \`sunday 9pm\` or \`25/10 21:00\` (IST).` };
+        }
+
+        until = parsedTime.date;
+    }
+
+    const saved = await markReserved({
+        client,
+        guild,
+        fixture,
+        until,
+        note: reason,
+        actorId
+    });
+
+    if (!saved.ok) return saved;
+
+    return {
+        ok: true,
+        fixture: saved.fixture || fixture,
+        tournament,
+        previousKickoff: saved.previousKickoff,
+        until: saved.until,
+        reason: saved.fixture?.reserved?.note || reason || null,
+        releasedChannel: saved.releasedChannel,
+        unlockError: saved.unlockError,
+        alreadyReserved: saved.alreadyReserved
+    };
+}
+
+function buildReservationConfirmation(result, guildId) {
+    const fixture = result.fixture;
+    const matchNumber = fixture.matchNumber;
+    const lines = [
+        `${slotEmoji('reserve', guildId)} **MATCH #${matchNumber} RESERVED**`,
+        `**${vsLine(fixture.homeTeam, fixture.awayTeam, guildId)}**`,
+        `Tournament: **${result.tournament.name}**`
+    ];
+
+    if (result.previousKickoff) {
+        lines.push(`Was due: ${discordFull(result.previousKickoff)} (${discordRelative(result.previousKickoff)})`);
+    }
+
+    if (result.until) {
+        lines.push(`${slotEmoji('calendar', guildId)} New day: ${discordFull(result.until)} (${discordRelative(result.until)})`);
+        lines.push(`To lock a channel and set the announcement, use \`.schedule ${matchNumber} at <time> in <#channel>\`.`);
+    } else {
+        lines.push('New day: not decided — play it whenever you arrange it, then select it in `.report` to enter the score.');
+    }
+
+    if (result.reason) lines.push(`Reason: ${result.reason}`);
+    if (result.alreadyReserved) lines.push('_Reservation details updated._');
+
+    if (result.releasedChannel) {
+        lines.push('🔓 The previously locked stadium channel is unlocked.');
+    } else if (result.unlockError) {
+        lines.push(`⚠️ The reservation was saved, but the old channel lock could not be released yet: ${result.unlockError}. I will retry.`);
+    }
+
+    return lines.join('\n').slice(0, 1900);
 }
 
 /* ====================================================
@@ -357,11 +659,13 @@ async function getPendingFixtures(guildId, tournamentId, groupKey = null) {
 /**
  * Build the report menu embed showing the tournament info and fixture list.
  */
-function buildMenuEmbed(tournament, fixtures, selectedGroup = 'all') {
+function buildMenuEmbed(tournament, fixtures, selectedGroup = 'all', guildId = tournament.guildId || null) {
     const fixtureList = fixtures.length
-        ? fixtures.map(f =>
-            `#${f.matchNumber} — **${f.homeTeam} vs ${f.awayTeam}** (${f.roundLabel || prettyPhase(f.phase)})`
-        ).join('\n')
+        ? fixtures.map(f => {
+            const badge = isReserved(f) ? ` · ${reservedBadge(f, { guildId })}` : '';
+
+            return `#${f.matchNumber} — **${vsLine(f.homeTeam, f.awayTeam, guildId)}** (${f.roundLabel || prettyPhase(f.phase)})${badge}`;
+        }).join('\n')
         : 'No pending/live fixtures found.';
 
     return new EmbedBuilder()
@@ -373,7 +677,7 @@ function buildMenuEmbed(tournament, fixtures, selectedGroup = 'all') {
             `Group Filter: **${selectedGroup === 'all' ? 'All Groups' : selectedGroup}**\n\n` +
             fixtureList
         )
-        .setFooter({ text: `Showing ${fixtures.length} fixtures` })
+        .setFooter({ text: `Showing ${fixtures.length} fixtures • use “Mark match reserved” if it could not be played` })
         .setTimestamp();
 }
 
@@ -432,6 +736,17 @@ async function buildMenuComponents(tournaments, selectedTournament, fixtures, gu
         );
     }
 
+    // ── Reserve button (for a match that could not be played) ──
+    rows.push(
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('report_reserve')
+                .setLabel('Mark match reserved')
+                .setEmoji(toDiscordEmoji(slotEmoji('reserve', guildId)) || '🛡️')
+                .setStyle(ButtonStyle.Secondary)
+        )
+    );
+
     // ── Fixture selector ──
     if (fixtures.length) {
         rows.push(
@@ -441,8 +756,9 @@ async function buildMenuComponents(tournaments, selectedTournament, fixtures, gu
                     .setPlaceholder('Select pending fixture')
                     .addOptions(
                         fixtures.slice(0, 25).map(fixture => ({
-                            label: truncate(`#${fixture.matchNumber} ${fixture.homeTeam} vs ${fixture.awayTeam}`, 100),
+                            label: truncate(`${isReserved(fixture) ? 'RESERVED · ' : ''}#${fixture.matchNumber} ${fixture.homeTeam} vs ${fixture.awayTeam}`, 100),
                             description: truncate(fixture.roundLabel || prettyPhase(fixture.phase) || 'Pending fixture', 100),
+                            emoji: toDiscordEmoji(slotEmoji('vs', guildId)) || undefined,
                             value: String(fixture._id)
                         }))
                     )
@@ -495,6 +811,10 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
         penaltiesAway: null,
         winner
     };
+    if (fixture.reserved?.isReserved) {
+        fixture.reserved.isReserved = false;
+        fixture.reserved.until = null;
+    }
     fixture.reportedAt = new Date();
 
     await fixture.save();
@@ -521,7 +841,7 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
         .setDescription(
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
-            `**${fixture.homeTeam} ${homeScore} - ${awayScore} ${fixture.awayTeam}**\n\n` +
+            `**${fixture.homeTeam} ${slotEmoji('goals', guild.id)} ${homeScore} - ${awayScore} ${slotEmoji('goals', guild.id)} ${fixture.awayTeam}**\n\n` +
             `🆔 Match: **#${fixture.matchNumber}**\n` +
             `🏷️ Round: **${fixture.roundLabel || prettyPhase(fixture.phase)}**\n` +
             `${fixture.groupKey ? `📦 Group: **${fixture.groupKey}**\n` : ''}` +
@@ -632,6 +952,13 @@ function flattenTeamStatsIncrement(stats) {
 /**
  * Parse a score input string. Returns null for invalid values.
  */
+function toDiscordEmoji(ref) {
+    const match = String(ref || '').match(/^<(a?):([a-zA-Z0-9_]+):(\d+)>$/);
+
+    if (match) return { name: match[2], id: match[3], animated: match[1] === 'a' };
+    return ref || null;
+}
+
 function parseScore(value) {
     const clean = String(value || '').trim();
 

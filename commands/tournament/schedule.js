@@ -27,6 +27,7 @@ const { Fixture, TournamentSettings } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 const { parseScheduleTime, discordFull, discordRelative } = require('../../utils/istTime');
+const { slotEmoji, vsLine } = require('../../utils/ai/emojiSlots');
 const {
     scheduleMatch,
     cancelPlan,
@@ -84,7 +85,12 @@ module.exports = {
         )
         .addSubcommand(sub =>
             sub.setName('list')
-                .setDescription('Show scheduled matches')
+                .setDescription('Show scheduled matches in the default tournament')
+                .addStringOption(opt =>
+                    opt.setName('tournament')
+                        .setDescription('Tournament key (default: the default tournament)')
+                        .setRequired(false)
+                )
         )
         .addSubcommand(sub =>
             sub.setName('cancel')
@@ -126,7 +132,13 @@ module.exports = {
             }
 
             if (sub === 'list') {
-                return runList({ guild: message.guild, reply: p => message.reply(p) });
+                const parsed = await extractTournamentFromArgs(message.guild.id, args.slice(1));
+                if (parsed.explicit && parsed.error) return message.reply(parsed.error);
+                return runList({
+                    guild: message.guild,
+                    tournamentKey: parsed.tournament?.tournamentKey || null,
+                    reply: p => message.reply(p)
+                });
             }
 
             if (sub === 'cancel') {
@@ -172,7 +184,11 @@ module.exports = {
             const sub = interaction.options.getSubcommand();
 
             if (sub === 'list') {
-                return runList({ guild: interaction.guild, reply: p => interaction.editReply(p) });
+                return runList({
+                    guild: interaction.guild,
+                    tournamentKey: interaction.options.getString('tournament'),
+                    reply: p => interaction.editReply(p)
+                });
             }
 
             if (sub === 'cancel') {
@@ -313,6 +329,12 @@ async function runSet({
         return reply({ content: `❌ Match **#${matchNumber}** not found in **${tournament.name}**.` });
     }
 
+    if (fixture.channelPlan?.state === 'cancelled' && fixture.channelPlan?.channelId) {
+        return reply({
+            content: `⏳ The old channel lock for match **#${matchNumber}** is still being released. I will retry automatically; schedule it again once the channel is unlocked.`
+        });
+    }
+
     /* time: explicit argument, or the fixture's existing kickoff */
     let kickoff = null;
 
@@ -360,7 +382,7 @@ async function runSet({
         return reply({
             content:
                 `🔎 **Preview — nothing changed**\n` +
-                `Match: **#${matchNumber}** · ${fixture.homeTeam} vs ${fixture.awayTeam}\n` +
+                `Match: **#${matchNumber}** · ${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}\n` +
                 `Tournament: ${tournament.name}\n` +
                 `Channel: <#${channelId}>\n` +
                 `Kickoff: ${discordFull(kickoff)} (${discordRelative(kickoff)}) — IST\n` +
@@ -369,10 +391,10 @@ async function runSet({
         });
     }
 
-    /* Save the kickoff on the fixture */
+    /* Keep proposed values in memory; scheduleMatch persists them atomically
+       with the channel plan only after it has successfully locked the channel. */
     fixture.scheduledAt = kickoff;
     if (venue != null) fixture.venueName = venue;
-    await fixture.save();
 
     const result = await scheduleMatch({
         client,
@@ -392,14 +414,14 @@ async function runSet({
         .setColor(0x57F287)
         .setTitle('🔒 MATCH SCHEDULED — CHANNEL LOCKED')
         .setDescription(
-            `**#${matchNumber}** · ${fixture.homeTeam} vs ${fixture.awayTeam}\n` +
+            `**#${matchNumber}** · ${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}\n` +
             `${tournament.emoji || '🏆'} ${tournament.name}` +
             (venue ? `\n📍 ${venue}` : '')
         )
         .addFields(
             { name: '🔒 Locked now', value: `<#${channelId}>`, inline: true },
             { name: '🔓 Unlock + announce', value: `${discordFull(announceAt)}\n(${discordRelative(announceAt)})`, inline: true },
-            { name: '⏰ Kickoff (IST)', value: `${discordFull(kickoff)}\n(${discordRelative(kickoff)})`, inline: true }
+            { name: `${slotEmoji('calendar', guild.id)} Kickoff (IST)`, value: `${discordFull(kickoff)}\n(${discordRelative(kickoff)})`, inline: true }
         )
         .setFooter({ text: 'The bot keeps talking in the locked channel so it can post the announcement.' })
         .setTimestamp();
@@ -407,27 +429,33 @@ async function runSet({
     return reply({ embeds: [embed] });
 }
 
-async function runList({ guild, reply }) {
-    const plans = await listPlans(guild.id);
+async function runList({ guild, tournamentKey = null, reply }) {
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!plans.length) {
-        return reply({ content: '📭 No matches are currently scheduled (no locked stadium channels).' });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error || '📭 No default tournament is set.' });
     }
 
-    const tournaments = await TournamentSettings.find({
-        guildId: guild.id,
-        _id: { $in: plans.map(p => p.tournamentId).filter(Boolean) }
-    }).lean();
+    const tournament = resolved.tournament;
+    const plans = await listPlans(guild.id, tournament._id);
 
-    const names = new Map(tournaments.map(t => [String(t._id), `${t.emoji || '🏆'} ${t.name}`]));
+    if (!plans.length) {
+        return reply({ content: `📭 No matches are currently scheduled in **${tournament.name}**.` });
+    }
 
     const lines = plans.slice(0, 15).map(p => {
-        const kickoff = p.scheduledAt ? `${discordFull(p.scheduledAt)} (${discordRelative(p.scheduledAt)})` : 'no time';
-        const state = p.channelPlan?.state === 'locked' ? '🔒 locked' : `✅ ${p.channelPlan?.state}`;
+        const kickoff = p.scheduledAt
+            ? `${slotEmoji('calendar', guild.id)} ${discordFull(p.scheduledAt)} (${discordRelative(p.scheduledAt)})`
+            : 'no time';
+        const state = p.channelPlan?.state === 'cancelled'
+            ? '⚠️ cancelled — channel unlock retrying'
+            : p.channelPlan?.lastError
+                ? '⚠️ announcement needs attention'
+                : p.channelPlan?.state === 'locked' ? '🔒 locked' : `✅ ${p.channelPlan?.state}`;
 
         return (
-            `**#${p.matchNumber}** ${p.homeTeam} vs ${p.awayTeam} — ${state}\n` +
-            `   ${names.get(String(p.tournamentId)) || ''} · <#${p.channelPlan?.channelId}> · ${kickoff}`
+            `**#${p.matchNumber}** ${vsLine(p.homeTeam, p.awayTeam, guild.id)} — ${state}\n` +
+            `   <#${p.channelPlan?.channelId}> · ${kickoff}`
         );
     });
 
@@ -435,7 +463,7 @@ async function runList({ guild, reply }) {
         embeds: [
             new EmbedBuilder()
                 .setColor(0xFEE75C)
-                .setTitle('🗓️ SCHEDULED MATCHES')
+                .setTitle(`${slotEmoji('calendar', guild.id)} SCHEDULED MATCHES — ${tournament.name}`)
                 .setDescription(lines.join('\n').slice(0, 4000))
                 .setFooter({ text: `${plans.length} scheduled • times shown in your timezone` })
                 .setTimestamp()
@@ -484,11 +512,30 @@ async function runCancel({ guild, matchNumber, tournamentKey = null, reply }) {
         return reply({ content: `📭 Match **#${matchNumber}** has no active schedule to cancel.` });
     }
 
+    const outcomes = [];
+
     for (const fixture of fixtures) {
-        await cancelPlan({ guild, fixture });
+        const result = await cancelPlan({ guild, fixture }).catch(error => ({
+            ok: false,
+            error: error?.message || 'channel unlock failed'
+        }));
+        outcomes.push(result);
     }
 
-    return reply({
-        content: `✅ Cancelled the schedule for match **#${matchNumber}** in **${tournament.name}** and unlocked its channel.`
-    });
+    const cancelled = outcomes.filter(result => result.cancelled).length;
+    const unlockFailed = outcomes.filter(result => result.cancelled && !result.unlocked).length;
+    const databaseFailed = outcomes.length - cancelled;
+
+    const messages = [];
+    if (cancelled) {
+        messages.push(`✅ Cancelled ${cancelled}/${outcomes.length} schedule(s) for match **#${matchNumber}** in **${tournament.name}**; those matches will not be announced.`);
+    }
+    if (unlockFailed) {
+        messages.push(`⚠️ ${unlockFailed} channel unlock(s) failed; I will retry automatically.`);
+    }
+    if (databaseFailed) {
+        messages.push(`❌ I could not cancel ${databaseFailed} schedule(s) in the database, so they may still announce. Please run \`.schedule cancel ${matchNumber}\` again.`);
+    }
+
+    return reply({ content: messages.join('\n') || 'ℹ️ No schedule was changed.' });
 }

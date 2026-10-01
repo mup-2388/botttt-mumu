@@ -16,6 +16,7 @@ const { callAI } = require('../aiProviders');
 const { runTool } = require('./tournamentTools');
 const { discordFull, discordRelative } = require('../istTime');
 const { emojiHint } = require('./emojiCatalog');
+const { slotHint, slotEmoji, vsLine } = require('./emojiSlots');
 
 const HISTORY_FILE = path.join(__dirname, '..', '..', 'data', 'announcement-history.json');
 const MAX_HISTORY = 12;
@@ -43,12 +44,12 @@ const TONES = [
 ];
 
 const TEMPLATES = [
-    '{home} vs {away} — {time}. Two teams, one ball, a lot of shouting. Let’s see who embarrasses themselves less. 🏟️',
-    'It’s happening: {home} take on {away} at {time}. {venue}Better clear your schedule, this one matters. ⚽',
-    'Kickoff: {home} vs {away}, {time}. Bring your best excuse-making game. 🧠',
-    'Matchday. {home} vs {away} at {time}. Someone is leaving with three points, someone with regrets. 💀',
-    '{home} 🆚 {away} — {time}. The table is watching, the group chat is awake. Let’s play. 🔥',
-    'Ladies and gentlemen (and referees): {home} vs {away}, {time}, live from {venue}not your couch. 📺'
+    '{match} — {time}. Two teams, one ball, a lot of shouting. Let’s see who embarrasses themselves less. 🏟️',
+    'It’s happening: {match} at {time}. {venue}Better clear your schedule, this one matters. {goal}',
+    'Kickoff: {match}, {time}. Bring your best excuse-making game. 🧠',
+    'Matchday. {match} at {time}. Someone is leaving with three points, someone with regrets. {fire}',
+    '{match} — {time}. The table is watching, the group chat is awake. Let’s play. {fire}',
+    'Ladies and gentlemen (and referees): {match}, {time}, live from {venue}not your couch. 📺'
 ];
 
 function readHistory() {
@@ -133,11 +134,19 @@ function capArrays(value, max, skipKeys = new Set(), depth = 0) {
     return value;
 }
 
+/** The league's VS emoji, as text the model can copy into its sentence. */
+function slotEmojiText(guildId) {
+    return slotEmoji('vs', guildId);
+}
+
 /** One natural sentence about emoji use — reads properly when the list is empty. */
-function emojiRule(list) {
-    return list
-        ? `You may use 1-3 custom emojis, and ONLY from this list: ${list}`
-        : 'No custom emojis are available right now — use plain text and standard unicode emoji only.';
+function emojiRule(list, guildId) {
+    const slotList = slotHint(guildId, ['goals', 'assists', 'saves', 'calendar', 'vs', 'fire']);
+    const refs = [...new Set(`${list || ''} ${slotList}`.match(/<a?:[A-Za-z0-9_]+:\d+>/g) || [])];
+
+    return refs.length
+        ? `You may use custom emojis only from this list: ${refs.join(' ')}`
+        : 'No custom emojis are available — use plain text and standard unicode emoji.';
 }
 
 /** Compact, always-valid JSON for a prompt, within `limit` characters. */
@@ -159,14 +168,13 @@ function compactFacts(facts, limit = 2000) {
     return JSON.stringify(attempts[attempts.length - 1]).slice(0, limit);
 }
 
-function templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName }) {
-    const text = pick(TEMPLATES)
-        .replace(/{home}/g, homeTeam)
-        .replace(/{away}/g, awayTeam)
-        .replace(/{time}/g, `${discordFull(scheduledAt)} ({discordRelative(scheduledAt)})`.replace('{discordRelative(scheduledAt)}', discordRelative(scheduledAt)))
-        .replace(/{venue}/g, venueName ? `${venueName}. ` : '');
-
-    return text;
+function templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId = null }) {
+    return pick(TEMPLATES)
+        .replace(/{match}/g, vsLine(homeTeam, awayTeam, guildId))
+        .replace(/{time}/g, `${discordFull(scheduledAt)} (${discordRelative(scheduledAt)})`)
+        .replace(/{venue}/g, venueName ? `${venueName}. ` : '')
+        .replace(/{goal}/g, slotEmoji('goals', guildId))
+        .replace(/{fire}/g, slotEmoji('fire', guildId));
 }
 
 /**
@@ -225,7 +233,8 @@ async function buildMatchAnnouncement({
         `You are MUMU, the host of a Discord football league. You write the kickoff announcement for one match.\n\n` +
         `STYLE: ${tone}. Angle to take: ${angle}. Roast level: light-medium — tease the teams, never the people's real lives.\n` +
         `LENGTH: 2-4 sentences, max 400 characters. Discord markdown allowed (**bold**, *italic*).\n` +
-        `${emojiRule(emojiHint(`${homeTeam} ${awayTeam} match`, guildId, 12))}\n\n` +
+        `${emojiRule(emojiHint(`${homeTeam} ${awayTeam} match`, guildId, 12), guildId)}\n` +
+        `${slotHint(guildId, ['goals', 'assists', 'saves', 'calendar', 'vs', 'fire'])}\n\n` +
         `HARD RULES:\n` +
         `- NEVER write @everyone, @here, any <@&role> or <@user> mention — the system adds the team pings itself.\n` +
         `- Never invent scores, stats or names: use only the facts provided.\n` +
@@ -234,7 +243,7 @@ async function buildMatchAnnouncement({
         `- The match time and teams are already shown above your text, so do not re-list them robotically.`;
 
     const userPrompt =
-        `Match: ${homeTeam} (home) vs ${awayTeam} (away)\n` +
+        `Match: ${homeTeam} (home) ${slotEmojiText(guildId)} ${awayTeam} (away)\n` +
         `Kickoff: ${discordFull(scheduledAt)} — ${discordRelative(scheduledAt)}\n` +
         `Venue: ${venueName || 'home ground'}\n` +
         `Tournament: ${tournament?.name || 'the league'} (${tournament?.phase || 'league'} phase)\n` +
@@ -264,7 +273,7 @@ async function buildMatchAnnouncement({
         .slice(0, 600);
 
     if (!body || body.length < 15) {
-        body = templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName });
+        body = templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId });
         body = body.replace(/<@&\d+>/g, '');
     }
 
@@ -275,30 +284,13 @@ async function buildMatchAnnouncement({
 
 /* ── Other generated content ── */
 
-/** Daily digest prose. */
-async function buildDigestProse({ guildId, tournamentName, facts }) {
+/** Team report prose. */
+async function buildTeamReportProse({ guildId, teamName, facts }) {
     const systemPrompt =
-        `You are MUMU, writing the daily league digest for a Discord football league.\n` +
-        `Tone: funny, a bit roast-y, 3-5 short lines. Discord markdown allowed. ` +
-        `${emojiRule(emojiHint('football league digest goals', guildId, 10))}\n` +
-        `Never invent numbers — use only the facts. Never write @everyone/@here or role/user mentions.`;
-
-    const res = await callAI({
-        messages: [{ role: 'user', content: `Tournament: ${tournamentName}\nFacts: ${compactFacts(facts, 2600)}` }],
-        systemPrompt,
-        temperature: 0.9,
-        maxTokens: 400
-    });
-
-    return res?.text ? String(res.text).trim().slice(0, 1200) : null;
-}
-
-/** Scouting report prose. */
-async function buildScoutProse({ guildId, teamName, facts }) {
-    const systemPrompt =
-        `You are MUMU, writing a scouting report on a team for their next opponent in a Discord league.\n` +
+        `You are MUMU, writing a team report for the opponents of this team in a Discord league.\n` +
         `Structure: how they play, their danger man, their weakness, one-line plan to beat them. ` +
-        `4-6 short lines, markdown allowed. ${emojiRule(emojiHint(`${teamName} football`, guildId, 10))}\n` +
+        `4-6 short lines, markdown allowed. ${emojiRule(emojiHint(`${teamName} football`, guildId, 10), guildId)}\n` +
+        `${slotHint(guildId, ['goals', 'assists', 'saves', 'calendar', 'vs', 'fire'])}\n` +
         `Use ONLY the facts provided. Never invent numbers. No mentions of any kind.`;
 
     const res = await callAI({
@@ -313,8 +305,7 @@ async function buildScoutProse({ guildId, teamName, facts }) {
 
 module.exports = {
     buildMatchAnnouncement,
-    buildDigestProse,
-    buildScoutProse,
+    buildTeamReportProse,
     templateAnnouncement,
     readHistory
 };

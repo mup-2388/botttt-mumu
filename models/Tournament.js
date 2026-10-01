@@ -752,6 +752,21 @@ const fixtureSchema = new mongoose.Schema(
             scheduledBy: { type: String, default: null }
         },
 
+        /*
+         * A match the organizers could not play on its matchday. Reserved
+         * fixtures stay Pending (so they can still be reported/played whenever),
+         * keep their new kickoff in scheduledAt, and are flagged everywhere
+         * fixtures are listed. Reserving also releases the stadium channel lock.
+         */
+        reserved: {
+            isReserved: { type: Boolean, default: false },
+            at: { type: Date, default: null },          // when it was marked
+            by: { type: String, default: null },        // organizer user id
+            from: { type: Date, default: null },        // kickoff that was missed
+            until: { type: Date, default: null },       // new day/time (null = not decided)
+            note: { type: String, default: null }
+        },
+
         status: {
             type: String,
             enum: ['Pending', 'Live', 'Played', 'Cancelled'],

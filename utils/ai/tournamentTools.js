@@ -212,7 +212,12 @@ function fixtureLine(fixture, team) {
         status: fixture.status,
         scheduledAt: fixture.scheduledAt ? new Date(fixture.scheduledAt).toISOString() : null,
         score: fixture.result?.home != null ? `${fixture.result.home}-${fixture.result.away}` : null,
-        group: fixture.groupKey || null
+        group: fixture.groupKey || null,
+        reserved: fixture.reserved?.isReserved ? {
+            until: fixture.reserved.until ? new Date(fixture.reserved.until).toISOString() : null,
+            wasDue: fixture.reserved.from ? new Date(fixture.reserved.from).toISOString() : null,
+            note: fixture.reserved.note || null
+        } : null
     };
 }
 
@@ -771,6 +776,11 @@ const TOOLS = {
             venue: fixture.venueName || '',
             scheduledAt: fixture.scheduledAt ? new Date(fixture.scheduledAt).toISOString() : null,
             score: fixture.result?.home != null ? `${fixture.result.home}-${fixture.result.away}` : null,
+            reserved: fixture.reserved?.isReserved ? {
+                until: fixture.reserved.until ? new Date(fixture.reserved.until).toISOString() : null,
+                wasDue: fixture.reserved.from ? new Date(fixture.reserved.from).toISOString() : null,
+                note: fixture.reserved.note || null
+            } : null,
             notes: fixture.notes || ''
         };
     },
@@ -814,8 +824,14 @@ const TOOLS = {
                 home: f.homeTeam,
                 away: f.awayTeam,
                 phase: f.phase,
+                status: f.status,
                 scheduledAt: f.scheduledAt ? new Date(f.scheduledAt).toISOString() : null,
-                venue: f.venueName || ''
+                venue: f.venueName || '',
+                reserved: f.reserved?.isReserved ? {
+                    until: f.reserved.until ? new Date(f.reserved.until).toISOString() : null,
+                    wasDue: f.reserved.from ? new Date(f.reserved.from).toISOString() : null,
+                    note: f.reserved.note || null
+                } : null
             }))
         };
     },
@@ -884,8 +900,8 @@ const TOOLS = {
         };
     },
 
-    /** Composite: everything you need to write a scouting report on a team. */
-    async scout_report({ ctx, args }) {
+    /** Composite: everything you need to write a full team report. */
+    async team_report({ ctx, args }) {
         const tournament = await getTournament(ctx, args.tournament);
         const team = await findTeam(ctx.guildId, args.team);
         if (!team) return { error: `team "${args.team}" not found` };
@@ -941,7 +957,7 @@ const TOOL_LIST = [
     { name: 'team_form', description: 'A team\'s recent results (W/D/L sequence).', args: { team: 'team name', lastN: 'number, default 5' } },
     { name: 'standings', description: 'League table, optionally one group.', args: { group: 'optional group key' } },
     { name: 'team_position', description: 'A team\'s position, points and gap to the leader.', args: { team: 'team name' } },
-    { name: 'team_schedule', description: 'A team\'s upcoming fixtures.', args: { team: 'team name' } },
+    { name: 'team_schedule', description: 'A team\'s upcoming fixtures, including matches marked reserved/postponed.', args: { team: 'team name' } },
     { name: 'team_results', description: 'A team\'s recent results.', args: { team: 'team name' } },
     { name: 'leaders', description: 'Leaderboard for a statistic (golden boot, assists, saves, tackles, interceptions, MVPs).', args: { metric: 'metric', limit: 'number' } },
     { name: 'player_rank', description: 'A player\'s rank in a statistic.', args: { player: 'name (optional, defaults to the asker)', metric: 'metric' } },
@@ -951,13 +967,13 @@ const TOOL_LIST = [
     { name: 'squad', description: 'A team\'s roster.', args: { team: 'team name' } },
     { name: 'captain_of', description: 'A team\'s captain and vice captain.', args: { team: 'team name' } },
     { name: 'head_to_head', description: 'History between two teams.', args: { teamA: 'team', teamB: 'team' } },
-    { name: 'fixture_info', description: 'Details of one fixture by match number.', args: { matchNumber: 'number' } },
+    { name: 'fixture_info', description: 'Details of one fixture by match number, including whether it is reserved/postponed.', args: { matchNumber: 'number' } },
     { name: 'recent_results', description: 'Latest results in the tournament.', args: { limit: 'number' } },
-    { name: 'upcoming_fixtures', description: 'Next fixtures in the tournament.', args: { limit: 'number' } },
+    { name: 'upcoming_fixtures', description: 'Next fixtures in the tournament, including reserved status.', args: { limit: 'number' } },
     { name: 'free_agents', description: 'Players without a team in this tournament.', args: {} },
     { name: 'compare_players', description: 'Compare two players stat by stat.', args: { playerA: 'name', playerB: 'name' } },
     { name: 'trophies_of', description: 'Trophies and awards of a player.', args: { player: 'name (optional)' } },
-    { name: 'scout_report', description: 'Full scouting report on a team (form, stars, results, table).', args: { team: 'team name' } }
+    { name: 'team_report', description: 'Full team report (form, stars, results, table, weakness).', args: { team: 'team name' } }
 ];
 
 /**

@@ -21,6 +21,7 @@ const { Fixture, Team, TournamentSettings, TournamentPlayer, Player } = require(
 const { buildMatchAnnouncement } = require('./ai/announcements');
 const { discordFull, discordRelative } = require('./istTime');
 const { sanitizeAIText } = require('./aiGuard');
+const { slotEmoji, vsLine } = require('./ai/emojiSlots');
 
 const TICK_MS = 20_000;
 const DEFAULT_LOCK_BEFORE_MINUTES = 1;
@@ -183,9 +184,12 @@ async function announceMatch({ client, guild, fixture }) {
         scheduledAt: fixture.scheduledAt || new Date()
     });
 
+    const calendar = slotEmoji('calendar', guild.id) || '⏰';
+
     const header =
         `🏟️ **MATCH ${fixture.matchNumber || ''} · ${tournament?.name || 'MATCH DAY'}**\n` +
-        `⏰ ${discordFull(fixture.scheduledAt)} (${discordRelative(fixture.scheduledAt)})` +
+        `**${vsLine(homeTeam, awayTeam, guild.id)}**\n` +
+        `${calendar} ${discordFull(fixture.scheduledAt)} (${discordRelative(fixture.scheduledAt)})` +
         (fixture.venueName ? `\n📍 ${fixture.venueName}` : '');
 
     /* Belt and braces: even a hostile body cannot introduce a ping. */
@@ -193,28 +197,39 @@ async function announceMatch({ client, guild, fixture }) {
 
     const content = `${pings.labelLine}\n\n${header}\n\n${safeBody}`.trim().slice(0, 1900);
 
-    const sent = await channel.send({
-        content,
-        allowedMentions: {
-            parse: [],
-            roles: pings.roleIds,
-            users: pings.userIds
-        }
-    }).catch(async error => {
-        console.error('[matchScheduler] announcement send failed:', error?.message || error);
+    const allowedMentions = {
+        parse: [],
+        roles: pings.roleIds,
+        users: pings.userIds
+    };
+
+    const sent = await channel.send({ content, allowedMentions }).catch(async error => {
+        console.error('[matchScheduler] announcement send failed; trying safe fallback:', error?.message || error);
 
         const embed = new EmbedBuilder()
             .setColor(0xFEBE10)
-            .setTitle(`🏟️ Match ${fixture.matchNumber || ''} — ${homeTeam} vs ${awayTeam}`)
-            .setDescription(body)
+            .setTitle(`🏟️ Match ${fixture.matchNumber || ''} — ${vsLine(homeTeam, awayTeam, guild.id)}`)
+            .setDescription(`${header}\n\n${safeBody}`.slice(0, 4000))
             .setTimestamp();
 
-        return channel.send({ embeds: [embed] }).catch(() => null);
+        /* Keep the code-built team/captain pings in the fallback too. AI text is
+           never allowed to create mentions, and allowedMentions is the same
+           explicit team/captain allowlist as the primary send. */
+        return channel.send({
+            content: pings.labelLine || undefined,
+            embeds: [embed],
+            allowedMentions
+        }).catch(fallbackError => {
+            console.error('[matchScheduler] announcement fallback failed:', fallbackError?.message || fallbackError);
+            return null;
+        });
     });
 
     plan.announcementMessageId = sent?.id || null;
 
-    return { ok: true, messageId: sent?.id || null };
+    if (!sent) return { ok: false, error: 'both announcement sends failed' };
+
+    return { ok: true, messageId: sent.id };
 }
 
 /* ── Scheduling API (used by the .schedule command) ── */
@@ -231,6 +246,7 @@ async function scheduleMatch({
     const now = new Date();
     const kickoff = fixture.scheduledAt ? new Date(fixture.scheduledAt) : null;
 
+    if (fixture.status === 'Played') return { ok: false, error: 'this fixture has already been played' };
     if (!kickoff) return { ok: false, error: 'this fixture has no kickoff time — set one with `.editfixture`' };
     if (kickoff.getTime() - now.getTime() < 60_000) {
         return { ok: false, error: 'kickoff is less than a minute away — pick a later time' };
@@ -249,27 +265,52 @@ async function scheduleMatch({
     /* 2. Persist the plan */
     const announceAt = new Date(kickoff.getTime() - lockBeforeMinutes * 60_000);
 
-    await Fixture.updateOne(
-        { _id: fixture._id },
-        {
-            $set: {
-                channelPlan: {
-                    channelId,
-                    state: 'locked',
-                    lockAt: now,
-                    announceAt,
-                    lockedAt: now,
-                    announcedAt: null,
-                    lockedBy: actorId,
-                    scheduledBy: actorId,
-                    previousOverwrite: lock.previousOverwrite,
-                    pingCaptains: !!pingCaptains,
-                    announcementMessageId: null,
-                    lastError: null
+    try {
+        const saved = await Fixture.updateOne(
+            { _id: fixture._id },
+            {
+                $set: {
+                    status: 'Pending',
+                    scheduledAt: kickoff,
+                    venueName: fixture.venueName || '',
+                    venueType: fixture.venueType || 'home',
+                    /* A reserved fixture is back on the active schedule now. */
+                    'reserved.isReserved': false,
+                    'reserved.until': null,
+                    channelPlan: {
+                        channelId,
+                        state: 'locked',
+                        lockAt: now,
+                        announceAt,
+                        lockedAt: now,
+                        announcedAt: null,
+                        lockedBy: actorId,
+                        scheduledBy: actorId,
+                        previousOverwrite: lock.previousOverwrite,
+                        pingCaptains: !!pingCaptains,
+                        announcementMessageId: null,
+                        lastError: null
+                    }
                 }
             }
-        }
-    );
+        );
+
+        if (saved?.matchedCount === 0) throw new Error('fixture was removed before the plan could be saved');
+    } catch (error) {
+        const unlocked = await applyUnlock({
+            guild,
+            channelId,
+            previousOverwrite: lock.previousOverwrite,
+            reason: 'Schedule save failed — release channel'
+        }).catch(() => ({ ok: false }));
+
+        return {
+            ok: false,
+            error: unlocked?.ok
+                ? `could not save the schedule; the channel was unlocked: ${String(error?.message || error).slice(0, 160)}`
+                : `could not save the schedule and the channel could not be unlocked; please unlock it manually: ${String(error?.message || error).slice(0, 140)}`
+        };
+    }
 
     return {
         ok: true,
@@ -282,30 +323,99 @@ async function scheduleMatch({
 
 async function cancelPlan({ guild, fixture, unlock = true }) {
     const plan = fixture.channelPlan || {};
+    const channelId = plan.channelId || null;
 
-    if (unlock && plan.channelId) {
-        await applyUnlock({
+    /* Cancel the DB plan first so it cannot be claimed and announced while we
+       are calling Discord to restore channel permissions. Keep channelId until
+       the unlock succeeds; the scheduler retries failed unlocks. */
+    let cancelled;
+
+    try {
+        cancelled = await Fixture.updateOne(
+            { _id: fixture._id },
+            { $set: { 'channelPlan.state': 'cancelled', 'channelPlan.lastError': null } }
+        );
+    } catch (error) {
+        return {
+            ok: false,
+            cancelled: false,
+            unlocked: false,
+            error: `could not cancel the saved plan: ${error?.message || 'database update failed'}`
+        };
+    }
+
+    if (cancelled?.matchedCount === 0) {
+        return { ok: false, cancelled: false, unlocked: false, error: 'fixture was not found while cancelling its plan' };
+    }
+
+    if (unlock && channelId) {
+        const result = await applyUnlock({
             guild,
-            channelId: plan.channelId,
+            channelId,
             previousOverwrite: plan.previousOverwrite,
             reason: 'Match plan cancelled'
-        }).catch(() => null);
+        }).catch(error => ({ ok: false, error: error?.message || 'channel unlock failed' }));
+
+        if (!result?.ok) {
+            const message = String(result?.error || 'channel unlock failed').slice(0, 200);
+            await Fixture.updateOne(
+                { _id: fixture._id },
+                { $set: { 'channelPlan.state': 'cancelled', 'channelPlan.lastError': message } }
+            ).catch(() => null);
+
+            return { ok: false, cancelled: true, unlocked: false, error: message };
+        }
     }
 
     await Fixture.updateOne(
-        { _id: fixture._id },
-        { $set: { 'channelPlan.state': 'cancelled', 'channelPlan.channelId': null, 'channelPlan.lastError': null } }
-    );
+        { _id: fixture._id, 'channelPlan.state': 'cancelled' },
+        { $set: { 'channelPlan.channelId': null, 'channelPlan.lastError': null } }
+    ).catch(error => console.error('[matchScheduler] channel unlock saved; plan cleanup will retry:', error?.message || error));
 
-    return { ok: true };
+    return { ok: true, cancelled: true, unlocked: !!(unlock && channelId) };
 }
 
-async function listPlans(guildId) {
-    return Fixture.find({
+async function retryCancelledUnlocks(guild) {
+    const pending = await Fixture.find({
+        guildId: guild.id,
+        'channelPlan.state': 'cancelled',
+        'channelPlan.channelId': { $ne: null }
+    }).limit(10).lean().catch(() => []);
+
+    for (const fixture of pending) {
+        const plan = fixture.channelPlan || {};
+        const released = await applyUnlock({
+            guild,
+            channelId: plan.channelId,
+            previousOverwrite: plan.previousOverwrite,
+            reason: 'Retry cancelled match channel unlock'
+        }).catch(error => ({ ok: false, error: error?.message || 'channel unlock failed' }));
+
+        if (released?.ok) {
+            await Fixture.updateOne(
+                { _id: fixture._id, 'channelPlan.state': 'cancelled' },
+                { $set: { 'channelPlan.channelId': null, 'channelPlan.lastError': null } }
+            ).catch(() => null);
+        } else {
+            await Fixture.updateOne(
+                { _id: fixture._id, 'channelPlan.state': 'cancelled' },
+                { $set: { 'channelPlan.lastError': String(released?.error || 'channel unlock failed').slice(0, 200) } }
+            ).catch(() => null);
+        }
+    }
+}
+
+async function listPlans(guildId, tournamentId = null) {
+    const query = {
         guildId,
+        'reserved.isReserved': { $ne: true },
         'channelPlan.channelId': { $ne: null },
-        'channelPlan.state': { $in: ['locked', 'announced'] }
-    }).sort({ scheduledAt: 1 }).lean();
+        'channelPlan.state': { $in: ['locked', 'announced', 'cancelled'] }
+    };
+
+    if (tournamentId) query.tournamentId = tournamentId;
+
+    return Fixture.find(query).sort({ scheduledAt: 1 }).lean();
 }
 
 /* ── The tick ── */
@@ -318,9 +428,46 @@ async function tick(client) {
         const now = new Date();
 
         for (const guild of client.guilds.cache.values()) {
+            await retryCancelledUnlocks(guild);
+
+            /* A reserved match must never fire its old announcement. If an
+               immediate unlock failed, retry it on every tick until successful. */
+            const reservedPlans = await Fixture.find({
+                guildId: guild.id,
+                'reserved.isReserved': true,
+                'channelPlan.channelId': { $ne: null },
+                'channelPlan.state': { $in: ['pending', 'locked', 'announced'] }
+            }).limit(10).lean().catch(() => []);
+
+            for (const fixture of reservedPlans) {
+                const plan = fixture.channelPlan || {};
+                const released = await applyUnlock({
+                    guild,
+                    channelId: plan.channelId,
+                    previousOverwrite: plan.previousOverwrite,
+                    reason: 'Reserved match — release stadium channel'
+                }).catch(error => ({ ok: false, error: error?.message || 'channel unlock failed' }));
+
+                if (released?.ok) {
+                    await Fixture.updateOne(
+                        { _id: fixture._id, 'reserved.isReserved': true },
+                        { $set: { 'channelPlan.state': 'cancelled', 'channelPlan.channelId': null, 'channelPlan.lastError': null } }
+                    ).catch(() => null);
+                } else {
+                    await Fixture.updateOne(
+                        { _id: fixture._id, 'reserved.isReserved': true },
+                        { $set: {
+                            'channelPlan.state': 'cancelled',
+                            'channelPlan.lastError': String(released?.error || 'channel unlock failed').slice(0, 200)
+                        } }
+                    ).catch(() => null);
+                }
+            }
+
             /* 1. Unlock + announce matches whose time has come */
             const due = await Fixture.find({
                 guildId: guild.id,
+                'reserved.isReserved': { $ne: true },
                 'channelPlan.state': 'locked',
                 'channelPlan.announceAt': { $lte: now }
             }).limit(5).lean().catch(() => []);
@@ -328,7 +475,7 @@ async function tick(client) {
             for (const fixture of due) {
                 /* atomic claim so a second tick cannot announce twice */
                 const claim = await Fixture.findOneAndUpdate(
-                    { _id: fixture._id, 'channelPlan.state': 'locked' },
+                    { _id: fixture._id, 'channelPlan.state': 'locked', 'reserved.isReserved': { $ne: true } },
                     { $set: { 'channelPlan.state': 'announced', 'channelPlan.announcedAt': now } },
                     { new: true }
                 ).catch(() => null);
@@ -396,6 +543,8 @@ async function bootCatchUp(client) {
     const now = Date.now();
 
     for (const guild of client.guilds.cache.values()) {
+        await retryCancelledUnlocks(guild);
+
         const pending = await Fixture.find({
             guildId: guild.id,
             'channelPlan.channelId': { $ne: null },
@@ -404,6 +553,32 @@ async function bootCatchUp(client) {
 
         for (const fixture of pending) {
             const plan = fixture.channelPlan;
+
+            if (fixture.reserved?.isReserved) {
+                const released = await applyUnlock({
+                    guild,
+                    channelId: plan.channelId,
+                    previousOverwrite: plan.previousOverwrite,
+                    reason: 'Reserved match — release stadium channel after restart'
+                }).catch(error => ({ ok: false, error: error?.message || 'channel unlock failed' }));
+
+                if (released?.ok) {
+                    await Fixture.updateOne(
+                        { _id: fixture._id, 'reserved.isReserved': true },
+                        { $set: { 'channelPlan.state': 'cancelled', 'channelPlan.channelId': null, 'channelPlan.lastError': null } }
+                    ).catch(() => null);
+                } else {
+                    await Fixture.updateOne(
+                        { _id: fixture._id, 'reserved.isReserved': true },
+                        { $set: {
+                            'channelPlan.state': 'cancelled',
+                            'channelPlan.lastError': String(released?.error || 'channel unlock failed').slice(0, 200)
+                        } }
+                    ).catch(() => null);
+                }
+
+                continue;
+            }
 
             if (['Played', 'Cancelled'].includes(fixture.status)) {
                 await applyUnlock({ guild, channelId: plan.channelId, previousOverwrite: plan.previousOverwrite, reason: 'Fixture already finished' }).catch(() => null);

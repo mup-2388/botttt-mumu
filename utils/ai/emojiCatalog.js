@@ -31,6 +31,7 @@ function crawl(client) {
     if (!client?.guilds?.cache) return 0;
 
     let count = 0;
+    const seen = new Set();
 
     for (const guild of client.guilds.cache.values()) {
         const emojis = guild.emojis?.cache;
@@ -38,6 +39,7 @@ function crawl(client) {
         if (!emojis) continue;
 
         for (const emoji of emojis.values()) {
+            seen.add(String(emoji.id));
             catalog.set(String(emoji.id), {
                 name: emoji.name,
                 id: String(emoji.id),
@@ -49,6 +51,11 @@ function crawl(client) {
             });
             count++;
         }
+    }
+
+    /* Drop emojis removed from any guild since the last crawl. */
+    for (const id of catalog.keys()) {
+        if (!seen.has(id)) catalog.delete(id);
     }
 
     lastRefresh = Date.now();
@@ -150,6 +157,30 @@ function stats() {
     return { emojis: catalog.size, users: userEmojis.size, lastRefresh };
 }
 
+/**
+ * Every emoji the bot can see, best-first for the given guild:
+ * that guild's own emojis, then animated ones, then everything else.
+ * Used by emojiSlots to pick a per-slot emoji deterministically.
+ */
+function emojisFor(guildId = null) {
+    const list = [...catalog.values()];
+
+    return list.sort((a, b) => {
+        const aLocal = String(a.guildId) === String(guildId) ? 1 : 0;
+        const bLocal = String(b.guildId) === String(guildId) ? 1 : 0;
+
+        if (aLocal !== bLocal) return bLocal - aLocal;
+        if (a.animated !== b.animated) return a.animated ? -1 : 1;
+
+        return a.name.localeCompare(b.name);
+    });
+}
+
+/** Direct lookup by emoji id (used to verify league-wide emojis like :vsvs:). */
+function byId(id) {
+    return catalog.get(String(id)) || null;
+}
+
 module.exports = {
     initEmojiCatalog,
     emojiHint,
@@ -159,5 +190,7 @@ module.exports = {
     stats,
     markStale,
     size,
-    lastRefreshAt
+    lastRefreshAt,
+    emojisFor,
+    byId
 };
