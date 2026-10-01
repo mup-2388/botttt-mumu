@@ -76,6 +76,89 @@ function pick(list) {
     return list[Math.floor(Math.random() * list.length)];
 }
 
+/* ── Fact packing ──
+ * The model must never receive a JSON blob chopped in half: a truncated object
+ * confuses it and can make it invent the missing tail. Instead we shrink the
+ * facts in stages (drop noise, then shorten arrays) until the WHOLE thing fits.
+ */
+
+const NOISE_KEYS = new Set(['discordId', 'discordID', 'date', 'phase', 'group', 'createdAt', 'updatedAt']);
+
+function deNoise(value, depth = 0) {
+    if (depth > 6) return null;
+
+    if (Array.isArray(value)) {
+        return value.map(v => deNoise(v, depth + 1)).filter(v => v !== null && v !== undefined);
+    }
+
+    if (value && typeof value === 'object') {
+        const out = {};
+
+        for (const [k, v] of Object.entries(value)) {
+            if (NOISE_KEYS.has(k)) continue;
+
+            const clean = deNoise(v, depth + 1);
+
+            if (clean === null || clean === undefined) continue;
+            if (typeof clean === 'string' && !clean.trim()) continue;
+            if (Array.isArray(clean) && !clean.length) continue;
+            if (typeof clean === 'object' && !Array.isArray(clean) && !Object.keys(clean).length) continue;
+
+            out[k] = clean;
+        }
+
+        return out;
+    }
+
+    if (value === null || value === undefined) return null;
+    return value;
+}
+
+function capArrays(value, max, skipKeys = new Set(), depth = 0) {
+    if (depth > 6) return value;
+
+    if (Array.isArray(value)) return value.slice(0, max).map(v => capArrays(v, max, skipKeys, depth + 1));
+
+    if (value && typeof value === 'object') {
+        const out = {};
+
+        for (const [k, v] of Object.entries(value)) {
+            if (skipKeys.has(k)) continue;
+            out[k] = capArrays(v, max, skipKeys, depth + 1);
+        }
+
+        return out;
+    }
+
+    return value;
+}
+
+/** One natural sentence about emoji use — reads properly when the list is empty. */
+function emojiRule(list) {
+    return list
+        ? `You may use 1-3 custom emojis, and ONLY from this list: ${list}`
+        : 'No custom emojis are available right now — use plain text and standard unicode emoji only.';
+}
+
+/** Compact, always-valid JSON for a prompt, within `limit` characters. */
+function compactFacts(facts, limit = 2000) {
+    const base = deNoise(facts);
+
+    const attempts = [
+        base,
+        capArrays(base, 5),
+        capArrays(base, 2),
+        capArrays(base, 1, new Set(['results', 'recentResults', 'upcoming', 'missed']))
+    ];
+
+    for (const attempt of attempts) {
+        const json = JSON.stringify(attempt);
+        if (json.length <= limit) return json;
+    }
+
+    return JSON.stringify(attempts[attempts.length - 1]).slice(0, limit);
+}
+
 function templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName }) {
     const text = pick(TEMPLATES)
         .replace(/{home}/g, homeTeam)
@@ -142,7 +225,7 @@ async function buildMatchAnnouncement({
         `You are MUMU, the host of a Discord football league. You write the kickoff announcement for one match.\n\n` +
         `STYLE: ${tone}. Angle to take: ${angle}. Roast level: light-medium — tease the teams, never the people's real lives.\n` +
         `LENGTH: 2-4 sentences, max 400 characters. Discord markdown allowed (**bold**, *italic*).\n` +
-        `You may use 1-3 custom emojis from this list only: ${emojiHint(`${homeTeam} ${awayTeam} match`, guildId, 12) || '(none available)'}\n\n` +
+        `${emojiRule(emojiHint(`${homeTeam} ${awayTeam} match`, guildId, 12))}\n\n` +
         `HARD RULES:\n` +
         `- NEVER write @everyone, @here, any <@&role> or <@user> mention — the system adds the team pings itself.\n` +
         `- Never invent scores, stats or names: use only the facts provided.\n` +
@@ -156,7 +239,7 @@ async function buildMatchAnnouncement({
         `Venue: ${venueName || 'home ground'}\n` +
         `Tournament: ${tournament?.name || 'the league'} (${tournament?.phase || 'league'} phase)\n` +
         `Match number: ${fixture?.matchNumber ?? '?'}\n` +
-        (facts ? `FACTS: ${JSON.stringify(facts).slice(0, 1200)}\n` : '') +
+        (facts ? `FACTS: ${compactFacts(facts, 1400)}\n` : '') +
         `${avoid}\n\n` +
         `Write the announcement body now.`;
 
@@ -196,12 +279,12 @@ async function buildMatchAnnouncement({
 async function buildDigestProse({ guildId, tournamentName, facts }) {
     const systemPrompt =
         `You are MUMU, writing the daily league digest for a Discord football league.\n` +
-        `Tone: funny, a bit roast-y, 3-5 short lines. Discord markdown allowed, 1-3 custom emojis max from: ` +
-        `${emojiHint('football league digest goals', guildId, 10) || '(none)'}\n` +
+        `Tone: funny, a bit roast-y, 3-5 short lines. Discord markdown allowed. ` +
+        `${emojiRule(emojiHint('football league digest goals', guildId, 10))}\n` +
         `Never invent numbers — use only the facts. Never write @everyone/@here or role/user mentions.`;
 
     const res = await callAI({
-        messages: [{ role: 'user', content: `Tournament: ${tournamentName}\nFacts: ${JSON.stringify(facts).slice(0, 2000)}` }],
+        messages: [{ role: 'user', content: `Tournament: ${tournamentName}\nFacts: ${compactFacts(facts, 2600)}` }],
         systemPrompt,
         temperature: 0.9,
         maxTokens: 400
@@ -215,11 +298,11 @@ async function buildScoutProse({ guildId, teamName, facts }) {
     const systemPrompt =
         `You are MUMU, writing a scouting report on a team for their next opponent in a Discord league.\n` +
         `Structure: how they play, their danger man, their weakness, one-line plan to beat them. ` +
-        `4-6 short lines, markdown allowed, 1-3 custom emojis from: ${emojiHint(`${teamName} football`, guildId, 10) || '(none)'}\n` +
+        `4-6 short lines, markdown allowed. ${emojiRule(emojiHint(`${teamName} football`, guildId, 10))}\n` +
         `Use ONLY the facts provided. Never invent numbers. No mentions of any kind.`;
 
     const res = await callAI({
-        messages: [{ role: 'user', content: `Team: ${teamName}\nFacts: ${JSON.stringify(facts).slice(0, 2000)}` }],
+        messages: [{ role: 'user', content: `Team: ${teamName}\nFacts: ${compactFacts(facts, 2600)}` }],
         systemPrompt,
         temperature: 0.8,
         maxTokens: 500
