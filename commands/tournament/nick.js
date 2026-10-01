@@ -8,7 +8,12 @@
  *
  * Usage:  .nick @user <new nickname>
  *         .nick @user reset
- * Slash:  /teamnick user:<user> nickname:<name>
+ *         .nick @user <new nickname> tournament=<key>   (not the default tournament)
+ * Slash:  /teamnick user:<user> nickname:<name> [tournament:<key>]
+ *
+ * Works for the server's DEFAULT tournament unless a tournament is given:
+ * the captain / vice captain / teammate checks use the team the user is on
+ * IN THAT TOURNAMENT, never a stale team from an old tournament.
  *
  * Aliases: nickname, setnick, teamnick
  */
@@ -19,8 +24,15 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const { Team, Player, TournamentPlayer } = require('../../models/Tournament');
+const { TournamentPlayer } = require('../../models/Tournament');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs } = require('../../utils/getTournament');
+const {
+    resolveActorTeam,
+    getRosterMembership,
+    effectiveCaptainId,
+    sameId
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'nick',
@@ -43,6 +55,11 @@ module.exports = {
             opt.setName('nickname')
                 .setDescription('New nickname, or "reset" to revert to Discord username')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -61,12 +78,27 @@ module.exports = {
                 return message.reply('❓ Usage: `.nick @user <new nickname>` or `.nick @user reset`');
             }
 
+            // Optional tournament=<key> token (never a loose word — nicknames are free text)
+            const parsedKey = await extractTournamentFromArgs(
+                message.guild.id,
+                message.content.split(/\s+/),
+                { tokenOnly: true }
+            );
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+            const explicitKey = parsedKey.explicit ? parsedKey.tournament?.tournamentKey : null;
+
             // Extract nickname from args after the command and mention
             const mentionRegex = /<@!?\d+>/;
             const afterMention = message.content.replace(mentionRegex, '').trim();
             const nickParts = afterMention
                 .split(/\s+/)
-                .filter(arg => !arg.startsWith('.') && !arg.startsWith('<@'));
+                .filter(arg =>
+                    !arg.startsWith('.') &&
+                    !arg.startsWith('<@') &&
+                    !/^(tournament|key|t)=/i.test(arg)
+                );
 
             const nickname = nickParts.join(' ').trim();
 
@@ -79,6 +111,7 @@ module.exports = {
                 actorId: message.author.id,
                 targetUser: target,
                 nickname,
+                tournamentKey: explicitKey,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -103,6 +136,7 @@ module.exports = {
                 actorId: interaction.user.id,
                 targetUser: target,
                 nickname,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -125,59 +159,44 @@ module.exports = {
  * Change a teammate's nickname IN THE BOT DATABASE only.
  * Does NOT touch the Discord server nickname.
  *
- * 1. Verify actor is captain/VC of a team
- * 2. Verify target is on the same team
- * 3. Update Player.name in the database
- * 4. Update TournamentPlayer.playerNameSnapshot for active tournaments
+ * 1. Resolve the tournament (explicit key, else the server default)
+ * 2. Verify actor is captain/VC of a team IN THAT TOURNAMENT
+ * 3. Verify target is on the same team IN THAT TOURNAMENT
+ * 4. Update Player.name (the bot nickname) + TournamentPlayer snapshots
  */
-async function runNick({ guild, actorId, targetUser, nickname, reply }) {
-    /* ── Find actor's team ── */
-    const actorPlayer = await Player.findOne({
+async function runNick({ guild, actorId, targetUser, nickname, tournamentKey = null, reply }) {
+    /* ── Find actor's team in the tournament + check captain / VC ── */
+    const { tournament, ctx, error } = await resolveActorTeam({
         guildId: guild.id,
-        discordID: actorId
-    }).populate('teamId');
-
-    if (!actorPlayer?.teamId) {
-        return reply({ content: '❌ You are not linked to any team.' });
-    }
-
-    const team = actorPlayer.teamId;
-
-    /* ── Check actor is captain or VC ── */
-    const isCaptain =
-        String(team.captainID) === String(actorId) ||
-        actorPlayer.isCaptain;
-
-    const isViceCaptain =
-        String(team.viceCaptainID) === String(actorId) ||
-        actorPlayer.isViceCaptain;
-
-    if (!isCaptain && !isViceCaptain) {
-        return reply({ content: '❌ Only the team captain or vice captain can change player nicknames.' });
-    }
-
-    /* ── Find target player ── */
-    const targetPlayer = await Player.findOne({
-        guildId: guild.id,
-        discordID: targetUser.id
+        userId: actorId,
+        tournamentKey,
+        need: 'manage',
+        noun: 'change player nicknames'
     });
+
+    if (error) return reply({ content: error });
+
+    const { team, entry } = ctx;
+
+    /* ── Find target player + check same team in this tournament ── */
+    const { player: targetPlayer, tournamentPlayer: targetEntry } =
+        await getRosterMembership(guild.id, tournament, team._id, targetUser.id);
 
     if (!targetPlayer) {
         return reply({ content: `❌ ${targetUser} is not registered as a player.` });
     }
 
-    /* ── Check target is on same team ── */
-    if (!targetPlayer.teamId || String(targetPlayer.teamId) !== String(team._id)) {
+    if (!targetEntry) {
         return reply({
-            content: `❌ ${targetUser} is not in **${team.name}**. You can only rename your own teammates.`
+            content:
+                `❌ ${targetUser} is not in **${team.name}** (${tournament.name}). ` +
+                'You can only rename your own teammates.'
         });
     }
 
     /* ── Can't nickname the captain (unless you ARE the captain) ── */
-    if (
-        String(team.captainID) === String(targetUser.id) &&
-        String(actorId) !== String(team.captainID)
-    ) {
+    const captainId = effectiveCaptainId(entry, team);
+    if (sameId(captainId, targetUser.id) && !sameId(actorId, captainId)) {
         return reply({ content: '❌ Only the captain themselves can change their own nickname.' });
     }
 
@@ -189,11 +208,11 @@ async function runNick({ guild, actorId, targetUser, nickname, reply }) {
 
     const newNickname = isReset ? (targetUser.username || targetUser.displayName) : nickname.slice(0, 32);
 
-    /* ── Update Player.name in database ── */
+    /* ── Update Player.name in database (the nickname is global to the player) ── */
     targetPlayer.name = newNickname;
     await targetPlayer.save();
 
-    /* ── Update TournamentPlayer.playerNameSnapshot for active tournaments ── */
+    /* ── Keep every tournament's name snapshot in sync ── */
     await TournamentPlayer.updateMany(
         { playerId: targetPlayer._id },
         { $set: { playerNameSnapshot: newNickname } }
@@ -205,6 +224,7 @@ async function runNick({ guild, actorId, targetUser, nickname, reply }) {
             .setColor(0xE74C3C)
             .setTitle('🏷️ NICKNAME RESET')
             .setDescription(
+                `Tournament: **${tournament.name}**\n` +
                 `Team: **${team.name}**\n` +
                 `Player: ${targetUser}\n` +
                 `Bot nickname reverted to their Discord username: **${newNickname}**`
@@ -219,6 +239,7 @@ async function runNick({ guild, actorId, targetUser, nickname, reply }) {
         .setColor(0x57F287)
         .setTitle('🏷️ NICKNAME CHANGED')
         .setDescription(
+            `Tournament: **${tournament.name}**\n` +
             `Team: **${team.name}**\n` +
             `Player: ${targetUser}\n` +
             `Bot Nickname: **${newNickname}**`

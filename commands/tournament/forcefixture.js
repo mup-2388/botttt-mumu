@@ -32,11 +32,6 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('forcefixture')
         .setDescription('Force-change fixture status')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Optional tournament key')
-                .setRequired(false)
-        )
         .addIntegerOption(opt =>
             opt.setName('match')
                 .setDescription('Match number')
@@ -52,6 +47,11 @@ module.exports = {
                     { name: 'Played', value: 'Played' },
                     { name: 'Cancelled', value: 'Cancelled' }
                 )
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Optional tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================

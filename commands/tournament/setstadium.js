@@ -19,13 +19,17 @@ const {
 } = require('discord.js');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { Team } = require('../../models/Tournament');
-const { parseTeamToken, resolveManagedTeam } = require('../../utils/teamResolver');
+const { resolveManagedTeamInTournament } = require('../../utils/teamResolver');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const {
+    parseTeamTokenInTournament,
+    getTournamentTeams
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'setstadium',
     description: 'Set your team stadium, or set any team stadium as organizer.',
-    usage: '.setstadium [team=<name>] <stadium name> | Organizer: .setstadium <team name> <stadium name>',
+    usage: '.setstadium [team=<name>] <stadium name> [tournament=<key>] | Organizer: .setstadium <team name> <stadium name>',
     aliases: ['stadium'],
     hidden: false,
     cooldown: 5,
@@ -41,6 +45,11 @@ module.exports = {
         .addStringOption(opt =>
             opt.setName('team')
                 .setDescription('Team name (captain: one of your teams • organizer: any team)')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
                 .setRequired(false)
         ),
 
@@ -65,14 +74,29 @@ module.exports = {
                 );
             }
 
-            const token = await parseTeamToken(guildId, userId, args);
+            // Optional tournament=<key> token (never a loose word)
+            const parsedKey = await extractTournamentFromArgs(guildId, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const resolvedTournament = await resolveTournament(
+                guildId,
+                parsedKey.explicit ? parsedKey.tournament.tournamentKey : null
+            );
+            if (!resolvedTournament.tournament) {
+                return message.reply(resolvedTournament.error);
+            }
+            const tournament = resolvedTournament.tournament;
+
+            const token = await parseTeamTokenInTournament(guildId, tournament, parsedKey.rest);
 
             let parsed;
             if (organizer && !token.teamName) {
-                // Organizer legacy flexible parsing (match leading args to any team)
-                parsed = await parseOrganizerTeamAndValue(guildId, args);
+                // Organizer flexible parsing (match leading args to a tournament team)
+                parsed = await parseOrganizerTeamAndValue(guildId, tournament, parsedKey.rest);
             } else {
-                const rest = token.teamName ? token.rest : args;
+                const rest = token.teamName ? token.rest : parsedKey.rest;
                 parsed = {
                     teamName: token.teamName,
                     value: rest.join(' ').trim()
@@ -85,6 +109,7 @@ module.exports = {
                 organizer,
                 teamName: parsed.teamName,
                 stadiumName: parsed.value,
+                tournament,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -109,6 +134,7 @@ module.exports = {
                 organizer,
                 teamName: interaction.options.getString('team'),
                 stadiumName: interaction.options.getString('stadium'),
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -134,13 +160,28 @@ module.exports = {
  * Set a team's stadium.
  * Team resolution via resolveManagedTeam (organizer: any, captain: own teams).
  */
-async function runSetStadium({ guild, userId, organizer, teamName, stadiumName, reply }) {
-    const resolved = await resolveManagedTeam({
+async function runSetStadium({ guild, userId, organizer, teamName, stadiumName, tournament = null, tournamentKey = null, reply }) {
+    if (!tournament) {
+        const r = await resolveTournament(guild.id, tournamentKey);
+        if (!r.tournament) return reply({ content: r.error });
+        tournament = r.tournament;
+    }
+
+    const resolved = await resolveManagedTeamInTournament({
         guildId: guild.id,
+        tournament,
         userId,
         organizer,
         teamName
     });
+
+    if (resolved.status === 'none') {
+        return reply({
+            content:
+                `❌ You are not the captain or vice captain of a team in **${tournament.name}**.` +
+                (tournamentKey ? '' : '\nManaging a team in another tournament? Add `tournament=<key>`.')
+        });
+    }
 
     if (resolved.status === 'ambiguous') {
         const list = resolved.teams.map(t => `• **${t.name}**`).join('\n');
@@ -208,8 +249,8 @@ async function runSetStadium({ guild, userId, organizer, teamName, stadiumName, 
  * For prefix organizer usage, try to match the first N args to a known team name.
  * Returns { teamName, value } where value is the remaining args.
  */
-async function parseOrganizerTeamAndValue(guildId, args) {
-    const teams = await Team.find({ guildId }).select('name').lean();
+async function parseOrganizerTeamAndValue(guildId, tournament, args) {
+    const teams = (await getTournamentTeams(guildId, tournament)).map(x => x.team);
 
     let bestMatch = null;
     let bestLength = 0;

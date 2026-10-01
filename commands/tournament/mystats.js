@@ -27,6 +27,7 @@ const {
 
 const {
     Player,
+    Team,
     TournamentPlayer,
     EventPlayer,
     EventSettings,
@@ -46,7 +47,7 @@ const {
     getEventByKey
 } = require('../../utils/getEvent');
 
-const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { getUserFromArgs, escapeRegex } = require('../../utils/stringHelpers');
 const { truncate, parseColor } = require('../../utils/displayHelpers');
 
 const DEFAULT_TROPHY_EMOJI = '<:_Trophy:1507987705311793152>';
@@ -404,6 +405,36 @@ async function buildPayload({ guild, globalPlayer, selectedCompetition, competit
     const tournamentEmojiMap = await getTournamentEmojiMap(guild.id);
     const eventEmojiMap = await getEventEmojiMap(guild.id);
 
+    /*
+     * The team shown for a tournament must be the team the player is on
+     * IN THAT TOURNAMENT — never a stale global team from an old tournament.
+     */
+    let tournamentTeam = null;
+
+    if (selectedCompetition?.type === 'tournament') {
+        const rosterTeamId = tournamentPlayer?.teamId || null;
+        const rosterName = tournamentPlayer?.teamNameSnapshot
+            && tournamentPlayer.teamNameSnapshot !== 'FREE AGENT'
+            ? tournamentPlayer.teamNameSnapshot
+            : null;
+
+        if (rosterTeamId) {
+            tournamentTeam = await Team.findOne({ guildId: guild.id, _id: rosterTeamId }).lean();
+
+            if (!tournamentTeam && rosterName) {
+                tournamentTeam = await Team.findOne({
+                    guildId: guild.id,
+                    name: { $regex: new RegExp(`^${escapeRegex(rosterName)}$`, 'i') }
+                }).lean();
+            }
+        } else if (rosterName) {
+            tournamentTeam = await Team.findOne({
+                guildId: guild.id,
+                name: { $regex: new RegExp(`^${escapeRegex(rosterName)}$`, 'i') }
+            }).lean();
+        }
+    }
+
     const embed =
         view === 'alltime'
             ? buildAllTimeEmbed({ guild, globalPlayer, profile, emojis, fallbackTag, fallbackAvatar })
@@ -413,7 +444,7 @@ async function buildPayload({ guild, globalPlayer, selectedCompetition, competit
                     ? buildAwardsEmbed({ guild, globalPlayer, profile, emojis, fallbackTag, fallbackAvatar, globalAwards, guildNameMap })
                     : selectedCompetition?.type === 'event'
                         ? buildEventEmbed({ guild, globalPlayer, event: selectedCompetition.doc, eventPlayer, emojis, fallbackTag, fallbackAvatar })
-                        : buildTournamentEmbed({ guild, globalPlayer, tournament: selectedCompetition.doc, tournamentPlayer, emojis, fallbackTag, fallbackAvatar });
+                        : buildTournamentEmbed({ guild, globalPlayer, tournament: selectedCompetition.doc, tournamentPlayer, tournamentTeam, emojis, fallbackTag, fallbackAvatar });
 
     return {
         embeds: [embed],
@@ -428,9 +459,16 @@ async function buildPayload({ guild, globalPlayer, selectedCompetition, competit
    EMBED BUILDERS
 ==================================================== */
 
-function buildTournamentEmbed({ guild, globalPlayer, tournament, tournamentPlayer, emojis, fallbackTag, fallbackAvatar }) {
-    const team = globalPlayer.teamId || null;
-    const teamName = team?.name || globalPlayer.teamNameSnapshot || 'No Team';
+function buildTournamentEmbed({ guild, globalPlayer, tournament, tournamentPlayer, tournamentTeam = null, emojis, fallbackTag, fallbackAvatar }) {
+    // Team inside THIS tournament (per-tournament roster), not the global teamId
+    const team = tournamentTeam || null;
+    const teamName =
+        team?.name ||
+        (tournamentPlayer?.teamNameSnapshot && tournamentPlayer.teamNameSnapshot !== 'FREE AGENT'
+            ? tournamentPlayer.teamNameSnapshot
+            : tournamentPlayer
+                ? 'FREE AGENT'
+                : 'No Team');
     const teamColor = parseColor(team?.color, null);
     const stats = tournamentPlayer?.stats || {};
     const contributions = (stats.goals || 0) + (stats.assists || 0);
@@ -454,7 +492,7 @@ function buildTournamentEmbed({ guild, globalPlayer, tournament, tournamentPlaye
                 value:
                     `User: <@${globalPlayer.discordID}>\n` +
                     `Team: **${teamName}**\n` +
-                    `Captain: **${globalPlayer.isCaptain ? 'Yes' : 'No'}**`,
+                    `Captain: **${(tournamentPlayer?.isCaptain ?? (String(team?.captainID) === String(globalPlayer.discordID))) ? 'Yes' : 'No'}**`,
                 inline: false
             },
             { name: `${emojis.stats.played} Matches Played`, value: `\`${stats.played || 0}\``, inline: false },

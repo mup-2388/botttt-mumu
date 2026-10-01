@@ -35,11 +35,6 @@ module.exports = {
         .setName('generatestage')
         .setDescription('Generate tournament stage')
         .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Optional tournament key')
-                .setRequired(false)
-        )
-        .addStringOption(opt =>
             opt.setName('stage')
                 .setDescription('Stage to generate')
                 .setRequired(true)
@@ -52,6 +47,11 @@ module.exports = {
         .addBooleanOption(opt =>
             opt.setName('force')
                 .setDescription('Regenerate existing fixtures')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Optional tournament key (default: the default tournament)')
                 .setRequired(false)
         ),
 

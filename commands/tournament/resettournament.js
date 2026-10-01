@@ -21,11 +21,14 @@ const {
 
 const { getDrawKey } = require('../../utils/drawBoard');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament } = require('../../utils/getTournament');
+const { clearDefaultPointer } = require('../../utils/tournamentCleanup');
+const LiveMessage = require('../../models/LiveMessage');
 
 module.exports = {
     name: 'resettournament',
     description: 'Reset data for one specific tournament safely.',
-    usage: '.resettournament <tournamentKey> mode=<fixtures|draw|stats|players|teams|settings|all> --confirm',
+    usage: '.resettournament [tournamentKey] mode=<fixtures|draw|stats|players|teams|settings|all> --confirm  (key omitted = default tournament)',
     aliases: ['rtreset', 'treset'],
     hidden: false,
     cooldown: 5,
@@ -34,11 +37,6 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('resettournament')
         .setDescription('Reset data for one specific tournament')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
         .addStringOption(opt =>
             opt.setName('mode')
                 .setDescription('What to reset')
@@ -57,6 +55,11 @@ module.exports = {
             opt.setName('confirm')
                 .setDescription('Required safety confirmation')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
 
@@ -112,7 +115,7 @@ module.exports = {
             return await runReset({
                 client: interaction.client,
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 mode: interaction.options.getString('mode'),
                 confirm: interaction.options.getBoolean('confirm'),
                 actorTag: interaction.user.tag,
@@ -134,28 +137,28 @@ module.exports = {
 };
 
 function parsePrefixArgs(args) {
-    if (!args.length) {
-        return {
-            ok: false,
-            error:
-                '❌ Usage:\n' +
-                '`.resettournament <tournamentKey> mode=<fixtures|draw|stats|players|teams|settings|all> --confirm`'
-        };
-    }
-
-    const tournamentKey = args[0]?.toLowerCase();
+    let tournamentKey = null;
     let mode = null;
     let confirm = false;
 
-    for (const arg of args.slice(1)) {
+    for (const arg of args) {
         if (arg === '--confirm') {
             confirm = true;
             continue;
         }
 
-        if (arg.startsWith('mode=')) {
+        if (arg.toLowerCase().startsWith('mode=')) {
             mode = arg.split('=')[1]?.trim()?.toLowerCase();
+            continue;
         }
+
+        if (/^(tournament|key)=/i.test(arg)) {
+            tournamentKey = arg.split('=')[1]?.trim()?.toLowerCase() || null;
+            continue;
+        }
+
+        // First loose word = tournament key; omitted → default tournament
+        if (!tournamentKey) tournamentKey = arg.toLowerCase();
     }
 
     const validModes = [
@@ -168,13 +171,15 @@ function parsePrefixArgs(args) {
         'all'
     ];
 
-    if (!tournamentKey || !mode || !validModes.includes(mode)) {
+    if (!mode || !validModes.includes(mode)) {
         return {
             ok: false,
             error:
                 '❌ Invalid usage.\n' +
-                'Example: `.resettournament league-s1 mode=fixtures --confirm`\n\n' +
-                'Modes: `fixtures`, `draw`, `stats`, `players`, `teams`, `settings`, `all`'
+                'Example: `.resettournament league-s1 mode=fixtures --confirm`\n' +
+                'Key omitted = the **default tournament**: `.resettournament mode=stats --confirm`\n\n' +
+                'Modes: `fixtures`, `draw`, `stats`, `players`, `teams`, `settings`, `all`\n\n' +
+                'To remove a tournament completely (incl. leftover global teams/players) use `.deletetournament <key>`.'
         };
     }
 
@@ -205,16 +210,13 @@ async function runReset({
         });
     }
 
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({
-            content: `❌ Tournament \`${tournamentKey}\` not found.`
-        });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     const summaryLines = [];
 
@@ -426,6 +428,23 @@ async function resetTournamentSettings({ guildId, tournament }, summaryLines) {
     });
 
     summaryLines.push(`Tournament settings deleted: **${result.deletedCount || 0}**`);
+
+    // Live standings / top-stats messages that belonged to this tournament
+    await LiveMessage.deleteMany({
+        guildId,
+        tournamentKey: tournament.tournamentKey
+    }).catch(() => null);
+
+    // Don't leave the server default pointing at a tournament that is gone
+    if (result.deletedCount) {
+        const cleared = await clearDefaultPointer(guildId, tournament.tournamentKey);
+        if (cleared) {
+            summaryLines.push(
+                '⚠️ This was the **default tournament** — default cleared. ' +
+                'Use `.setdefaulttournament <key>` to pick a new one.'
+            );
+        }
+    }
 }
 
 async function clearProfileTournamentRecords({ guildId, tournament }, summaryLines) {
@@ -496,7 +515,9 @@ function buildResetEmbed({
         .addFields({
             name: 'Unaffected',
             value:
-                'Global teams and global players were not deleted. Other tournaments in this server were not touched.',
+                'Global teams and global players were not deleted (other tournaments in this server were not touched).\n' +
+                'To remove a tournament completely, including its leftover global teams/players, use `.deletetournament <key>` ' +
+                '(or `.purgeorphans` to clean leftovers of an already-reset tournament).',
             inline: false
         })
         .setFooter({

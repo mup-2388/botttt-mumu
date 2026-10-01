@@ -1,24 +1,28 @@
 /**
  * setvicecaptain.js
  *
- * Set the vice captain of a team — including per-tournament teams.
+ * Set / remove the vice captain of a team IN A TOURNAMENT.
+ *
+ * Works for the server's DEFAULT tournament unless `tournament=<key>` is given.
+ * The captain check uses the team you captain IN THAT TOURNAMENT — a stale
+ * team from an old tournament can never block or hijack the command.
  *
  * Usage:
- *   .svc @user                          (or .setvicecaptain @user)
- *   .svc @user remove                   (to remove vice captain)
- *   .svc @user team=<Team Name>         (pick one of your teams)
+ *   .svc @user                              (or .setvicecaptain @user)
+ *   .svc @user remove                       (remove the vice captain)
+ *   .svc @user team=<Team Name>             (organizer, or captain of several teams)
+ *   .svc @user tournament=<key>             (a tournament that isn't the default)
  *
  * WHO CAN RUN THIS:
- *   - Captain of the team (global captain, or per-tournament captain)
- *   - Organizers (any team, via team=<name>)
+ *   - Captain of the team in that tournament
+ *   - Organizers (any team of that tournament; team=<name> or the target's team)
  *
- * TWO SCOPES:
- *   - GLOBAL team (you captain it globally): sets Team.viceCaptainID,
- *     Player.isViceCaptain, and the flags on the team's tournament entries.
- *   - PER-TOURNAMENT team (you captain it in a tournament): sets
- *     TournamentTeam.viceCaptainID on the team's active tournament entries
- *     and TournamentPlayer.isViceCaptain in those tournaments. The target's
- *     global profile is NOT touched.
+ * WHAT IT WRITES:
+ *   - TournamentTeam.viceCaptainID + TournamentPlayer.isViceCaptain
+ *     (the tournament's own records — the source of truth for that tournament)
+ *   - If the team still uses its GLOBAL captain in this tournament (no
+ *     per-tournament captain), the global Team.viceCaptainID / Player flags
+ *     are kept in sync for legacy consumers.
  */
 
 const {
@@ -34,20 +38,23 @@ const {
     TournamentPlayer
 } = require('../../models/Tournament');
 
-const {
-    isOrganizer
-} = require('../../utils/isOrganizer');
-const {
-    getCaptainTeams,
-    isCaptainOfTeam,
-    parseTeamToken
-} = require('../../utils/teamResolver');
+const { isOrganizer } = require('../../utils/isOrganizer');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const {
+    sameId,
+    effectiveCaptainId,
+    getUserTeamInTournament,
+    getManagedTeamsInTournament,
+    findTeamInTournamentByName,
+    getRosterMembership,
+    parseTeamTokenInTournament
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'setvicecaptain',
-    description: 'Set the vice captain of your team (global or per-tournament).',
-    usage: '.svc @user [remove] [team=<Team Name>]',
+    description: 'Set the vice captain of your team (default tournament unless tournament=<key>).',
+    usage: '.svc @user [remove] [team=<Team Name>] [tournament=<key>]',
     aliases: ['svc', 'setvc', 'vicecaptain'],
     hidden: false,
     cooldown: 5,
@@ -68,7 +75,12 @@ module.exports = {
         )
         .addStringOption(opt =>
             opt.setName('team')
-                .setDescription('Team name (captain: one of your teams • organizer: any team)')
+                .setDescription('Team name (organizer: any team • captain: only if you captain several)')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
                 .setRequired(false)
         ),
 
@@ -76,16 +88,31 @@ module.exports = {
         try {
             if (!message.guild) return;
 
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const tournamentKey = parsedKey.explicit ? parsedKey.tournament.tournamentKey : null;
+
+            const resolved = await resolveTournament(message.guild.id, tournamentKey);
+            if (!resolved.tournament) return message.reply(resolved.error);
+
+            const token = await parseTeamTokenInTournament(
+                message.guild.id,
+                resolved.tournament,
+                parsedKey.rest
+            );
+
             const target =
                 message.mentions.users.first() ||
-                await getUserFromArgs(message, args);
+                await getUserFromArgs(message, token.rest.filter(a => a !== 'remove' && a !== 'clear'));
 
             if (!target) {
-                return message.reply('❓ Usage: `.svc @user [remove] [team=<Team Name>]`');
+                return message.reply('❓ Usage: `.svc @user [remove] [team=<Team Name>] [tournament=<key>]`');
             }
 
             const remove = args.includes('remove') || args.includes('clear');
-            const token = await parseTeamToken(message.guild.id, message.author.id, args);
 
             return await runSetViceCaptain({
                 guild: message.guild,
@@ -93,6 +120,8 @@ module.exports = {
                 targetUser: target,
                 remove,
                 teamName: token.teamName,
+                tournament: resolved.tournament,
+                explicit: resolved.explicit,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -108,6 +137,10 @@ module.exports = {
             const target = interaction.options.getUser('user');
             const remove = interaction.options.getBoolean('remove') ?? false;
             const teamName = interaction.options.getString('team');
+            const key = interaction.options.getString('tournament')?.toLowerCase() || null;
+
+            const resolved = await resolveTournament(interaction.guild.id, key);
+            if (!resolved.tournament) return interaction.editReply(resolved.error);
 
             return await runSetViceCaptain({
                 guild: interaction.guild,
@@ -115,6 +148,8 @@ module.exports = {
                 targetUser: target,
                 remove,
                 teamName,
+                tournament: resolved.tournament,
+                explicit: resolved.explicit,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -142,307 +177,177 @@ async function runSetViceCaptain({
     targetUser,
     remove,
     teamName,
+    tournament,
+    explicit,
     reply
 }) {
-    // ── CHECK PERMISSIONS / RESOLVE TEAM ──
     const organizer = await isOrganizer(guild.id, actorId);
+    const where = `**${tournament.name}** (\`${tournament.tournamentKey}\`)`;
 
+    /* ── RESOLVE TEAM (always inside this tournament) ── */
     let team = null;
-    let scope = 'global'; // 'global' | 'perTournament'
+    let entry = null;
 
-    if (organizer && !teamName) {
-        // Organizer legacy path: operate on the target's global team
-        if (remove) {
-            team = await Team.findOne({
-                guildId: guild.id,
-                viceCaptainID: targetUser.id
-            });
+    if (teamName) {
+        const found = await findTeamInTournamentByName(guild.id, tournament, teamName);
 
-            if (!team) {
-                const targetPlayer = await Player.findOne({
-                    guildId: guild.id,
-                    discordID: targetUser.id
-                });
-
-                if (!targetPlayer?.teamId) {
-                    return reply({
-                        content: `❌ ${targetUser} is not registered as a player in any team.`
-                    });
-                }
-
-                team = await Team.findById(targetPlayer.teamId);
-            }
-        } else {
-            const targetPlayer = await Player.findOne({
-                guildId: guild.id,
-                discordID: targetUser.id
-            });
-
-            if (!targetPlayer?.teamId) {
-                return reply({
-                    content: `❌ ${targetUser} is not registered as a player in any team.`
-                });
-            }
-
-            team = await Team.findById(targetPlayer.teamId);
+        if (!found) {
+            return reply({ content: `❌ Team \`${teamName}\` is not registered in ${where}.` });
         }
-    } else {
-        const captainTeams = await getCaptainTeams(guild.id, actorId);
 
-        if (teamName) {
-            team = await Team.findOne({
-                guildId: guild.id,
-                name: { $regex: new RegExp(`^${escapeName(teamName)}$`, 'i') }
-            });
+        team = found.team;
+        entry = found.entry;
 
-            if (!team) {
-                const list = captainTeams.length
-                    ? `\nYour teams:\n${captainTeams.map(t => `• **${t.name}**`).join('\n')}`
-                    : '';
-                return reply({ content: `❌ Team not found: \`${teamName}\`${list}` });
-            }
-
-            if (!organizer && !(await isCaptainOfTeam(actorId, team))) {
-                const list = captainTeams.length
-                    ? `\nYour teams:\n${captainTeams.map(t => `• **${t.name}**`).join('\n')}`
-                    : '';
-                return reply({
-                    content: `🚫 **${team.name}** is not your team.${list}`
-                });
-            }
-
-            scope = team.captainID ? 'global' : 'perTournament';
-        } else {
-            const globalTeam = captainTeams.find(t => String(t.captainID) === String(actorId));
-
-            if (globalTeam) {
-                team = globalTeam;
-                scope = 'global';
-            } else {
-                const perTournamentTeams = captainTeams.filter(
-                    t => String(t.captainID) !== String(actorId)
-                );
-
-                if (perTournamentTeams.length === 1) {
-                    team = perTournamentTeams[0];
-                    scope = 'perTournament';
-                } else if (perTournamentTeams.length > 1) {
-                    const list = perTournamentTeams
-                        .map(t => `• **${t.name}**`)
-                        .join('\n');
-                    return reply({
-                        content:
-                            `🤔 You captain more than one team:\n${list}\n\n` +
-                            `Specify which one:\n` +
-                            `Prefix: \`.svc @user team=<Team Name>\`\n` +
-                            `Slash: \`/setvicecaptain user:<user> team:<Team Name>\``
-                    });
-                } else {
-                    return reply({
-                        content: '❌ You are not a **Team Captain** of any team yet.\nOrganizers can set any team with `team=<Team Name>`.'
-                    });
-                }
-            }
+        if (!organizer && !sameId(effectiveCaptainId(entry, team), actorId)) {
+            return reply({ content: `🚫 You are not the captain of **${team.name}** in ${where}.` });
         }
-    }
+    } else if (organizer) {
+        // Organizer: the target's team in this tournament
+        const targetCtx = await getUserTeamInTournament(guild.id, tournament, targetUser.id);
 
-    if (!team) {
-        return reply({ content: '❌ Could not find a team.' });
-    }
-
-    // ── LOAD AFFECTED TOURNAMENT ENTRIES (per-tournament scope) ──
-    let affected = [];
-    if (scope === 'perTournament') {
-        affected = await TournamentTeam.find({
-            guildId: guild.id,
-            teamId: team._id,
-            isActive: true
-        });
-
-        if (!affected.length) {
+        if (!targetCtx) {
             return reply({
-                content: `❌ **${team.name}** has no active tournament entries, so it has no per-tournament vice captain to ${remove ? 'remove' : 'set'}.`
+                content: `❌ ${targetUser} is not on any team in ${where}. Use \`team=<Team Name>\` to pick the team.`
             });
         }
+
+        team = targetCtx.team;
+        entry = targetCtx.entry;
+    } else {
+        const managed = (await getManagedTeamsInTournament(guild.id, tournament, actorId))
+            .filter(x => sameId(effectiveCaptainId(x.entry, x.team), actorId));
+
+        if (!managed.length) {
+            return reply({
+                content:
+                    `❌ You are not a **Team Captain** of any team in ${where}.` +
+                    (explicit ? '' : '\nManaging a team in another tournament? Add `tournament=<key>`.') +
+                    '\nOrganizers can set any team with `team=<Team Name>`.'
+            });
+        }
+
+        if (managed.length > 1) {
+            const list = managed.map(x => `• **${x.team.name}**`).join('\n');
+            return reply({
+                content:
+                    `🤔 You captain more than one team in ${where}:\n${list}\n\n` +
+                    `Specify which one:\n` +
+                    `Prefix: \`.svc @user team=<Team Name>\`\n` +
+                    `Slash: \`/setvicecaptain user:<user> team:<Team Name>\``
+            });
+        }
+
+        team = managed[0].team;
+        entry = managed[0].entry;
     }
 
-    // ── REMOVE MODE ──
+    const usesGlobalCaptain = !entry.captainID; // no per-tournament captain override
+
+    /* ── REMOVE MODE ── */
     if (remove) {
-        if (scope === 'global') {
-            if (!team.viceCaptainID) {
-                return reply({
-                    content: `❌ **${team.name}** does not have a vice captain set.`
-                });
-            }
+        const hasTournamentVc =
+            !!entry.viceCaptainID ||
+            (usesGlobalCaptain && !!team.viceCaptainID);
 
-            await Team.updateOne(
-                { _id: team._id },
-                { $set: { viceCaptainID: null } }
-            );
+        if (!hasTournamentVc) {
+            return reply({
+                content: `❌ **${team.name}** does not have a vice captain set in ${where}.`
+            });
+        }
 
+        await TournamentTeam.updateOne(
+            { _id: entry._id },
+            { $set: { viceCaptainID: null } }
+        );
+
+        await TournamentPlayer.updateMany(
+            { guildId: guild.id, tournamentId: tournament._id, teamId: team._id },
+            { $set: { isViceCaptain: false } }
+        );
+
+        if (usesGlobalCaptain && team.viceCaptainID) {
+            await Team.updateOne({ _id: team._id }, { $set: { viceCaptainID: null } });
             await Player.updateMany(
                 { guildId: guild.id, teamId: team._id },
                 { $set: { isViceCaptain: false } }
             );
-
-            await TournamentPlayer.updateMany(
-                { guildId: guild.id, teamId: team._id },
-                { $set: { isViceCaptain: false } }
-            );
-        } else {
-            const withVc = affected.filter(e => e.viceCaptainID);
-            if (!withVc.length) {
-                return reply({
-                    content: `❌ **${team.name}** does not have a vice captain set in its tournaments.`
-                });
-            }
-
-            for (const entry of withVc) {
-                await TournamentTeam.updateOne(
-                    { _id: entry._id },
-                    { $set: { viceCaptainID: null } }
-                );
-                await TournamentPlayer.updateMany(
-                    {
-                        guildId: guild.id,
-                        teamId: team._id,
-                        tournamentId: entry.tournamentId
-                    },
-                    { $set: { isViceCaptain: false } }
-                );
-            }
         }
 
         const embed = new EmbedBuilder()
             .setColor(0xE74C3C)
             .setTitle('🗑️ VICE CAPTAIN REMOVED')
             .setDescription(
-                `Team: **${team.name}**` +
-                (scope === 'perTournament' ? '\nScope: Per-tournament (its active tournaments)' : '') +
-                `\n\nVice captain role has been removed.`
+                `Tournament: ${where}\n` +
+                `Team: **${team.name}**\n\n` +
+                `Vice captain role has been removed.`
             )
             .setTimestamp();
 
         return reply({ embeds: [embed] });
     }
 
-    // ── SET MODE ──
+    /* ── SET MODE ── */
 
     // Captain can't also be vice captain
-    if (scope === 'global' && String(team.captainID) === String(targetUser.id)) {
+    if (sameId(effectiveCaptainId(entry, team), targetUser.id)) {
         return reply({
             content: '❌ The captain cannot also be the vice captain. Choose another team member.'
         });
     }
-    if (scope === 'perTournament' && affected.some(e => String(e.captainID) === String(targetUser.id))) {
-        return reply({
-            content: `❌ ${targetUser} is the captain of **${team.name}** in a tournament — they can't also be its vice captain.`
-        });
-    }
 
-    // Target must be a registered player
-    const targetPlayer = await Player.findOne({
-        guildId: guild.id,
-        discordID: targetUser.id
-    });
+    // Target must be a registered player on this team IN THIS TOURNAMENT
+    const { player: targetPlayer, tournamentPlayer: membership } =
+        await getRosterMembership(guild.id, tournament, team._id, targetUser.id);
 
     if (!targetPlayer) {
+        return reply({ content: `❌ ${targetUser} is not registered as a player.` });
+    }
+
+    if (!membership) {
         return reply({
-            content: `❌ ${targetUser} is not registered as a player.`
+            content:
+                `❌ ${targetUser} is not in **${team.name}** (${tournament.name}).\n` +
+                'Vice captain must be a member of the team in this tournament.'
         });
     }
 
-    if (scope === 'global') {
-        // Target must be on the same team (global membership)
-        if (!targetPlayer.teamId || String(targetPlayer.teamId) !== String(team._id)) {
-            return reply({
-                content:
-                    `❌ ${targetUser} is not in **${team.name}**.\n` +
-                    'Vice captain must be a member of the same team.'
-            });
-        }
+    // Clear old vice captain flags (this tournament), set the new one
+    await TournamentPlayer.updateMany(
+        { guildId: guild.id, tournamentId: tournament._id, teamId: team._id },
+        { $set: { isViceCaptain: false } }
+    );
 
-        // Clear old vice captain flags
+    await TournamentPlayer.updateOne(
+        { _id: membership._id },
+        { $set: { isViceCaptain: true } }
+    );
+
+    await TournamentTeam.updateOne(
+        { _id: entry._id },
+        { $set: { viceCaptainID: targetUser.id } }
+    );
+
+    // Team still on its global captain → keep the global records in sync
+    if (usesGlobalCaptain) {
+        await Team.updateOne({ _id: team._id }, { $set: { viceCaptainID: targetUser.id } });
+
         await Player.updateMany(
             { guildId: guild.id, teamId: team._id },
             { $set: { isViceCaptain: false } }
         );
 
-        await TournamentPlayer.updateMany(
-            { guildId: guild.id, teamId: team._id },
-            { $set: { isViceCaptain: false } }
-        );
-
-        // Set new vice captain
-        await Team.updateOne(
-            { _id: team._id },
-            { $set: { viceCaptainID: targetUser.id } }
-        );
-
-        await Player.updateOne(
-            { _id: targetPlayer._id },
-            { $set: { isViceCaptain: true } }
-        );
-
-        await TournamentPlayer.updateMany(
-            { guildId: guild.id, teamId: team._id, playerId: targetPlayer._id },
-            { $set: { isViceCaptain: true } }
-        );
-    } else {
-        // Per-tournament: target must be in the team's tournament roster
-        const membership = await TournamentPlayer.findOne({
-            guildId: guild.id,
-            teamId: team._id,
-            playerId: targetPlayer._id,
-            isActive: true
-        });
-
-        if (!membership) {
-            return reply({
-                content:
-                    `❌ ${targetUser} is not in **${team.name}** (its tournament roster).\n` +
-                    'Vice captain must be a member of the team in this tournament.'
-            });
+        if (targetPlayer.teamId && String(targetPlayer.teamId) === String(team._id)) {
+            await Player.updateOne({ _id: targetPlayer._id }, { $set: { isViceCaptain: true } });
         }
-
-        for (const entry of affected) {
-            await TournamentPlayer.updateMany(
-                {
-                    guildId: guild.id,
-                    teamId: team._id,
-                    tournamentId: entry.tournamentId,
-                    isActive: true
-                },
-                { $set: { isViceCaptain: false } }
-            );
-
-            await TournamentPlayer.updateMany(
-                {
-                    guildId: guild.id,
-                    teamId: team._id,
-                    tournamentId: entry.tournamentId,
-                    playerId: targetPlayer._id,
-                    isActive: true
-                },
-                { $set: { isViceCaptain: true } }
-            );
-        }
-
-        await TournamentTeam.updateMany(
-            { guildId: guild.id, teamId: team._id, isActive: true },
-            { $set: { viceCaptainID: targetUser.id } }
-        );
     }
 
     const embed = new EmbedBuilder()
         .setColor(0x9B59B6)
         .setTitle('🥈 VICE CAPTAIN SET')
         .setDescription(
-            `Team: **${team.name}**` +
-            (scope === 'perTournament'
-                ? `\nScope: Per-tournament (its active tournaments)`
-                : '') +
-            `\n\nVice Captain: ${targetUser}\n` +
+            `Tournament: ${where}\n` +
+            `Team: **${team.name}**\n\n` +
+            `Vice Captain: ${targetUser}\n` +
             `Set by: ${organizer ? 'Organizer' : 'Captain'}`
         )
         .setFooter({
@@ -451,12 +356,4 @@ async function runSetViceCaptain({
         .setTimestamp();
 
     return reply({ embeds: [embed] });
-}
-
-/* ====================================================
-   HELPERS
-==================================================== */
-
-function escapeName(value) {
-    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

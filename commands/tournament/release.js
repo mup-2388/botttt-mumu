@@ -4,8 +4,11 @@
  * Release a player from your team as captain. Makes them a free agent.
  * Cannot release yourself (change captain first). Cannot release captains.
  *
- * Usage:  .release @user
- * Slash:  /release user:<user>
+ * Works for the server's DEFAULT tournament unless `tournament=<key>` is given.
+ * Captain / roster checks use the team the user is on IN THAT TOURNAMENT.
+ *
+ * Usage:  .release @user [tournament=<key>]
+ * Slash:  /release user:<user> [tournament:<key>]
  *
  * Aliases: dropplayer, kickplayer
  */
@@ -19,11 +22,17 @@ const {
 const {
     Player,
     TournamentPlayer,
-    TournamentSettings,
     ServerConfig
 } = require('../../models/Tournament');
 
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs } = require('../../utils/getTournament');
+const {
+    resolveActorTeam,
+    getRosterMembership,
+    effectiveCaptainId,
+    sameId
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'release',
@@ -41,28 +50,39 @@ module.exports = {
             opt.setName('user')
                 .setDescription('Player to release')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
        PREFIX
     ================================================ */
 
-    async execute(message) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
 
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
             const target =
                 message.mentions.users.first() ||
-                await getUserFromArgs(message);
+                await getUserFromArgs(message, parsedKey.rest);
 
             if (!target) {
-                return message.reply('❌ Usage: `.release @user`');
+                return message.reply('❌ Usage: `.release @user [tournament=<key>]`');
             }
 
             return await runRelease({
                 guild: message.guild,
                 actorId: message.author.id,
                 targetUser: target,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -85,6 +105,7 @@ module.exports = {
                 guild: interaction.guild,
                 actorId: interaction.user.id,
                 targetUser: target,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -104,38 +125,32 @@ module.exports = {
 ==================================================== */
 
 /**
- * Release a player from the captain's team:
- * 1. Validate actor is captain
- * 2. Validate target is on the same team and not captain
- * 3. Update global Player record
- * 4. Update all active TournamentPlayer entries
+ * Release a player from the captain's team IN THE TOURNAMENT:
+ * 1. Resolve tournament (explicit key, else the server default)
+ * 2. Validate actor is captain of a team in that tournament
+ * 3. Validate target is on the same team (in that tournament) and not captain
+ * 4. Make the target a free agent in that tournament
+ * 5. Global Player record: detached only if it still points at this team
  */
-async function runRelease({ guild, actorId, targetUser, reply }) {
+async function runRelease({ guild, actorId, targetUser, tournamentKey = null, reply }) {
     // ── Transfer lock check ──
     const config = await ServerConfig.findOne({ guildId: guild.id }).lean();
     if (config?.transfersLocked) {
         return reply({ content: '🔒 Transfers are **locked**. The transfer window is currently closed.' });
     }
 
-    /* ── Find actor's team ── */
-    const captainPlayer = await Player.findOne({
+    /* ── Find actor's team in the tournament ── */
+    const { tournament, ctx, error } = await resolveActorTeam({
         guildId: guild.id,
-        discordID: actorId
-    }).populate('teamId');
+        userId: actorId,
+        tournamentKey,
+        need: 'captain',
+        noun: 'release players'
+    });
 
-    if (!captainPlayer?.teamId) {
-        return reply({ content: '❌ You are not linked to any team.' });
-    }
+    if (error) return reply({ content: error });
 
-    const team = captainPlayer.teamId;
-
-    const isCaptain =
-        String(team.captainID) === String(actorId) ||
-        captainPlayer.isCaptain;
-
-    if (!isCaptain) {
-        return reply({ content: '❌ Only the team captain can release players.' });
-    }
+    const { team, entry } = ctx;
 
     /* ── Can't release yourself ── */
     if (String(actorId) === String(targetUser.id)) {
@@ -146,22 +161,23 @@ async function runRelease({ guild, actorId, targetUser, reply }) {
         });
     }
 
-    /* ── Find target player ── */
-    const targetPlayer = await Player.findOne({
-        guildId: guild.id,
-        discordID: targetUser.id
-    });
+    /* ── Find target player on this team (in this tournament) ── */
+    const { player: targetPlayer, tournamentPlayer: targetEntry } =
+        await getRosterMembership(guild.id, tournament, team._id, targetUser.id);
 
     if (!targetPlayer) {
         return reply({ content: `❌ ${targetUser} is not registered as a player.` });
     }
 
-    if (!targetPlayer.teamId || String(targetPlayer.teamId) !== String(team._id)) {
-        return reply({ content: `❌ ${targetUser} is not in **${team.name}**.` });
+    if (!targetEntry) {
+        return reply({ content: `❌ ${targetUser} is not in **${team.name}** (${tournament.name}).` });
     }
 
     /* ── Can't release the captain ── */
-    if (targetPlayer.isCaptain || String(team.captainID) === String(targetUser.id)) {
+    if (
+        targetEntry.isCaptain ||
+        sameId(effectiveCaptainId(entry, team), targetUser.id)
+    ) {
         return reply({
             content:
                 `❌ ${targetUser} is the captain of **${team.name}**.\n` +
@@ -169,9 +185,9 @@ async function runRelease({ guild, actorId, targetUser, reply }) {
         });
     }
 
-    /* ── Update global player record ── */
-    await Player.updateOne(
-        { _id: targetPlayer._id },
+    /* ── Free agent in THIS tournament ── */
+    await TournamentPlayer.updateOne(
+        { _id: targetEntry._id },
         {
             $set: {
                 teamId: null,
@@ -182,11 +198,31 @@ async function runRelease({ guild, actorId, targetUser, reply }) {
         }
     );
 
-    /* ── Update active tournament entries ── */
-    const updatedTournamentPlayers = await makePlayerFreeAgent({
-        guildId: guild.id,
-        playerId: targetPlayer._id
-    });
+    // A released vice captain must not keep the per-tournament VC seat
+    if (sameId(entry.viceCaptainID, targetUser.id)) {
+        entry.viceCaptainID = null;
+        await entry.save();
+    }
+
+    /* ── Global player record: only if it still points at this team ── */
+    if (targetPlayer.teamId && String(targetPlayer.teamId) === String(team._id)) {
+        await Player.updateOne(
+            { _id: targetPlayer._id },
+            {
+                $set: {
+                    teamId: null,
+                    teamNameSnapshot: 'FREE AGENT',
+                    isCaptain: false,
+                    isViceCaptain: false
+                }
+            }
+        );
+
+        if (sameId(team.viceCaptainID, targetUser.id)) {
+            team.viceCaptainID = null;
+            await team.save();
+        }
+    }
 
     /* ── Response ── */
     const embed = new EmbedBuilder()
@@ -194,48 +230,12 @@ async function runRelease({ guild, actorId, targetUser, reply }) {
         .setTitle('✅ Player Released')
         .setDescription(
             `${targetUser} has been released from **${team.name}**.\n` +
-            `They are now a **FREE AGENT**.`
+            `They are now a **FREE AGENT** in **${tournament.name}**.`
         )
         .setFooter({
-            text: `Tournament records updated: ${updatedTournamentPlayers}`
+            text: `Tournament: ${tournament.tournamentKey}`
         })
         .setTimestamp();
 
     return reply({ embeds: [embed] });
-}
-
-/* ====================================================
-   TOURNAMENT SYNC
-==================================================== */
-
-/** Make a player a free agent across all active tournaments. */
-async function makePlayerFreeAgent({ guildId, playerId }) {
-    const activeTournaments = await TournamentSettings.find({
-        guildId,
-        currentPhase: { $ne: 'completed' }
-    }).select('_id').lean();
-
-    const activeTournamentIds = activeTournaments.map(t => t._id);
-
-    if (!activeTournamentIds.length) return 0;
-
-    const result = await TournamentPlayer.updateMany(
-        {
-            guildId,
-            playerId,
-            tournamentId: { $in: activeTournamentIds },
-            isActive: true
-        },
-        {
-            $set: {
-                teamId: null,
-                tournamentTeamId: null,
-                teamNameSnapshot: 'FREE AGENT',
-                isCaptain: false,
-                isViceCaptain: false
-            }
-        }
-    );
-
-    return result.modifiedCount || 0;
 }
