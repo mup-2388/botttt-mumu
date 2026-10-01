@@ -84,7 +84,9 @@ module.exports = {
             });
         } catch (error) {
             console.error('[removeplayerfromtournament] prefix error:', error);
-            return message.reply('❌ Failed to remove player.');
+            return message.reply(
+                '❌ Failed to remove player.\n`' + String(error?.message || error).slice(0, 200) + '`'
+            );
         }
     },
 
@@ -109,11 +111,18 @@ module.exports = {
         } catch (error) {
             console.error('[removeplayerfromtournament] slash error:', error);
 
+            const reason = String(error?.message || error).slice(0, 200);
+
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ Failed to remove player.');
+                return interaction.editReply(
+                    '❌ Failed to remove player.\n`' + reason + '`'
+                );
             }
 
-            return interaction.reply({ content: '❌ Failed to remove player.', ephemeral: true });
+            return interaction.reply({
+                content: '❌ Failed to remove player.\n`' + reason + '`',
+                ephemeral: true
+            });
         }
     }
 };
@@ -138,21 +147,44 @@ async function runRemove({ guild, tournamentKey, discordID, reply }) {
     });
 
     if (!player) {
-        return reply({ content: '❌ Global player profile not found.' });
+        return reply({
+            content: 'ℹ️ No global player profile for that user — nothing to remove.'
+        });
     }
 
     const updated = await TournamentPlayer.findOneAndUpdate(
         {
             guildId: guild.id,
             tournamentId: tournament._id,
-            playerId: player._id
+            playerId: player._id,
+            isActive: { $ne: false }
         },
         { $set: { isActive: false } },
         { new: true }
     );
 
+    /* Already removed / never registered: report the true state instead of
+       "failed" — running the command twice must not look like an error. */
     if (!updated) {
-        return reply({ content: `❌ ${player.name} is not in this tournament.` });
+        const entry = await TournamentPlayer.findOne({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            playerId: player._id
+        })
+            .lean()
+            .catch(() => null);
+
+        if (entry) {
+            return reply({
+                content:
+                    `ℹ️ **${player.name}** is already removed from **${tournament.name}** — nothing changed.`
+            });
+        }
+
+        return reply({
+            content:
+                `ℹ️ **${player.name}** is not part of **${tournament.name}** — nothing to remove.`
+        });
     }
 
     const embed = new EmbedBuilder()

@@ -27,6 +27,7 @@ const { getUserFromArgs } = require('../../utils/stringHelpers');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { getDefaultTournament } = require('../../utils/getTournament');
+const { optionalStep } = require('../../utils/optionalStep');
 
 module.exports = {
     name: 'delete-player',
@@ -73,7 +74,11 @@ module.exports = {
             });
         } catch (error) {
             console.error('[delete-player] prefix error:', error);
-            return message.reply('❌ Failed to remove player.');
+            return message.reply(
+                '❌ Failed to remove player.\n`' +
+                    String(error?.message || error).slice(0, 200) +
+                    '`'
+            );
         }
     },
 
@@ -97,11 +102,18 @@ module.exports = {
         } catch (error) {
             console.error('[delete-player] slash error:', error);
 
+            const reason = String(error?.message || error).slice(0, 200);
+
             if (interaction.replied || interaction.deferred) {
-                return interaction.editReply('❌ Failed to remove player.');
+                return interaction.editReply(
+                    '❌ Failed to remove player.\n`' + reason + '`'
+                );
             }
 
-            return interaction.reply({ content: '❌ Failed to remove player.', ephemeral: true });
+            return interaction.reply({
+                content: '❌ Failed to remove player.\n`' + reason + '`',
+                ephemeral: true
+            });
         }
     }
 };
@@ -125,7 +137,10 @@ async function runDeletePlayer({ guild, targetUserId, reply }) {
     }).populate('teamId');
 
     if (!player) {
-        return reply({ content: '❌ That user is not registered as a player in this server.' });
+        return reply({
+            content:
+                'ℹ️ That user is not registered as a player in this server — nothing to remove.'
+        });
     }
 
     const teamName =
@@ -142,22 +157,39 @@ async function runDeletePlayer({ guild, targetUserId, reply }) {
     /* ── Delete global player record ── */
     await Player.deleteOne({ _id: player._id });
 
-    /* ── Preserve display name in UserProfile ── */
-    await UserProfile.updateOne(
-        { guildId: guild.id, discordID: targetUserId },
-        { $set: { displayName: player.name } },
-        { upsert: true }
-    ).catch(() => null);
+    /* ── Optional cleanup below ──
+       The player is already deleted at this point, so a failure in any of
+       these steps must never turn a successful removal into a failure. */
+    await optionalStep(
+        'delete-player: UserProfile update',
+        () =>
+            UserProfile.updateOne(
+                { guildId: guild.id, discordID: targetUserId },
+                { $set: { displayName: player.name } },
+                { upsert: true }
+            ),
+        null
+    );
 
-    /* ── Remove tournament player role from Discord ── */
-    const settings = await getDefaultTournament(guild.id, { includeCompleted: true })
-        .catch(() => null);
-    const targetMember = await guild.members.fetch(targetUserId).catch(() => null);
-    const roleResult = await tryRemoveRole({
-        guild,
-        member: targetMember,
-        roleId: settings?.tournamentPlayerRoleId || ''
-    });
+    const roleResult = await optionalStep(
+        'delete-player: tournament player role cleanup',
+        async () => {
+            const settings = await getDefaultTournament(guild.id, {
+                includeCompleted: true
+            }).catch(() => null);
+
+            const targetMember = await guild.members
+                .fetch(targetUserId)
+                .catch(() => null);
+
+            return tryRemoveRole({
+                guild,
+                member: targetMember,
+                roleId: settings?.tournamentPlayerRoleId || ''
+            });
+        },
+        { status: 'remove_failed' }
+    );
 
     /* ── Response ── */
     const embed = new EmbedBuilder()
@@ -207,20 +239,41 @@ async function tryRemoveRole({ guild, member, roleId }) {
     }
 }
 
-/** Human-readable status for the role removal attempt. */
+/**
+ * Human-readable status for the role removal attempt.
+ *
+ * NOTE: this used to be an object literal, which meant EVERY message was
+ * evaluated eagerly — including `<@&${result.role.id}>` — so any status that
+ * carries no `role` (not configured, member missing, role too high, ...)
+ * threw a TypeError AFTER the player had already been deleted and the command
+ * reported "❌ Failed to remove player" even though it had succeeded.
+ * A switch keeps the messages lazy and safe.
+ */
 function buildRoleRemovalStatus(result) {
-    const messages = {
-        removed: `Removed automatically: <@&${result.role.id}>`,
-        did_not_have_role: 'User did not have role',
-        not_configured: 'Not configured',
-        role_missing: 'Configured role no longer exists',
-        missing_manage_roles: 'Bot lacks Manage Roles permission',
-        role_too_high: 'Role is above bot role',
-        managed_role: 'Managed role cannot be removed',
-        member_missing: 'Member not found',
-        bot_member_missing: 'Bot member missing',
-        remove_failed: 'Failed to remove role'
-    };
+    const roleRef = result?.role?.id ? `<@&${result.role.id}>` : 'tournament player role';
 
-    return messages[result.status] || 'Unknown';
+    switch (result?.status) {
+        case 'removed':
+            return `Removed automatically: ${roleRef}`;
+        case 'did_not_have_role':
+            return 'User did not have role';
+        case 'not_configured':
+            return 'Not configured';
+        case 'role_missing':
+            return 'Configured role no longer exists';
+        case 'missing_manage_roles':
+            return 'Bot lacks Manage Roles permission';
+        case 'role_too_high':
+            return 'Role is above bot role';
+        case 'managed_role':
+            return 'Managed role cannot be removed';
+        case 'member_missing':
+            return 'Member not found';
+        case 'bot_member_missing':
+            return 'Bot member missing';
+        case 'remove_failed':
+            return `Failed to remove ${roleRef}`;
+        default:
+            return 'Unknown';
+    }
 }
