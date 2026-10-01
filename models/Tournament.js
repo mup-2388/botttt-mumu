@@ -728,6 +728,30 @@ const fixtureSchema = new mongoose.Schema(
             default: null
         },
 
+        /*
+         * Match-day channel plan (see utils/matchScheduler.js):
+         * the stadium channel is locked as soon as the match is scheduled and
+         * unlocked + announced one minute before kickoff.
+         */
+        channelPlan: {
+            channelId: { type: String, default: null },
+            state: {
+                type: String,
+                enum: ['pending', 'locked', 'announced', 'done', 'cancelled'],
+                default: 'pending'
+            },
+            lockAt: { type: Date, default: null },
+            announceAt: { type: Date, default: null },
+            lockedAt: { type: Date, default: null },
+            announcedAt: { type: Date, default: null },
+            lockedBy: { type: String, default: null },
+            previousOverwrite: { type: mongoose.Schema.Types.Mixed, default: null },
+            pingCaptains: { type: Boolean, default: false },
+            announcementMessageId: { type: String, default: null },
+            lastError: { type: String, default: null },
+            scheduledBy: { type: String, default: null }
+        },
+
         status: {
             type: String,
             enum: ['Pending', 'Live', 'Played', 'Cancelled'],

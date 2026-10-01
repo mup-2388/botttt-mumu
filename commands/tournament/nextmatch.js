@@ -40,7 +40,7 @@ const PAGE_SIZE = 4;
 
 module.exports = {
     name: 'nextmatch',
-    aliases: ['nm', 'fixtures', 'schedule'],
+    aliases: ['nm', 'fixtures'],
     description: 'Shows a paginated team schedule with next match info.',
     usage: '.nm [team name]',
     hidden: false,

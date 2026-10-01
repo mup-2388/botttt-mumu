@@ -29,6 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { getGuildPrefix, DEFAULT_PREFIX } = require('./utils/prefixManager');
 const { sanitizeMentions } = require('./utils/stringHelpers');
+const { buildSafeReply } = require('./utils/aiGuard');
 console.log('✅ utils loaded');
 
 process.setMaxListeners(20);
@@ -347,6 +348,22 @@ client.once(Events.ClientReady, async () => {
         }, 25000);
     } catch (error) {
         console.error('❌ Failed to start goal alert system:', error);
+    }
+
+    /* ── Emoji catalogue (every guild the bot is in) ── */
+    try {
+        const { initEmojiCatalog } = require('./utils/ai/emojiCatalog');
+        initEmojiCatalog(client);
+    } catch (error) {
+        console.error('❌ Failed to init emoji catalog:', error);
+    }
+
+    /* ── Match scheduler: locks stadium channels, unlocks + announces at kickoff ── */
+    try {
+        const { startMatchScheduler } = require('./utils/matchScheduler');
+        startMatchScheduler(client);
+    } catch (error) {
+        console.error('❌ Failed to start match scheduler:', error);
     }
 });
 
@@ -759,10 +776,12 @@ client.on('messageCreate', async (message) => {
                     userId: message.author.id,
                     username: message.author.username,
                     displayName: message.member?.displayName,
-                    imageData
+                    imageData,
+                    client
                 });
                 if (answer) {
-                    await message.reply(sanitizeMentions(answer));
+                    // allowedMentions.parse = [] → the model's text can never ping anyone
+                    await message.reply(buildSafeReply(answer));
                 }
             } catch (error) {
                 console.error('[footballAI] mention error:', error);
@@ -793,10 +812,11 @@ client.on('messageCreate', async (message) => {
                     userId: message.author.id,
                     username: message.author.username,
                     displayName: message.member?.displayName,
-                    imageData
+                    imageData,
+                    client
                 });
                 if (answer) {
-                    await message.reply(sanitizeMentions(answer));
+                    await message.reply(buildSafeReply(answer));
                 }
             }
         } catch (error) {
@@ -820,6 +840,16 @@ client.on('messageCreate', async (message) => {
         }
     }
 
+    /* ── Learn how people talk (style mimicry + their favourite emojis) ── */
+    try {
+        const { recordMessage } = require('./utils/ai/personality');
+        const { learnUserEmojis } = require('./utils/ai/emojiCatalog');
+        recordMessage({ guildId: message.guild.id, userId: message.author.id, content: message.content });
+        learnUserEmojis(message.guild.id, message.author.id, message.content);
+    } catch {
+        /* never break the handler over style tracking */
+    }
+
     /* ── AI-only channel: block commands (owner bypasses) ── */
     if (isAiOnlyChannel && !isOwner) {
         if (message.content.startsWith(prefix)) {
@@ -834,10 +864,11 @@ client.on('messageCreate', async (message) => {
                             channelId: message.channel.id,
                             userId: message.author.id,
                             username: message.author.username,
-                            displayName: message.member?.displayName
+                            displayName: message.member?.displayName,
+                            client
                         });
                         if (answer) {
-                            return message.reply(sanitizeMentions(answer));
+                            return message.reply(buildSafeReply(answer));
                         }
                     } catch (error) {
                         console.error('[footballAI] ai-only channel error:', error);
@@ -872,11 +903,12 @@ client.on('messageCreate', async (message) => {
                     channelId: message.channel.id,
                     userId: message.author.id,
                     username: message.author.username,
-                    displayName: message.member?.displayName
+                    displayName: message.member?.displayName,
+                    client
                 }
             );
             if (answer) {
-                await message.reply(sanitizeMentions(answer));
+                await message.reply(buildSafeReply(answer));
             }
         } catch (error) {
             console.error('[footballAI] command help error:', error);
