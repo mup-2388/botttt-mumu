@@ -730,8 +730,8 @@ const fixtureSchema = new mongoose.Schema(
 
         /*
          * Match-day channel plan (see utils/matchScheduler.js):
-         * the stadium channel is locked as soon as the match is scheduled and
-         * unlocked + announced one minute before kickoff.
+         * the stadium channel is locked immediately, announced when scheduled,
+         * reminded one minute before kickoff, then unlocked and pinged at kickoff.
          */
         channelPlan: {
             channelId: { type: String, default: null },
@@ -741,9 +741,19 @@ const fixtureSchema = new mongoose.Schema(
                 default: 'pending'
             },
             lockAt: { type: Date, default: null },
-            announceAt: { type: Date, default: null },
+            announceAt: { type: Date, default: null }, // one-minute reminder time
             lockedAt: { type: Date, default: null },
-            announcedAt: { type: Date, default: null },
+            announcedAt: { type: Date, default: null }, // legacy / reminder timestamp
+            scheduledAnnouncementClaimedAt: { type: Date, default: null },
+            scheduledAnnouncedAt: { type: Date, default: null },
+            scheduledAnnouncementMessageId: { type: String, default: null },
+            reminderClaimedAt: { type: Date, default: null },
+            reminderAnnouncedAt: { type: Date, default: null },
+            reminderMessageId: { type: String, default: null },
+            kickoffClaimedAt: { type: Date, default: null },
+            kickoffUnlockedAt: { type: Date, default: null },
+            kickoffAnnouncedAt: { type: Date, default: null },
+            kickoffMessageId: { type: String, default: null },
             lockedBy: { type: String, default: null },
             previousOverwrite: { type: mongoose.Schema.Types.Mixed, default: null },
             pingCaptains: { type: Boolean, default: false },
