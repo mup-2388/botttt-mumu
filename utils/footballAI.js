@@ -6,19 +6,12 @@
  * Knows the bot owner/developer.
  * Suggests correct command syntax when users mess up.
  *
- * Providers (in priority order, ALL FREE, no credit card):
- *   1. Gemini      — 500 req/day free (AI Studio key)
- *   2. Cerebras    — 1M tokens/day free
- *   3. Groq        — ~1,000 req/day free
- *   4. Mistral     — free tier, 1 req/sec
- *   5. OpenRouter  — free models, 50-200 req/day
- *
- * All providers use native Node.js https — ZERO npm dependencies.
+ * Providers are routed centrally by utils/aiProviders.js:
+ *   Groq first, then configured fallbacks (Cerebras, OpenRouter, Gemini, Mistral).
+ *   Providers without API keys are skipped; only compatible chat models are tried.
  *
  * Triggered by: @bot mention, reply to bot
  */
-
-const https = require('https');
 
 const { callAI } = require('./aiProviders');
 const {
@@ -358,234 +351,6 @@ Q: Who is winning the EPL right now? → [use web results if provided, otherwise
     return prompt;
 }
 
-/* ── Provider cooldown system ── */
-
-const providerCooldowns = new Map();
-
-function isProviderOnCooldown(name) {
-    const until = providerCooldowns.get(name);
-    if (!until) return false;
-    if (Date.now() < until) return true;
-    providerCooldowns.delete(name);
-    return false;
-}
-
-function setProviderCooldown(name, ms) {
-    providerCooldowns.set(name, Date.now() + ms);
-}
-
-function parseRetryMs(msg) {
-    const match = String(msg).match(/retry\s*(?:in|after)\s*([\d.]+)\s*s/i);
-    if (match) return Math.ceil(parseFloat(match[1]) * 1000);
-    return 60 * 1000;
-}
-
-function isDailyQuotaError(msg) {
-    return /PerDay|daily|limit: 0|quota exceeded|RESOURCE_EXHAUSTED/i.test(String(msg));
-}
-
-/* ── Generic HTTPS POST ── */
-
-function httpsPost(urlStr, headers, payload) {
-    return new Promise((resolve, reject) => {
-        const url = new URL(urlStr);
-        const data = JSON.stringify(payload);
-        const req = https.request({
-            hostname: url.hostname,
-            path: url.pathname + url.search,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(data),
-                ...headers
-            }
-        }, (res) => {
-            let body = '';
-            res.on('data', chunk => body += chunk);
-            res.on('end', () => {
-                try {
-                    const json = JSON.parse(body);
-                    if (res.statusCode >= 400) {
-                        const err = new Error(JSON.stringify(json.error || json));
-                        err.response = { status: res.statusCode, data: json };
-                        reject(err);
-                    } else {
-                        resolve(json);
-                    }
-                } catch {
-                    reject(new Error(`Parse error: ${body.slice(0, 200)}`));
-                }
-            });
-        });
-        req.on('error', reject);
-        req.setTimeout(15000, () => { req.destroy(); reject(new Error('timeout')); });
-        req.write(data);
-        req.end();
-    });
-}
-
-/* ── OpenAI-compatible provider call ── */
-
-async function callOpenAICompatible(baseUrl, apiKey, model, messages, cooldownName) {
-    const cdKey = cooldownName || model;
-    try {
-        const headers = { 'Authorization': `Bearer ${apiKey}` };
-        if (baseUrl.includes('openrouter')) {
-            headers['HTTP-Referer'] = 'https://discord-bot.mumu';
-            headers['X-Title'] = 'MUMU Bot';
-        }
-
-        const result = await httpsPost(
-            `${baseUrl}/chat/completions`,
-            headers,
-            { model, messages, max_tokens: 200, temperature: 0.7 }
-        );
-
-        return result?.choices?.[0]?.message?.content?.trim() || null;
-    } catch (error) {
-        const status = error.response?.status;
-        const msg = String(error.message || '');
-
-        if (status === 429) {
-            const cooldown = isDailyQuotaError(msg) ? 24 * 60 * 60 * 1000 : parseRetryMs(msg);
-            setProviderCooldown(cdKey, cooldown);
-            console.error(`[footballAI] ${cdKey} 429 — cooldown ${Math.round(cooldown / 1000)}s`);
-        } else if (status === 402 || status === 403) {
-            setProviderCooldown(cdKey, 24 * 60 * 60 * 1000);
-            console.error(`[footballAI] ${cdKey} ${status} — 24h cooldown`);
-        } else {
-            console.error(`[footballAI] ${cdKey} error: ${status || msg.slice(0, 100)}`);
-        }
-        return null;
-    }
-}
-
-/* ── Gemini REST API (native https) ── */
-
-async function callGemini(apiKey, messages, systemPrompt, imageData) {
-    const cdKey = 'gemini';
-    try {
-        // Build Gemini contents — use special builder if image present
-        const contents = imageData
-            ? buildGeminiContents(messages, imageData)
-            : messages.filter(m => m.role !== 'system').map(m => ({
-                role: m.role === 'assistant' ? 'model' : 'user',
-                parts: [{ text: typeof m.content === 'string' ? m.content : m.content.find(p => p.type === 'text')?.text || '' }]
-            }));
-
-        const payload = {
-            contents,
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            generationConfig: { maxOutputTokens: 200, temperature: 0.7 }
-        };
-
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
-        const result = await httpsPost(url, {}, payload);
-
-        const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-        return text?.trim() || null;
-    } catch (error) {
-        const status = error.response?.status;
-        const msg = String(error.message || '');
-
-        if (status === 429 || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
-            const cooldown = isDailyQuotaError(msg) ? 24 * 60 * 60 * 1000 : parseRetryMs(msg);
-            setProviderCooldown(cdKey, cooldown);
-            console.error(`[footballAI] Gemini 429/quota — cooldown ${Math.round(cooldown / 1000)}s`);
-        } else {
-            console.error(`[footballAI] Gemini error: ${status || msg.slice(0, 100)}`);
-        }
-        return null;
-    }
-}
-
-/* ── Try multiple free OpenRouter models ── */
-
-async function callOpenRouterFree(models, messages) {
-    for (const model of models) {
-        const cdKey = `or:${model}`;
-        if (isProviderOnCooldown(cdKey)) continue;
-
-        const result = await callOpenAICompatible(
-            'https://openrouter.ai/api/v1',
-            process.env.OPENROUTER_API_KEY,
-            model,
-            messages,
-            cdKey
-        );
-
-        if (result) return result;
-    }
-    return null;
-}
-
-/* ── Provider definitions ── */
-
-const PROVIDERS = [
-    {
-        name: 'gemini',
-        active: () => !!process.env.GEMINI_API_KEY,
-        cooldown: () => isProviderOnCooldown('gemini'),
-        call: (messages, systemPrompt) => callGemini(process.env.GEMINI_API_KEY, messages, systemPrompt)
-    },
-    {
-        name: 'cerebras',
-        active: () => !!process.env.CEREBRAS_API_KEY,
-        cooldown: () => isProviderOnCooldown('cerebras'),
-        call: (messages) => callOpenAICompatible(
-            'https://api.cerebras.ai/v1',
-            process.env.CEREBRAS_API_KEY,
-            'llama-4-scout',
-            messages,
-            'cerebras'
-        )
-    },
-    {
-        name: 'groq',
-        active: () => !!process.env.GROQ_API_KEY,
-        cooldown: () => isProviderOnCooldown('groq'),
-        call: (messages) => callOpenAICompatible(
-            'https://api.groq.com/openai/v1',
-            process.env.GROQ_API_KEY,
-            'llama-3.3-70b-versatile',
-            messages,
-            'groq'
-        )
-    },
-    {
-        name: 'mistral',
-        active: () => !!process.env.MISTRAL_API_KEY,
-        cooldown: () => isProviderOnCooldown('mistral'),
-        call: (messages) => callOpenAICompatible(
-            'https://api.mistral.ai/v1',
-            process.env.MISTRAL_API_KEY,
-            'mistral-small-latest',
-            messages,
-            'mistral'
-        )
-    },
-    {
-        name: 'openrouter-free',
-        active: () => !!process.env.OPENROUTER_API_KEY,
-        cooldown: () => isProviderOnCooldown('openrouter-free'),
-        call: (messages) => {
-            const freeModels = [
-                'deepseek/deepseek-chat-v3-0324:free',
-                'deepseek/deepseek-r1-0528:free',
-                'qwen/qwen3-coder-480b-a35b-instruct:free',
-                'moonshotai/kimi-k2.6:free',
-                'meta-llama/llama-3.3-70b-instruct:free',
-                'meta-llama/llama-4-scout:free',
-                'google/gemma-3-27b-it:free',
-                'google/gemini-2.0-flash-exp:free',
-                'mistralai/mistral-small-3.1-24b-instruct:free'
-            ];
-            return callOpenRouterFree(freeModels, messages);
-        }
-    }
-];
-
 /* ── Web search ── */
 
 async function searchWebIfNeeded(question) {
@@ -686,37 +451,6 @@ function buildMessages(systemPrompt, history, userText, imageData) {
     }
 
     return messages;
-}
-
-/* ── Build Gemini-specific contents with image ── */
-
-function buildGeminiContents(messages, imageData) {
-    const contents = [];
-    for (const m of messages) {
-        if (m.role === 'system') continue;
-        const role = m.role === 'assistant' ? 'model' : 'user';
-
-        if (typeof m.content === 'string') {
-            contents.push({ role, parts: [{ text: m.content }] });
-        } else if (Array.isArray(m.content)) {
-            // Multimodal content (text + image)
-            const parts = [];
-            for (const part of m.content) {
-                if (part.type === 'text') {
-                    parts.push({ text: part.text });
-                } else if (part.type === 'image_url' && imageData?.base64) {
-                    parts.push({
-                        inlineData: {
-                            mimeType: imageData.mimeType,
-                            data: imageData.base64
-                        }
-                    });
-                }
-            }
-            contents.push({ role, parts });
-        }
-    }
-    return contents;
 }
 
 /* ── Main entry point ── */
@@ -848,7 +582,7 @@ ${webContext}`;
     });
 
     if (!result?.text) {
-        console.error('[footballAI] All providers failed or on cooldown', toolsUsed.length ? `(tools: ${toolsUsed.join(', ')})` : '');
+        console.error('[footballAI] All providers failed or are on cooldown; check preceding [aiProviders] errors or run .aistatus.', toolsUsed.length ? `(tools: ${toolsUsed.join(', ')})` : '');
         return null;
     }
 
