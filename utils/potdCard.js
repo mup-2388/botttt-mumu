@@ -62,7 +62,7 @@ function cleanText(value, maxLength = 48) {
 
 function parseStats(input) {
     const items = Array.isArray(input)
-        ? input.map(item => String(item ?? '').trim()).filter(Boolean)
+        ? input.filter(item => item != null && (typeof item === 'object' || String(item).trim()))
         : String(input ?? '')
             .split(/[,;|\n•]+/g)
             .map(item => item.trim())
@@ -71,7 +71,15 @@ function parseStats(input) {
     if (!items.length) throw new Error('Provide at least one match-day stat, e.g. `2 Goals, 1 Assist, 4 Shots`.');
     if (items.length > 3) throw new Error('The POTD card supports up to three stats; separate them with commas.');
 
-    return items.map(raw => {
+    return items.map(item => {
+        if (item && typeof item === 'object') {
+            return {
+                value: cleanText(item.value, 12) || '—',
+                label: cleanText(item.label, 20).toUpperCase()
+            };
+        }
+
+        const raw = String(item).trim();
         let value = '';
         let label = '';
         let match = raw.match(/^(.{1,24}?)\s*[:=]\s*(.{1,14})$/);
@@ -86,7 +94,7 @@ function parseStats(input) {
             label = match[1].trim();
             value = match[2].trim();
         } else {
-            value = raw.trim();
+            value = raw;
         }
 
         return {

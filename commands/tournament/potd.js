@@ -43,6 +43,10 @@ function formatIstDate(date = new Date()) {
     return `${values.day} ${String(values.month || '').toUpperCase()} ${values.year}`.trim();
 }
 
+function isPlaceholderTeamName(value) {
+    return /^(?:bye(?:\s+week)?|tbd|unassigned|free\s+agent)$/i.test(String(value || '').trim());
+}
+
 function parsePrefixPostArgs(message, args) {
     const user = message.mentions?.users?.first?.();
     if (!user) return { error: 'Mention the player whose POTD card you want to post.' };
@@ -255,13 +259,17 @@ async function runPost({ guild, user, statsText, matchLabel, reply }) {
         return safeReply(reply, `❌ That player is not on an active roster in the default tournament, **${selectedTournament.tournament.name}**.`);
     }
 
-    let teamName = String(roster.teamNameSnapshot || player.teamNameSnapshot || '').trim();
-    if (!teamName && roster.teamId) {
+    const teamNames = [];
+    if (roster.teamId) {
         const team = await Team.findOne({ guildId: guild.id, _id: roster.teamId }).lean();
-        teamName = String(team?.name || '').trim();
+        teamNames.push(team?.name);
     }
+    teamNames.push(roster.teamNameSnapshot);
+    const teamName = teamNames
+        .map(value => String(value || '').trim())
+        .find(value => value && !isPlaceholderTeamName(value)) || '';
     if (!teamName) {
-        return safeReply(reply, '❌ The player has no team name in the default tournament roster.');
+        return safeReply(reply, '❌ The player has no real team name in the default tournament roster.');
     }
 
     let channel;
