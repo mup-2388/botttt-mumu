@@ -302,6 +302,70 @@ test('stat parser accepts value-first and label-first organizer input and caps c
     assert.throws(() => potdUtils.parseStats('1 Goal, 2 Assists, 3 Saves, 4 Shots'), /up to three stats/);
 });
 
+test('avatar cleanup removes a flat neutral backdrop connected to the image edge', () => {
+    const width = 10;
+    const height = 10;
+    const data = new Uint8ClampedArray(width * height * 4);
+
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+        const offset = pixel * 4;
+        data[offset] = 126;
+        data[offset + 1] = 126;
+        data[offset + 2] = 126;
+        data[offset + 3] = 255;
+    }
+    for (let y = 3; y < 7; y += 1) {
+        for (let x = 3; x < 7; x += 1) {
+            const offset = (y * width + x) * 4;
+            data[offset] = 180;
+            data[offset + 1] = 105;
+            data[offset + 2] = 80;
+        }
+    }
+
+    const removed = potdUtils.removeNeutralEdgeBackground({ data }, width, height);
+    assert.equal(removed, 84);
+    assert.equal(data[3], 0);
+    assert.equal(data[(5 * width + 5) * 4 + 3], 255);
+
+    const monochrome = new Uint8ClampedArray(width * height * 4);
+    for (let offset = 0; offset < monochrome.length; offset += 4) {
+        monochrome[offset] = 80;
+        monochrome[offset + 1] = 80;
+        monochrome[offset + 2] = 80;
+        monochrome[offset + 3] = 255;
+    }
+    assert.equal(potdUtils.removeNeutralEdgeBackground({ data: monochrome }, width, height), 0);
+    assert.equal(monochrome[3], 255);
+
+    const circleSize = 20;
+    const circleData = new Uint8ClampedArray(circleSize * circleSize * 4);
+    for (let y = 0; y < circleSize; y += 1) {
+        for (let x = 0; x < circleSize; x += 1) {
+            const distance = Math.hypot(x - 9.5, y - 9.5);
+            if (distance > 9.3) continue;
+            const offset = (y * circleSize + x) * 4;
+            circleData[offset] = 126;
+            circleData[offset + 1] = 126;
+            circleData[offset + 2] = 126;
+            circleData[offset + 3] = 255;
+        }
+    }
+    for (let y = 7; y < 13; y += 1) {
+        for (let x = 8; x < 12; x += 1) {
+            const offset = (y * circleSize + x) * 4;
+            circleData[offset] = 180;
+            circleData[offset + 1] = 105;
+            circleData[offset + 2] = 80;
+            circleData[offset + 3] = 255;
+        }
+    }
+
+    assert.ok(potdUtils.removeNeutralEdgeBackground({ data: circleData }, circleSize, circleSize) > 0);
+    assert.equal(circleData[(2 * circleSize + 9) * 4 + 3], 0);
+    assert.equal(circleData[(9 * circleSize + 9) * 4 + 3], 255);
+});
+
 test('renderer wraps a long player name safely and renders BYE as the literal team name', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'potd-template-'));
     const templatePath = path.join(tempDir, 'original-template.png');
@@ -320,19 +384,20 @@ test('renderer wraps a long player name safely and renders BYE as the literal te
             playerName: 'ABCDEFGHIJKLMNOPQRSTUVWX',
             teamName: 'BYE',
             avatarUrl: 'https://cdn.discordapp.test/player.png',
-            stats: potdUtils.parseStats('2 Goals')
+            stats: potdUtils.parseStats('1 Goals, 1 Assists')
         });
 
-        const nameLines = textDrawCalls.filter(call => call.x === 282 && call.font === '25px "Oswald"');
+        const nameLines = textDrawCalls.filter(call => call.x === 282 && call.font === '30px "Oswald"');
         assert.equal(nameLines.length, 2);
         assert.equal(nameLines.map(call => call.text).join(''), 'ABCDEFGHIJKLMNOPQRSTUVWX');
         assert.ok(nameLines.every(call => call.y >= 637 && call.y <= 696));
-        assert.ok(nameLines.every(call => call.fillStyle === '#F5FCFF'));
+        assert.ok(nameLines.every(call => call.fillStyle === '#F6FAFD'));
 
         const teamDraw = textDrawCalls.find(call => call.text === 'BYE');
         assert.ok(teamDraw);
-        assert.equal(teamDraw.font, '23px "Inter SemiBold"');
-        assert.equal(teamDraw.fillStyle, '#73EFFF');
+        assert.equal(teamDraw.font, '24px "Inter SemiBold"');
+        assert.equal(teamDraw.fillStyle, '#75C9D9');
+        assert.deepEqual(textDrawCalls.filter(call => call.text === '1' && call.font === '32px "Oswald"').map(call => call.x), [470, 785]);
         assert.equal(strokeCalls.length, 0);
         assert.equal(fillRectCalls.length, 0);
     } finally {
@@ -371,51 +436,52 @@ test('renderer draws the original template full-canvas before adding player over
         assert.equal(imageLoads[0], templatePath);
         assert.equal(drawCalls[0][0], templateImage);
         assert.deepEqual(drawCalls[0].slice(1), [0, 0, 1254, 1254]);
-        assert.deepEqual(drawCalls[1].slice(1), [0, 0, 512, 512, 605, 415, 220, 220]);
-        assert.deepEqual(arcCalls[0].slice(0, 3), [715, 525, 110]);
+        assert.deepEqual(drawCalls[1].slice(1), [0, 0, 512, 512, 587.5, 387.5, 255, 255]);
+        assert.deepEqual(arcCalls[0].slice(0, 3), [715, 515, 127.5]);
         assert.equal(strokeCalls.length, 0);
         assert.equal(fillRectCalls.length, 0);
         assert.ok(renderedText.includes('2') && renderedText.includes('GOALS'));
         assert.doesNotMatch(renderedText.join(' '), /\[object Object\]|PLAYER OF THE DAY/);
 
         const playerNameDraw = textDrawCalls.find(call => call.text === 'KABIR PATEL');
-        assert.equal(playerNameDraw.font, '31px "Oswald"');
+        const playerNameSize = Number(playerNameDraw.font.match(/([0-9.]+)px/)?.[1]);
+        assert.ok(playerNameSize >= 38 && playerNameSize <= 40);
         assert.equal(playerNameDraw.x, 282);
-        assert.equal(playerNameDraw.y, 675);
-        assert.equal(playerNameDraw.fillStyle, '#F5FCFF');
-        assert.equal(playerNameDraw.shadowColor, 'rgba(7, 26, 80, 0.8)');
+        assert.equal(playerNameDraw.y, 677);
+        assert.equal(playerNameDraw.fillStyle, '#F6FAFD');
+        assert.equal(playerNameDraw.shadowColor, 'rgba(7, 26, 50, 0.72)');
         assert.equal(playerNameDraw.shadowBlur, 0);
         assert.equal(playerNameDraw.shadowOffsetY, 2);
 
         const teamDraw = textDrawCalls.find(call => call.text === 'DOOMPUR DEVILS');
-        assert.equal(teamDraw.font, '23px "Inter SemiBold"');
+        assert.equal(teamDraw.font, '24px "Inter SemiBold"');
         assert.equal(teamDraw.x, 282);
         assert.equal(teamDraw.y, 736);
-        assert.equal(teamDraw.fillStyle, '#73EFFF');
+        assert.equal(teamDraw.fillStyle, '#75C9D9');
         assert.equal(teamDraw.letterSpacing, '0.2px');
-        assert.equal(teamDraw.shadowColor, 'rgba(7, 26, 80, 0.8)');
+        assert.equal(teamDraw.shadowColor, 'rgba(7, 26, 50, 0.58)');
         assert.equal(teamDraw.shadowOffsetY, 1);
 
         const matchDateDraw = textDrawCalls.find(call => call.text === 'MATCH 02 · 02 OCT 2026');
-        assert.equal(matchDateDraw.font, '25px "Inter SemiBold"');
-        assert.equal(matchDateDraw.x, 571);
+        assert.equal(matchDateDraw.font, '21px "Inter SemiBold"');
+        assert.equal(matchDateDraw.x, 959);
         assert.equal(matchDateDraw.y, 696);
-        assert.equal(matchDateDraw.textAlign, 'left');
-        assert.equal(matchDateDraw.fillStyle, '#F5FCFF');
-        assert.equal(matchDateDraw.letterSpacing, '0.3px');
+        assert.equal(matchDateDraw.textAlign, 'right');
+        assert.equal(matchDateDraw.fillStyle, '#C6D0DA');
+        assert.equal(matchDateDraw.letterSpacing, '0.2px');
 
         const goalsValue = textDrawCalls.find(call => call.text === '2' && call.x === 420);
         const goalsLabel = textDrawCalls.find(call => call.text === 'GOALS' && call.x === 420);
-        assert.equal(goalsValue.fillStyle, '#F5FCFF');
-        assert.equal(goalsValue.shadowColor, 'rgba(6, 27, 85, 0.8)');
+        assert.equal(goalsValue.fillStyle, '#F6FAFD');
+        assert.equal(goalsValue.shadowColor, 'rgba(7, 26, 50, 0.7)');
         assert.equal(goalsLabel.font, '17px "Inter SemiBold"');
         assert.equal(goalsLabel.y, 947);
-        assert.equal(goalsLabel.fillStyle, '#73EFFF');
+        assert.equal(goalsLabel.fillStyle, '#83C7D3');
 
         assert.deepEqual(textDrawCalls.filter(call => ['2', '1', '4'].includes(call.text)).map(call => [call.x, call.y, call.font]), [
-            [420, 918, '25px "Oswald"'],
-            [627, 918, '25px "Oswald"'],
-            [834, 918, '25px "Oswald"']
+            [420, 918, '32px "Oswald"'],
+            [627, 918, '32px "Oswald"'],
+            [834, 918, '32px "Oswald"']
         ]);
         assert.equal(renderCalls[0].format, 'image/png');
         assert.equal(renderCalls[0].width, 1254);
