@@ -18,7 +18,8 @@ test('selects the earliest unplayed matchday and sorts its fixtures numerically'
         { roundLabel: 'Matchday 2', status: 'Pending', matchNumber: 11 },
         { roundLabel: 'Group B Matchday 1', status: 'Live', matchNumber: 10 },
         { roundLabel: 'Group A Matchday 1', status: 'Pending', matchNumber: 2 },
-        { roundLabel: 'Matchday 1', status: 'Played', matchNumber: 1 },
+        { roundLabel: 'Matchday 1', status: 'Pending', matchNumber: 1, reserved: { isReserved: true } },
+        { roundLabel: 'Matchday 1', status: 'Played', matchNumber: 4 },
         { roundLabel: 'Matchday 1', status: 'Cancelled', matchNumber: 3 },
         { roundLabel: 'Quarter Final 1', status: 'Pending', matchNumber: 4 }
     ]);
@@ -65,6 +66,11 @@ test('formats the selected matchday with the specified real emoji and ping marku
     assert.match(content, /<@&111111111111111111> <:vsvs:1555297535361286225> <@&222222222222222222>/);
     assert.match(content, /<:Stadium:1487010283506630776> <#333333333333333333>/);
     assert.match(content, /Deadline : `Friday 8 PM`/);
+    assert.deepEqual(MATCHDAY_NOTES, [
+        "- NO TM REQUIRED AND DON'T FORGET TO DO -ctn",
+        '- IF HOST FORGET TO DO -ctn | HOST BAN',
+        '- NOTE: Home Advantage is there'
+    ]);
     assert.ok(MATCHDAY_NOTES.every(note => content.includes(`\n${note}`)));
     assert.ok(content.includes(`<@&${FIXTURES_ROLE_ID}>`));
     assert.ok(content.includes(`<@${UNALDO_USER_ID}>`));

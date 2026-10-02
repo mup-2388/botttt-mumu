@@ -9,9 +9,9 @@ const AASHANK_USER_ID = '1531201010532618241';
 const DISCORD_MESSAGE_LIMIT = 2000;
 
 const MATCHDAY_NOTES = [
-    '- No TM',
-    '- Hosts',
-    '- Home advantage'
+    "- NO TM REQUIRED AND DON'T FORGET TO DO -ctn",
+    '- IF HOST FORGET TO DO -ctn | HOST BAN',
+    '- NOTE: Home Advantage is there'
 ];
 
 function matchdayNumber(fixture) {
@@ -21,6 +21,8 @@ function matchdayNumber(fixture) {
 }
 
 function isUnplayedFixture(fixture) {
+    if (fixture?.reserved?.isReserved === true) return false;
+
     const status = String(fixture?.status || 'Pending').trim().toLowerCase();
     return !['played', 'cancelled', 'canceled', 'completed'].includes(status);
 }
