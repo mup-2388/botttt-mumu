@@ -62,7 +62,7 @@ function cleanText(value, maxLength = 48) {
 
 function parseStats(input) {
     const items = Array.isArray(input)
-        ? input.map(item => String(item ?? '').trim()).filter(Boolean)
+        ? input.filter(item => item != null && (typeof item === 'object' || String(item).trim()))
         : String(input ?? '')
             .split(/[,;|\n•]+/g)
             .map(item => item.trim())
@@ -71,7 +71,15 @@ function parseStats(input) {
     if (!items.length) throw new Error('Provide at least one match-day stat, e.g. `2 Goals, 1 Assist, 4 Shots`.');
     if (items.length > 3) throw new Error('The POTD card supports up to three stats; separate them with commas.');
 
-    return items.map(raw => {
+    return items.map(item => {
+        if (item && typeof item === 'object') {
+            return {
+                value: cleanText(item.value, 12) || '—',
+                label: cleanText(item.label, 20).toUpperCase()
+            };
+        }
+
+        const raw = String(item).trim();
         let value = '';
         let label = '';
         let match = raw.match(/^(.{1,24}?)\s*[:=]\s*(.{1,14})$/);
@@ -86,7 +94,7 @@ function parseStats(input) {
             label = match[1].trim();
             value = match[2].trim();
         } else {
-            value = raw.trim();
+            value = raw;
         }
 
         return {
@@ -116,9 +124,9 @@ function drawFittedText(ctx, text, { x, y, width, size, minSize = 10, family = '
     setFont(ctx, fitted, family);
     ctx.textAlign = align;
     ctx.textBaseline = 'alphabetic';
-    ctx.shadowColor = 'rgba(0, 7, 28, 0.9)';
-    ctx.shadowBlur = 5;
-    ctx.shadowOffsetY = 2;
+    ctx.shadowColor = 'rgba(0, 7, 28, 0.85)';
+    ctx.shadowBlur = 3;
+    ctx.shadowOffsetY = 1;
     if (stroke) {
         ctx.lineJoin = 'round';
         ctx.lineWidth = strokeWidth;
@@ -129,6 +137,30 @@ function drawFittedText(ctx, text, { x, y, width, size, minSize = 10, family = '
     ctx.fillText(text, x, y, width);
     ctx.shadowBlur = 0;
     ctx.shadowOffsetY = 0;
+}
+
+function drawRoundedPanel(ctx, { x, y, width, height, radius = 12, fill, stroke = null, strokeWidth = 1 }) {
+    const r = Math.min(radius, width / 2, height / 2);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + width - r, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+    ctx.lineTo(x + width, y + height - r);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    ctx.lineTo(x + r, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = strokeWidth;
+        ctx.stroke();
+    }
+    ctx.restore();
 }
 
 async function fetchAvatar(url) {
@@ -200,29 +232,28 @@ function drawStats(ctx, stats) {
     const left = 0.225 * BASE_WIDTH;
     const right = 0.775 * BASE_WIDTH;
     const count = stats.length;
-    const regionWidth = right - left;
-    const columnWidth = regionWidth / count;
+    const columnWidth = (right - left) / count;
 
     stats.forEach((stat, index) => {
         const centerX = left + columnWidth * (index + 0.5);
         drawFittedText(ctx, stat.value, {
             x: centerX,
-            y: 0.724 * BASE_HEIGHT,
-            width: columnWidth * 0.84,
-            size: 50,
+            y: 0.752 * BASE_HEIGHT,
+            width: columnWidth * 0.82,
+            size: 46,
             minSize: 26,
             family: 'Oswald',
             color: '#F4FBFF',
             align: 'center',
-            stroke: '#08265D',
-            strokeWidth: 3
+            stroke: '#061B43',
+            strokeWidth: 2
         });
         if (stat.label) {
             drawFittedText(ctx, stat.label, {
                 x: centerX,
-                y: 0.754 * BASE_HEIGHT,
-                width: columnWidth * 0.94,
-                size: 17,
+                y: 0.777 * BASE_HEIGHT,
+                width: columnWidth * 0.92,
+                size: 15,
                 minSize: 10,
                 family: 'Inter SemiBold',
                 color: '#72E8FF',
@@ -233,13 +264,13 @@ function drawStats(ctx, stats) {
 
     if (count > 1) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(93, 223, 255, 0.75)';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(93, 223, 255, 0.7)';
+        ctx.lineWidth = 1.25;
         for (let index = 1; index < count; index += 1) {
             const x = left + columnWidth * index;
             ctx.beginPath();
-            ctx.moveTo(x, 0.696 * BASE_HEIGHT);
-            ctx.lineTo(x, 0.758 * BASE_HEIGHT);
+            ctx.moveTo(x, 0.735 * BASE_HEIGHT);
+            ctx.lineTo(x, 0.78 * BASE_HEIGHT);
             ctx.stroke();
         }
         ctx.restore();
@@ -272,25 +303,39 @@ async function renderPotdCard({ playerName, teamName, avatarUrl, stats, matchLab
     ctx.save();
     ctx.scale(scaleX, scaleY);
 
-    // Coordinates are based on the user's 1254×1254 layout analysis.
+    // Keep the supplied card art untouched; overlays follow its portrait, info and stat zones.
     drawPortrait(ctx, await fetchAvatar(avatarUrl), name);
 
+    const leftX = 0.225 * BASE_WIDTH;
+    const leftWidth = 0.17 * BASE_WIDTH;
     drawFittedText(ctx, 'PLAYER OF THE DAY', {
-        x: 0.225 * BASE_WIDTH,
-        y: 0.492 * BASE_HEIGHT,
-        width: 0.17 * BASE_WIDTH,
-        size: 15,
-        minSize: 10,
+        x: leftX,
+        y: 0.484 * BASE_HEIGHT,
+        width: leftWidth,
+        size: 16,
+        minSize: 11,
         family: 'Inter SemiBold',
-        color: '#72E8FF',
+        color: '#8AF2FF',
         align: 'left'
     });
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(leftX, 0.502 * BASE_HEIGHT);
+    ctx.lineTo(leftX + leftWidth * 0.9, 0.502 * BASE_HEIGHT);
+    ctx.strokeStyle = 'rgba(36, 220, 255, 0.9)';
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = '#00CFFF';
+    ctx.shadowBlur = 6;
+    ctx.stroke();
+    ctx.restore();
+
     drawFittedText(ctx, name.toUpperCase(), {
-        x: 0.225 * BASE_WIDTH,
+        x: leftX,
         y: 0.542 * BASE_HEIGHT,
-        width: 0.17 * BASE_WIDTH,
-        size: 35,
-        minSize: 19,
+        width: leftWidth,
+        size: 36,
+        minSize: 20,
         family: 'Oswald',
         color: '#F4FBFF',
         align: 'left',
@@ -298,40 +343,109 @@ async function renderPotdCard({ playerName, teamName, avatarUrl, stats, matchLab
         strokeWidth: 2
     });
     if (team) {
+        setFont(ctx, 15, 'Inter SemiBold');
+        const teamPillWidth = Math.min(leftWidth, Math.max(74, ctx.measureText(team).width + 20));
+        drawRoundedPanel(ctx, {
+            x: leftX - 5,
+            y: 0.563 * BASE_HEIGHT,
+            width: teamPillWidth,
+            height: 0.036 * BASE_HEIGHT,
+            radius: 12,
+            fill: 'rgba(3, 20, 55, 0.62)',
+            stroke: 'rgba(92, 229, 255, 0.48)',
+            strokeWidth: 1
+        });
         drawFittedText(ctx, team, {
-            x: 0.225 * BASE_WIDTH,
+            x: leftX + 5,
             y: 0.589 * BASE_HEIGHT,
-            width: 0.17 * BASE_WIDTH,
-            size: 18,
+            width: leftWidth - 10,
+            size: 15,
             minSize: 10,
             family: 'Inter SemiBold',
-            color: '#72E8FF',
+            color: '#8AF2FF',
             align: 'left'
         });
     }
 
-    const matchDate = [match || 'MATCH DAY', date].filter(Boolean).join(' · ');
-    if (matchDate) {
-        drawFittedText(ctx, matchDate, {
-            x: 0.61 * BASE_WIDTH,
-            y: 0.582 * BASE_HEIGHT,
-            width: 0.31 * BASE_WIDTH,
-            size: 17,
-            minSize: 10,
-            family: 'Inter SemiBold',
-            color: '#F4FBFF',
-            align: 'center'
+    const matchDate = [match || 'MATCH DAY', date].filter(Boolean);
+    if (matchDate.length) {
+        const centerX = 0.61 * BASE_WIDTH;
+        const boxWidth = 0.31 * BASE_WIDTH;
+        const boxHeight = 0.043 * BASE_HEIGHT;
+        const boxX = centerX - boxWidth / 2;
+        const boxY = 0.55 * BASE_HEIGHT;
+        drawRoundedPanel(ctx, {
+            x: boxX,
+            y: boxY,
+            width: boxWidth,
+            height: boxHeight,
+            radius: 18,
+            fill: 'rgba(3, 18, 50, 0.52)',
+            stroke: 'rgba(92, 229, 255, 0.52)',
+            strokeWidth: 1
         });
+
+        if (match && date) {
+            drawFittedText(ctx, match, {
+                x: boxX + boxWidth * 0.25,
+                y: boxY + boxHeight * 0.67,
+                width: boxWidth * 0.43,
+                size: 15,
+                minSize: 10,
+                family: 'Inter SemiBold',
+                color: '#F4FBFF',
+                align: 'center'
+            });
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(centerX, boxY + 10);
+            ctx.lineTo(centerX, boxY + boxHeight - 10);
+            ctx.strokeStyle = 'rgba(92, 229, 255, 0.8)';
+            ctx.lineWidth = 1.25;
+            ctx.stroke();
+            ctx.restore();
+            drawFittedText(ctx, date, {
+                x: boxX + boxWidth * 0.75,
+                y: boxY + boxHeight * 0.67,
+                width: boxWidth * 0.43,
+                size: 15,
+                minSize: 10,
+                family: 'Inter SemiBold',
+                color: '#8AF2FF',
+                align: 'center'
+            });
+        } else {
+            drawFittedText(ctx, matchDate[0], {
+                x: centerX,
+                y: boxY + boxHeight * 0.67,
+                width: boxWidth * 0.9,
+                size: 15,
+                minSize: 10,
+                family: 'Inter SemiBold',
+                color: '#F4FBFF',
+                align: 'center'
+            });
+        }
     }
 
+    drawRoundedPanel(ctx, {
+        x: 0.205 * BASE_WIDTH,
+        y: 0.684 * BASE_HEIGHT,
+        width: 0.59 * BASE_WIDTH,
+        height: 0.104 * BASE_HEIGHT,
+        radius: 18,
+        fill: 'rgba(3, 16, 48, 0.5)',
+        stroke: 'rgba(92, 229, 255, 0.62)',
+        strokeWidth: 1.25
+    });
     drawFittedText(ctx, 'MATCH-DAY PERFORMANCE', {
         x: BASE_WIDTH / 2,
-        y: 0.678 * BASE_HEIGHT,
+        y: 0.714 * BASE_HEIGHT,
         width: 0.52 * BASE_WIDTH,
-        size: 16,
+        size: 15,
         minSize: 10,
         family: 'Inter SemiBold',
-        color: '#72E8FF',
+        color: '#8AF2FF',
         align: 'center'
     });
     drawStats(ctx, cardStats);

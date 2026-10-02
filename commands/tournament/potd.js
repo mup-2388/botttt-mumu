@@ -255,11 +255,12 @@ async function runPost({ guild, user, statsText, matchLabel, reply }) {
         return safeReply(reply, `❌ That player is not on an active roster in the default tournament, **${selectedTournament.tournament.name}**.`);
     }
 
-    let teamName = String(roster.teamNameSnapshot || player.teamNameSnapshot || '').trim();
+    let teamName = String(roster.teamNameSnapshot || '').trim();
     if (!teamName && roster.teamId) {
         const team = await Team.findOne({ guildId: guild.id, _id: roster.teamId }).lean();
         teamName = String(team?.name || '').trim();
     }
+    if (!teamName) teamName = String(player.teamNameSnapshot || '').trim();
     if (!teamName) {
         return safeReply(reply, '❌ The player has no team name in the default tournament roster.');
     }
