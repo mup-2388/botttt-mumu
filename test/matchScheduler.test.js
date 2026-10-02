@@ -36,7 +36,7 @@ function unsetPath(target, dottedPath) {
     if (cursor) delete cursor[parts[0]];
 }
 
-function makeScheduler({ fixture, fixtureFind, roleMentionable = true, canMentionAllRoles = false }) {
+function makeScheduler({ fixture, fixtureFind }) {
     const events = [];
     const messages = [];
     const stages = [];
@@ -44,7 +44,6 @@ function makeScheduler({ fixture, fixtureFind, roleMentionable = true, canMentio
 
     const channel = {
         id: 'stadium-1',
-        permissionsFor: () => ({ has: permission => permission === 'MentionEveryone' && canMentionAllRoles }),
         send: async payload => {
             events.push('send');
             messages.push(payload);
@@ -62,18 +61,15 @@ function makeScheduler({ fixture, fixtureFind, roleMentionable = true, canMentio
     };
 
     const teamRoles = [
-        { id: 'home-role', name: fixture.homeTeam, mentionable: roleMentionable },
-        { id: 'away-role', name: fixture.awayTeam, mentionable: roleMentionable }
+        { id: 'home-role', name: fixture.homeTeam },
+        { id: 'away-role', name: fixture.awayTeam }
     ];
     const guild = {
         id: 'guild-1',
         name: 'Test League',
         roles: {
             everyone: { id: 'everyone' },
-            cache: {
-                find: predicate => teamRoles.find(predicate),
-                get: id => teamRoles.find(role => role.id === id)
-            }
+            cache: { find: predicate => teamRoles.find(predicate) }
         },
         channels: { fetch: async () => channel },
         members: { me: { id: 'bot-user' } }
@@ -115,7 +111,6 @@ function makeScheduler({ fixture, fixtureFind, roleMentionable = true, canMentio
     };
 
     const fakeDiscord = {
-        PermissionFlagsBits: { MentionEveryone: 'MentionEveryone' },
         PermissionsBitField: { Flags: { SendMessages: 1n, AddReactions: 2n } },
         EmbedBuilder: class {
             setColor() { return this; }
@@ -176,7 +171,6 @@ function makeFixture(scheduledAt, channelPlan = {}) {
 test('scheduling locks immediately and sends a role-ping announcement with the IST kickoff time', async () => {
     const kickoff = new Date(Date.now() + 2 * 60 * 60 * 1000);
     const fixture = makeFixture(kickoff);
-    fixture.venueName = 'Wankhede <@&999> @everyone';
     const harness = makeScheduler({ fixture });
 
     const result = await harness.scheduler.scheduleMatch({
@@ -197,54 +191,13 @@ test('scheduling locks immediately and sends a role-ping announcement with the I
     assert.match(harness.messages[0].content, /<@&away-role>/);
     assert.match(harness.messages[0].content, /10 Oct, 9:00 PM IST/);
     assert.deepEqual(harness.messages[0].allowedMentions, {
-        parse: ['roles'],
+        parse: [],
+        roles: ['home-role', 'away-role'],
         users: []
     });
-    assert.deepEqual([...harness.messages[0].content.matchAll(/<@&([^>]+)>/g)].map(([, id]) => id), ['home-role', 'away-role']);
-    assert.doesNotMatch(harness.messages[0].content, /@everyone|@here|<@&999>/);
     assert.equal(harness.getStored().channelPlan.state, 'locked');
     assert.equal(harness.getStored().channelPlan.scheduledAnnouncementMessageId, 'message-1');
     assert.equal(result.unlockAt.getTime(), kickoff.getTime() - 60_000);
-});
-
-
-test('schedule refuses to lock when neither team role is mentionable and the bot cannot mention roles', async () => {
-    const fixture = makeFixture(new Date(Date.now() + 2 * 60 * 60 * 1000));
-    const harness = makeScheduler({ fixture, roleMentionable: false, canMentionAllRoles: false });
-
-    const result = await harness.scheduler.scheduleMatch({
-        client: { guilds: { cache: new Map() } },
-        guild: harness.guild,
-        fixture,
-        channelId: 'stadium-1',
-        pingCaptains: false,
-        actorId: 'organizer-1'
-    });
-
-    assert.equal(result.ok, false);
-    assert.match(result.error, /Discord will show but not notify/);
-    assert.equal(harness.events.includes('lock'), false);
-    assert.equal(harness.events.includes('db-update'), false);
-    assert.equal(harness.messages.length, 0);
-});
-
-
-test('schedule may ping non-mentionable team roles when the bot has Mention Everyone in the channel', async () => {
-    const fixture = makeFixture(new Date(Date.now() + 2 * 60 * 60 * 1000));
-    const harness = makeScheduler({ fixture, roleMentionable: false, canMentionAllRoles: true });
-
-    const result = await harness.scheduler.scheduleMatch({
-        client: { guilds: { cache: new Map() } },
-        guild: harness.guild,
-        fixture,
-        channelId: 'stadium-1',
-        pingCaptains: false,
-        actorId: 'organizer-1'
-    });
-
-    assert.equal(result.ok, true);
-    assert.equal(harness.messages.length, 1);
-    assert.deepEqual(harness.messages[0].allowedMentions.parse, ['roles']);
 });
 
 test('one minute before kickoff, the scheduler unlocks first and sends the final team-role ping', async () => {
@@ -269,7 +222,7 @@ test('one minute before kickoff, the scheduler unlocks first and sends the final
     assert.ok(harness.events.indexOf('unlock') < harness.events.indexOf('send'));
     assert.equal(harness.messages.length, 1);
     assert.match(harness.messages[0].content, /KICKOFF IN ONE MINUTE/);
-    assert.deepEqual(harness.messages[0].allowedMentions.parse, ['roles']);
+    assert.deepEqual(harness.messages[0].allowedMentions.roles, ['home-role', 'away-role']);
     assert.ok(harness.getStored().channelPlan.unlockedAt);
     assert.ok(harness.getStored().channelPlan.unlockAnnouncedAt);
     assert.equal(harness.getStored().channelPlan.state, 'done');

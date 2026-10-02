@@ -8,14 +8,14 @@
  *        → at 21:29 (kickoff − 1 min): UNLOCK (restore the snapshot) and ping both teams again.
  *
  * Safety notes:
- *   • only the code-generated ping line can ping roles; AI and fixture text
- *     is sanitized before Discord's role parser is enabled for that message
+ *   • the pings come from code, never from the AI text (allowedMentions is an
+ *     explicit allowlist of the two team roles)
  *   • every state change is an atomic findOneAndUpdate, so a slow tick can
  *     never double-lock or double-announce
  *   • if the bot was offline, the boot pass catches up sensibly
  */
 
-const { PermissionsBitField, PermissionFlagsBits, EmbedBuilder } = require('discord.js');
+const { PermissionsBitField, EmbedBuilder } = require('discord.js');
 const { Fixture, Team, TournamentSettings, TournamentPlayer, Player } = require('../models/Tournament');
 const { buildMatchAnnouncement } = require('./ai/announcements');
 const { formatIst, discordFull, discordRelative } = require('./istTime');
@@ -29,13 +29,6 @@ const STALE_HOURS = 6;
 
 let timer = null;
 let running = false;
-
-function neutralizeUnapprovedMentions(text) {
-    return String(text ?? '')
-        .replace(/<@&\d+>/g, '@\u200Brole')
-        .replace(/<@!?(\d+)>/g, '@\u200B$1')
-        .replace(/@\s?(everyone|here)\b/gi, (_, target) => `@\u200B${target}`);
-}
 
 /* ── Channel helpers ── */
 
@@ -206,27 +199,21 @@ async function buildAnnouncementMessage({
         `${calendar} ${formatIst(fixture.scheduledAt)} · ${discordFull(fixture.scheduledAt)} (${discordRelative(fixture.scheduledAt)})` +
         (fixture.venueName ? `\n📍 ${fixture.venueName}` : '');
 
-    /*
-     * Only the code-generated pingPrefix may contain role/user mentions.
-     * Discord's role parser is enabled for that line; sanitize all prose and
-     * metadata first so no model or fixture text can add another ping.
-     */
-    const { text: generatedBody } = sanitizeAIText(body, { maxUserPings: 0 });
-    const safeHeader = neutralizeUnapprovedMentions(header);
-    const safeBody = neutralizeUnapprovedMentions(generatedBody);
+    /* Belt and braces: even a hostile body cannot introduce a ping. */
+    const { text: safeBody } = sanitizeAIText(body, { maxUserPings: 0 });
     const pingPrefix = includePings && pings.labelLine ? `${pings.labelLine}\n\n` : '';
-    const content = `${pingPrefix}${safeHeader}\n\n${safeBody}`.trim().slice(0, 1900);
+    const content = `${pingPrefix}${header}\n\n${safeBody}`.trim().slice(0, 1900);
 
     return {
         content,
-        header: safeHeader,
+        header,
         safeBody,
         stageTitle,
         labelLine: pings.labelLine,
-        pingRoleIds: includePings ? pings.roleIds : [],
         allowedMentions: {
-            parse: includePings && pings.roleIds.length ? ['roles'] : [],
-            users: includePings ? pings.userIds : []
+            parse: [],
+            roles: pings.roleIds,
+            users: pings.userIds
         }
     };
 }
@@ -250,7 +237,7 @@ async function announceMatch({ client, guild, fixture, stage = 'kickoff' }) {
             .setDescription(`${message.header}\n\n${message.safeBody}`.slice(0, 4000))
             .setTimestamp();
 
-        /* The fallback contains only the sanitized announcement plus the code-generated ping line. */
+        /* The fallback uses the same explicit team/captain mention allowlist. */
         return channel.send({
             content: message.labelLine || undefined,
             embeds: [embed],
@@ -264,15 +251,6 @@ async function announceMatch({ client, guild, fixture, stage = 'kickoff' }) {
     plan.announcementMessageId = sent?.id || null;
 
     if (!sent) return { ok: false, error: 'both announcement sends failed' };
-
-    const parsedRoles = sent.mentions?.roles;
-    if (message.pingRoleIds.length && parsedRoles?.map) {
-        const parsedRoleIds = new Set(parsedRoles.map(role => String(role.id)));
-        const missingRoleIds = message.pingRoleIds.filter(id => !parsedRoleIds.has(String(id)));
-        if (missingRoleIds.length) {
-            console.error('[matchScheduler] Discord did not acknowledge expected role mentions:', missingRoleIds.join(', '));
-        }
-    }
 
     return { ok: true, messageId: sent.id };
 }
@@ -431,29 +409,6 @@ async function scheduleMatch({
     if (!kickoff) return { ok: false, error: 'this fixture has no kickoff time — set one with `.editfixture`' };
     if (kickoff.getTime() - now.getTime() < 60_000) {
         return { ok: false, error: 'kickoff is less than a minute away — pick a later time' };
-    }
-
-    const intendedPings = await buildPings({ guild, homeTeam: fixture.homeTeam, awayTeam: fixture.awayTeam, pingCaptains });
-    const unmentionableRoleIds = intendedPings.roleIds.filter(roleId => {
-        const role = guild.roles.cache.get?.(roleId);
-        return !role || role.mentionable !== true;
-    });
-
-    if (unmentionableRoleIds.length) {
-        const channel = await guild.channels.fetch(channelId).catch(() => null);
-        const botMember = guild.members.me;
-        const canMentionAllRoles = !!(
-            channel && botMember &&
-            channel.permissionsFor?.(botMember)?.has?.(PermissionFlagsBits.MentionEveryone)
-        );
-
-        if (!canMentionAllRoles) {
-            const names = unmentionableRoleIds.map(id => guild.roles.cache.get?.(id)?.name || id).join(', ');
-            return {
-                ok: false,
-                error: `Discord will show but not notify these team roles: ${names}. Enable “Allow anyone to @mention this role” for them or grant me “Mention @everyone, @here, and All Roles” in <#${channelId}>. Nothing was locked or announced.`
-            };
-        }
     }
 
     /* 1. Lock now */
