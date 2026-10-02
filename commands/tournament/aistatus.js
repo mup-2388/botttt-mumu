@@ -47,20 +47,27 @@ async function buildPayload(guild, user) {
     const providers = getProviderStatus();
     const emojis = emojiStats();
 
-    const providerLines = providers.map(p => {
-        if (!p.available) return `⚪ **${p.name}** — no key`;
+    const providerFields = providers.map(p => {
+        if (!p.available) {
+            return { name: `${p.name} — no key`, value: '⚪ No API key configured', inline: false };
+        }
 
         const rows = p.models.map(m => {
+            const error = m.lastError ? ` · ${m.lastError.slice(0, 100)}` : '';
             const state = m.cooling
-                ? `🥶 cooling (${Math.ceil((m.until - Date.now()) / 1000)}s)`
-                : m.fail && !m.ok
-                    ? `⚠️ failing (${m.lastError || 'unknown'})`
+                ? `🥶 cooling (${Math.ceil((m.until - Date.now()) / 1000)}s)${error}`
+                : m.lastError
+                    ? `⚠️ last failure: ${m.lastError.slice(0, 100)}`
                     : `✅ ok${m.avgMs ? ` ${m.avgMs}ms` : ''}`;
 
-            return `   ${m.model} — ${state}${m.ok + m.fail ? ` · ${m.ok}✓/${m.fail}✗` : ''}`;
+            return `${m.model} — ${state}${m.ok + m.fail ? ` · ${m.ok}✓/${m.fail}✗` : ''}`;
         });
 
-        return `**${p.name}** (${p.keys} key${p.keys === 1 ? '' : 's'})\n${rows.join('\n')}`;
+        return {
+            name: `${p.name} (${p.keys} key${p.keys === 1 ? '' : 's'})`,
+            value: rows.join('\n').slice(0, 1024) || 'No chat models configured',
+            inline: false
+        };
     });
 
     const style = getStyleSnapshot(guild.id, user.id);
@@ -70,7 +77,7 @@ async function buildPayload(guild, user) {
         .setColor(0x5865F2)
         .setTitle('🤖 AI STATUS')
         .addFields(
-            { name: 'Providers (priority order)', value: providerLines.join('\n').slice(0, 3400) || 'none configured', inline: false },
+            ...providerFields,
             { name: 'Emoji catalogue', value: `${emojis.emojis} custom emojis indexed · ${emojis.users} user profiles`, inline: true },
             { name: 'Ping-bait guard', value: 'active (allowedMentions + sanitizer + detector)', inline: true },
             { name: `Style profile — ${user.username}`, value: `messages learnt: ${style.messages}\navg length: ${style.avgLength}\nlanguage: ${style.language}\nroast level now: **${level}**\ntop emojis: ${style.topEmojis.slice(0, 4).join(' ') || '—'}`, inline: false }

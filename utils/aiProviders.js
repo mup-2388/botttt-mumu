@@ -2,9 +2,9 @@
  * aiProviders.js
  *
  * One place that talks to every AI provider, with:
- *   • Groq as the default, then Cerebras, OpenRouter (free ladder), Gemini, Mistral
+ *   • Groq as the default, then optional Cerebras, OpenRouter, Gemini, and Mistral fallbacks
  *   • multiple keys per provider  (GROQ_API_KEY_1, GROQ_API_KEY_2, ...)
- *   • per key+model health, cooldowns with exponential backoff
+ *   • per model health, actionable errors, and cooldowns with exponential backoff
  *   • retry once on timeout / 429 / 5xx, then move on
  *   • status reporting for /aistatus
  *
@@ -44,24 +44,45 @@ function markOk(provider, model, ms) {
     health.set(k, h);
 }
 
+function errorSummary(error) {
+    const responseError = error?.response?.data?.error;
+    const detail = responseError?.message
+        || error?.response?.data?.message
+        || error?.message
+        || String(error || 'unknown error');
+
+    // Provider messages are useful for debugging, but credentials must never land in logs/status.
+    const safeDetail = String(detail)
+        .replace(/\b(?:gsk_[A-Za-z0-9_-]+|sk-or-v1-[A-Za-z0-9_-]+|AIzaSy[A-Za-z0-9_-]+)\b/g, '[redacted]')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const status = error?.response?.status;
+    return `${status ? `HTTP ${status}: ` : ''}${safeDetail || 'unknown error'}`.slice(0, 180);
+}
+
 function markFail(provider, model, error) {
     const k = hkey(provider, model);
     const h = health.get(k) || { failures: 0, stats: { ok: 0, fail: 0, totalMs: 0 } };
     h.failures = (h.failures || 0) + 1;
-    h.lastError = String(error?.response?.status || error?.code || error?.message || error).slice(0, 160);
+    h.lastError = errorSummary(error);
     h.lastAt = Date.now();
     h.stats = h.stats || { ok: 0, fail: 0, totalMs: 0 };
     h.stats.fail += 1;
 
-    // 429 / 5xx / network → back off, exponentially for repeat offenders
     const status = error?.response?.status;
-    const isRate = status === 429 || status === 402 || status === 403;
-    const isServer = status >= 500 || error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT' || error?.code === 'ENOTFOUND';
+    const isRateLimited = status === 429 || status === 402 || status === 403;
+    const isServer = status >= 500
+        || ['ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET', 'EAI_AGAIN'].includes(error?.code);
+    const isBadModelOrRequest = status === 400 || status === 404 || status === 422;
 
-    if (isRate || isServer || !status) {
-        const base = isRate ? 60_000 : 30_000;
+    // Cool a broken model/config combination briefly too, so one bad model does not
+    // generate the same error on every Discord mention while other fallbacks run.
+    if (isRateLimited || isServer || isBadModelOrRequest || !status) {
+        const base = isBadModelOrRequest ? 5 * 60_000 : isRateLimited ? 60_000 : 30_000;
         const factor = Math.min(6, Math.max(1, h.failures));
-        h.cooldownUntil = Date.now() + Math.min(base * factor, 30 * 60_000);
+        const retryAfter = Number(error?.response?.headers?.['retry-after']);
+        const delay = retryAfter > 0 ? retryAfter * 1000 : base * factor;
+        h.cooldownUntil = Date.now() + Math.min(delay, 30 * 60_000);
     }
 
     health.set(k, h);
@@ -111,12 +132,27 @@ async function withRetry(fn) {
 /* ── OpenAI-compatible providers (Groq / Cerebras / OpenRouter / Mistral) ── */
 
 async function callOpenAICompatible({ provider, baseUrl, key, model, messages, temperature, jsonMode, maxTokens }) {
-    const body = {
-        model,
-        messages,
-        temperature: temperature ?? 0.7,
-        max_tokens: maxTokens || 900
-    };
+    const body = { model, messages };
+
+    if (provider === 'groq') {
+        // Groq's current API uses max_completion_tokens for its reasoning models.
+        // Compound is an agentic system and documents the bare model+messages request.
+        if (!model.startsWith('groq/compound')) {
+            body.max_completion_tokens = maxTokens || 900;
+            body.temperature = temperature ?? 0.7;
+
+            if (model.startsWith('openai/gpt-oss-')) {
+                body.reasoning_effort = 'low';
+                body.include_reasoning = false;
+            } else if (model === 'qwen/qwen3.8-27b') {
+                body.reasoning_effort = 'none';
+                body.reasoning_format = 'hidden';
+            }
+        }
+    } else {
+        body.temperature = temperature ?? 0.7;
+        body.max_tokens = maxTokens || 900;
+    }
 
     if (jsonMode) body.response_format = { type: 'json_object' };
 
@@ -133,36 +169,66 @@ async function callOpenAICompatible({ provider, baseUrl, key, model, messages, t
         )
     );
 
-    const text = res.data?.choices?.[0]?.message?.content;
+    if (res.data?.error) {
+        const upstreamError = new Error(res.data.error.message || 'provider returned an error');
+        const upstreamStatus = Number(res.data.error.status || res.data.error.code);
+        upstreamError.response = {
+            status: upstreamStatus >= 400 ? upstreamStatus : undefined,
+            data: res.data
+        };
+        throw upstreamError;
+    }
 
-    if (!text) throw new Error('empty completion');
+    const content = res.data?.choices?.[0]?.message?.content;
+    const text = Array.isArray(content)
+        ? content.map(part => typeof part === 'string' ? part : part?.text || '').join('').trim()
+        : typeof content === 'string' ? content.trim() : '';
+
+    if (!text) {
+        const finishReason = res.data?.choices?.[0]?.finish_reason;
+        throw new Error(`empty completion${finishReason ? ` (${finishReason})` : ''}`);
+    }
 
     markOk(provider, model, Date.now() - started);
 
-    return String(text).trim();
+    return text;
 }
 
 /* ── Gemini ── */
 
-async function callGemini({ key, model = 'gemini-2.5-flash', systemPrompt, messages, imageData, temperature, maxTokens }) {
+async function callGemini({ key, model = 'gemini-3.8-flash', systemPrompt, messages, imageData, temperature, maxTokens }) {
     const contents = messages
         .filter(m => m.role !== 'system')
-        .map(m => ({
-            role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }]
-        }));
+        .map(m => {
+            const parts = typeof m.content === 'string'
+                ? [{ text: m.content }]
+                : Array.isArray(m.content)
+                    ? m.content
+                        .filter(part => part?.type === 'text' && typeof part.text === 'string')
+                        .map(part => ({ text: part.text }))
+                    : [{ text: JSON.stringify(m.content) }];
+
+            return { role: m.role === 'assistant' ? 'model' : 'user', parts };
+        });
 
     if (imageData && contents.length) {
-        contents[contents.length - 1].parts.push({
-            inline_data: { mime_type: imageData.mimeType || 'image/png', data: imageData.data }
-        });
+        const lastUserContent = [...contents].reverse().find(content => content.role === 'user');
+        if (lastUserContent) {
+            lastUserContent.parts.push({
+                inline_data: { mime_type: imageData.mimeType || 'image/png', data: imageData.data }
+            });
+        }
     }
 
-    const body = {
-        contents,
-        generationConfig: { temperature: temperature ?? 0.7, maxOutputTokens: maxTokens || 900 }
-    };
+    const generationConfig = { maxOutputTokens: maxTokens || 900 };
+    if (model === 'gemini-3.8-flash') {
+        // Gemini 3.8 rejects temperature/top-p fields; keep its thinking budget modest for chat.
+        generationConfig.thinkingConfig = { thinkingLevel: 'low' };
+    } else {
+        generationConfig.temperature = temperature ?? 0.7;
+    }
 
+    const body = { contents, generationConfig };
     if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
     const started = Date.now();
@@ -171,28 +237,46 @@ async function callGemini({ key, model = 'gemini-2.5-flash', systemPrompt, messa
         post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, body)
     );
 
-    const text = res.data?.candidates?.[0]?.content?.parts?.map(p => p.text).filter(Boolean).join('');
+    if (res.data?.error) {
+        const providerError = new Error(res.data.error.message || 'provider returned an error');
+        providerError.response = { status: Number(res.data.error.code) || undefined, data: res.data };
+        throw providerError;
+    }
 
-    if (!text) throw new Error('empty completion');
+    const candidate = res.data?.candidates?.[0];
+    const text = candidate?.content?.parts
+        ?.filter(part => typeof part.text === 'string' && !part.thought)
+        .map(part => part.text)
+        .join('')
+        .trim();
+
+    if (!text) {
+        const reason = res.data?.promptFeedback?.blockReason || candidate?.finishReason;
+        throw new Error(`empty completion${reason ? ` (${reason})` : ''}`);
+    }
 
     markOk('gemini', model, Date.now() - started);
 
-    return String(text).trim();
+    return text;
 }
 
 /* ── Provider table (order = priority) ── */
 
 const CHAT_MODELS = {
-    groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'],
+    // Keep this list to conversational text models from the user's current Groq catalog.
+    // Audio, transcription, moderation, and prompt-guard models are not chat completions.
+    groq: [
+        'openai/gpt-oss-20b',
+        'qwen/qwen3.8-27b',
+        'openai/gpt-oss-120b',
+        'qwen/qwen3.6-27b',
+        'groq/compound'
+    ],
     cerebras: ['llama-4-scout', 'llama3.1-8b'],
     mistral: ['mistral-small-latest'],
-    openrouter: [
-        'deepseek/deepseek-chat-v3-0324:free',
-        'meta-llama/llama-3.3-70b-instruct:free',
-        'qwen/qwen3-30b-a3b:free',
-        'google/gemma-3-27b-it:free',
-        'mistralai/mistral-small-3.1-24b-instruct:free'
-    ]
+    // OpenRouter's free catalog rotates; the free router avoids pinning retired model IDs.
+    openrouter: ['openrouter/free'],
+    gemini: ['gemini-3.8-flash', 'gemini-3.5-flash-lite']
 };
 
 const PROVIDERS = [
@@ -227,12 +311,13 @@ async function callAI({
 
         if (!keys.length) continue;
 
-        /* Vision only works on Gemini (and some OpenRouter models) */
-        if (imageData && !['gemini', 'openrouter'].includes(provider.name)) continue;
-
         const models = CHAT_MODELS[provider.name] || [];
 
         for (const model of models) {
+            const supportsVision = provider.name === 'gemini'
+                || provider.name === 'openrouter'
+                || (provider.name === 'groq' && model === 'qwen/qwen3.8-27b');
+            if (imageData && !supportsVision) continue;
             if (isCooling(provider.name, model)) continue;
 
             /* Try each key once before moving to the next model */
@@ -268,9 +353,10 @@ async function callAI({
                     markFail(provider.name, model, error);
 
                     const status = error?.response?.status;
-                    if (status === 401 || status === 403) break;   // bad key → next key
+                    console.error(`[aiProviders] ${provider.name}/${model} failed: ${errorSummary(error)}`);
 
-                    if (isCooling(provider.name, model)) break;    // rate limited → next model
+                    if (status === 401 || status === 403) continue; // try the next key
+                    if (isCooling(provider.name, model)) break;     // skip this model during its cooldown
                 }
             }
         }
