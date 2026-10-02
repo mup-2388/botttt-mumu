@@ -481,6 +481,22 @@ async function runCommand(command, input, args, isSlash) {
 ========================================
 */
 client.on('interactionCreate', async (interaction) => {
+    /* ── Slash-command autocomplete ── */
+    if (interaction.isAutocomplete()) {
+        try {
+            const command = client.commands.get(interaction.commandName);
+            if (command?.autocomplete) {
+                await command.autocomplete(interaction);
+            } else {
+                await interaction.respond([]).catch(() => null);
+            }
+        } catch (error) {
+            console.error(`[autocomplete] ${interaction.commandName} failed:`, error?.message || error);
+            await interaction.respond([]).catch(() => null);
+        }
+        return;
+    }
+
     /* ── Slash Commands ── */
 
     if (interaction.isChatInputCommand()) {

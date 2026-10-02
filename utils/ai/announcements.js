@@ -1,7 +1,7 @@
 /**
  * utils/ai/announcements.js
  *
- * Writes the kickoff announcement. The AI writes ONLY the prose — the role
+ * Writes stage-specific match announcements. The AI writes ONLY the prose — the role
  * pings are prepended by the scheduler from code, so a bad generation can
  * never ping the wrong thing.
  *
@@ -14,7 +14,7 @@ const path = require('path');
 
 const { callAI } = require('../aiProviders');
 const { runTool } = require('./tournamentTools');
-const { discordFull, discordRelative } = require('../istTime');
+const { formatIst, discordFull, discordRelative } = require('../istTime');
 const { emojiHint } = require('./emojiCatalog');
 const { slotHint, slotEmoji, vsLine } = require('./emojiSlots');
 
@@ -50,6 +50,18 @@ const TEMPLATES = [
     'Matchday. {match} at {time}. Someone is leaving with three points, someone with regrets. {fire}',
     '{match} — {time}. The table is watching, the group chat is awake. Let’s play. {fire}',
     'Ladies and gentlemen (and referees): {match}, {time}, live from {venue}not your couch. 📺'
+];
+
+const SCHEDULE_TEMPLATES = [
+    '{match} is locked in for {time}. Start sharpening the banter — the football can wait until kickoff. {fire}',
+    'On the calendar: {match} at {time}. Both teams now have time to prepare their excuses properly. {goal}',
+    '{match}, {time}. The fixture is set; no backing out when the group chat gets confident. 🏟️'
+];
+
+const REMINDER_TEMPLATES = [
+    'One minute until {match} at {time}. Find your boots and save the excuses for full-time. {fire}',
+    'Final minute, teams: {match} kicks off at {time}. Warm up quickly — the whistle is nearly here. {goal}',
+    '{match}, one minute to go. Get ready to play; even your excuses need to be quick today. 🏟️'
 ];
 
 function readHistory() {
@@ -168,10 +180,16 @@ function compactFacts(facts, limit = 2000) {
     return JSON.stringify(attempts[attempts.length - 1]).slice(0, limit);
 }
 
-function templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId = null }) {
-    return pick(TEMPLATES)
+function templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId = null, announcementType = 'kickoff' }) {
+    const templates = announcementType === 'scheduled'
+        ? SCHEDULE_TEMPLATES
+        : ['reminder', 'unlock'].includes(announcementType)
+            ? REMINDER_TEMPLATES
+            : TEMPLATES;
+
+    return pick(templates)
         .replace(/{match}/g, vsLine(homeTeam, awayTeam, guildId))
-        .replace(/{time}/g, `${discordFull(scheduledAt)} (${discordRelative(scheduledAt)})`)
+        .replace(/{time}/g, `${formatIst(scheduledAt)} (${discordFull(scheduledAt)}, ${discordRelative(scheduledAt)})`)
         .replace(/{venue}/g, venueName ? `${venueName}. ` : '')
         .replace(/{goal}/g, slotEmoji('goals', guildId))
         .replace(/{fire}/g, slotEmoji('fire', guildId));
@@ -190,6 +208,8 @@ async function buildMatchAnnouncement({
     awayTeam,
     venueName = '',
     scheduledAt,
+    announcementType = 'kickoff',
+    recordHistory = true,
     extraFacts = null
 }) {
     /* Accept fixture fields directly — no caller should ever print "undefined". */
@@ -228,10 +248,16 @@ async function buildMatchAnnouncement({
 
     const angle = pick(ANGLES);
     const tone = pick(TONES);
+    const stageInstruction = announcementType === 'scheduled'
+        ? 'The organizer has just scheduled this match. Confirm the fixture and time, build anticipation, and make both teams feel called out in a friendly way.'
+        : ['reminder', 'unlock'].includes(announcementType)
+            ? 'The channel is being unlocked one minute before kickoff. Tell both teams to get ready now; do not imply the match is already underway.'
+            : 'The scheduled kickoff time has arrived. Tell both teams to get started now; do not say kickoff is still in the future.';
 
     const systemPrompt =
-        `You are MUMU, the host of a Discord football league. You write the kickoff announcement for one match.\n\n` +
+        `You are MUMU, the host of a Discord football league. You write a match announcement for the requested stage.\n\n` +
         `STYLE: ${tone}. Angle to take: ${angle}. Roast level: light-medium — tease the teams, never the people's real lives.\n` +
+        `ANNOUNCEMENT MOMENT: ${stageInstruction}\n` +
         `LENGTH: 2-4 sentences, max 400 characters. Discord markdown allowed (**bold**, *italic*).\n` +
         `${emojiRule(emojiHint(`${homeTeam} ${awayTeam} match`, guildId, 12), guildId)}\n` +
         `${slotHint(guildId, ['goals', 'assists', 'saves', 'calendar', 'vs', 'fire'])}\n\n` +
@@ -244,7 +270,7 @@ async function buildMatchAnnouncement({
 
     const userPrompt =
         `Match: ${homeTeam} (home) ${slotEmojiText(guildId)} ${awayTeam} (away)\n` +
-        `Kickoff: ${discordFull(scheduledAt)} — ${discordRelative(scheduledAt)}\n` +
+        `Kickoff: ${formatIst(scheduledAt)} — ${discordFull(scheduledAt)} (${discordRelative(scheduledAt)})\n` +
         `Venue: ${venueName || 'home ground'}\n` +
         `Tournament: ${tournament?.name || 'the league'} (${tournament?.phase || 'league'} phase)\n` +
         `Match number: ${fixture?.matchNumber ?? '?'}\n` +
@@ -273,11 +299,11 @@ async function buildMatchAnnouncement({
         .slice(0, 600);
 
     if (!body || body.length < 15) {
-        body = templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId });
+        body = templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId, announcementType });
         body = body.replace(/<@&\d+>/g, '');
     }
 
-    pushHistory(body.split('\n')[0].slice(0, 120));
+    if (recordHistory) pushHistory(body.split('\n')[0].slice(0, 120));
 
     return body;
 }

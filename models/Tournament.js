@@ -730,8 +730,8 @@ const fixtureSchema = new mongoose.Schema(
 
         /*
          * Match-day channel plan (see utils/matchScheduler.js):
-         * the stadium channel is locked as soon as the match is scheduled and
-         * unlocked + announced one minute before kickoff.
+         * the stadium channel is locked immediately and announced when scheduled,
+         * then unlocked and pinged one minute before kickoff.
          */
         channelPlan: {
             channelId: { type: String, default: null },
@@ -741,9 +741,23 @@ const fixtureSchema = new mongoose.Schema(
                 default: 'pending'
             },
             lockAt: { type: Date, default: null },
-            announceAt: { type: Date, default: null },
+            announceAt: { type: Date, default: null }, // one-minute-before unlock + final ping time
             lockedAt: { type: Date, default: null },
-            announcedAt: { type: Date, default: null },
+            announcedAt: { type: Date, default: null }, // legacy / reminder timestamp
+            scheduledAnnouncementClaimedAt: { type: Date, default: null },
+            scheduledAnnouncedAt: { type: Date, default: null },
+            scheduledAnnouncementMessageId: { type: String, default: null },
+            unlockClaimedAt: { type: Date, default: null },
+            unlockedAt: { type: Date, default: null },
+            unlockAnnouncedAt: { type: Date, default: null },
+            unlockMessageId: { type: String, default: null },
+            reminderClaimedAt: { type: Date, default: null }, // legacy reminder-only flow
+            reminderAnnouncedAt: { type: Date, default: null }, // legacy reminder-only flow
+            reminderMessageId: { type: String, default: null }, // legacy reminder-only flow
+            kickoffClaimedAt: { type: Date, default: null }, // legacy kickoff-time flow
+            kickoffUnlockedAt: { type: Date, default: null }, // legacy kickoff-time flow
+            kickoffAnnouncedAt: { type: Date, default: null }, // legacy kickoff-time flow
+            kickoffMessageId: { type: String, default: null }, // legacy kickoff-time flow
             lockedBy: { type: String, default: null },
             previousOverwrite: { type: mongoose.Schema.Types.Mixed, default: null },
             pingCaptains: { type: Boolean, default: false },
