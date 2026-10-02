@@ -929,6 +929,11 @@ const serverConfigSchema = new mongoose.Schema(
             default: ''
         },
 
+        defaultFixturesChannelId: {
+            type: String,
+            default: ''
+        },
+
         organizerIds: {
             type: [String],
             default: []
