@@ -161,9 +161,10 @@ async function runPostMatchday({
     const fixtures = await Fixture.find({
         guildId: guild.id,
         tournamentId: tournament._id,
-        status: { $nin: ['Played', 'Cancelled'] }
+        status: { $nin: ['Played', 'Cancelled'] },
+        'reserved.isReserved': { $ne: true }
     })
-        .select('roundLabel status matchNumber homeTeam awayTeam')
+        .select('roundLabel status matchNumber homeTeam awayTeam reserved.isReserved')
         .sort({ matchNumber: 1 })
         .lean();
 

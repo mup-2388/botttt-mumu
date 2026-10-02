@@ -47,10 +47,12 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     const homeRoleId = '111111111111111111';
     const awayRoleId = '222222222222222222';
     const sent = [];
+    const fixtureFilters = [];
     const fixtureRows = [
         { roundLabel: 'Matchday 1', status: 'Pending', matchNumber: 10, homeTeam: 'Falcons', awayTeam: 'Wolves' },
         { roundLabel: 'Matchday 1', status: 'Pending', matchNumber: 2, homeTeam: 'Wolves', awayTeam: 'Falcons', scheduledAt: new Date() },
-        { roundLabel: 'Matchday 2', status: 'Pending', matchNumber: 1, homeTeam: 'Falcons', awayTeam: 'Wolves' }
+        { roundLabel: 'Matchday 1', status: 'Pending', matchNumber: 1, homeTeam: 'Falcons', awayTeam: 'Wolves', reserved: { isReserved: true } },
+        { roundLabel: 'Matchday 2', status: 'Pending', matchNumber: 3, homeTeam: 'Falcons', awayTeam: 'Wolves' }
     ];
     const fixtureQuery = {
         select() { return this; },
@@ -131,7 +133,10 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
         },
         '../../models/Tournament': {
             Fixture: {
-                find: () => fixtureQuery,
+                find: filter => {
+                    fixtureFilters.push(filter);
+                    return fixtureQuery;
+                },
                 updateOne: async () => { throw new Error('postmatchday must not write fixtures'); }
             },
             Team: { find: () => teamQuery },
@@ -156,6 +161,7 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     });
 
     assert.equal(sent.length, 1);
+    assert.deepEqual(fixtureFilters[0]['reserved.isReserved'], { $ne: true });
     const announcement = sent[0];
     assert.ok(announcement.content.indexOf('__Match 2__') < announcement.content.indexOf('__Match 10__'));
     assert.ok(!announcement.content.includes('__Match 1__\n'));
