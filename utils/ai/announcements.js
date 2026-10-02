@@ -180,14 +180,21 @@ function compactFacts(facts, limit = 2000) {
     return JSON.stringify(attempts[attempts.length - 1]).slice(0, limit);
 }
 
+function isPlaceholderVenue(value) {
+    return !String(value || '').trim() || /^(?:home\s+(?:ground|stadium)|away\s+(?:ground|stadium)|ground|stadium|venue|tbd|not\s+set|n\/?a)$/i.test(String(value).trim());
+}
+
 function templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId = null, announcementType = 'kickoff' }) {
     const templates = announcementType === 'scheduled'
         ? SCHEDULE_TEMPLATES
         : ['reminder', 'unlock'].includes(announcementType)
             ? REMINDER_TEMPLATES
             : TEMPLATES;
+    const availableTemplates = venueName
+        ? templates
+        : templates.filter(template => !template.includes('{venue}'));
 
-    return pick(templates)
+    return pick(availableTemplates.length ? availableTemplates : templates)
         .replace(/{match}/g, vsLine(homeTeam, awayTeam, guildId))
         .replace(/{time}/g, `${formatIst(scheduledAt)} (${discordFull(scheduledAt)}, ${discordRelative(scheduledAt)})`)
         .replace(/{venue}/g, venueName ? `${venueName}. ` : '')
@@ -216,7 +223,10 @@ async function buildMatchAnnouncement({
     homeTeam = homeTeam || fixture?.homeTeam || 'Home';
     awayTeam = awayTeam || fixture?.awayTeam || 'Away';
     scheduledAt = scheduledAt || fixture?.scheduledAt || new Date();
-    if (!venueName) venueName = fixture?.venueName || '';
+    if (!venueName) {
+        const fixtureVenue = String(fixture?.venueName || '').trim();
+        venueName = isPlaceholderVenue(fixtureVenue) ? '' : fixtureVenue;
+    }
 
     const ctx = { guildId, userId: null, tournamentKey: tournament?.tournamentKey || null };
 
@@ -246,7 +256,8 @@ async function buildMatchAnnouncement({
         ? `Do NOT reuse these previous opening words/lines:\n${history.slice(0, 6).map(h => `- "${h}"`).join('\n')}`
         : '';
 
-    const angle = pick(ANGLES);
+    const angleChoices = venueName ? ANGLES : ANGLES.filter(item => !/ground|venue|stadium/i.test(item));
+    const angle = pick(angleChoices);
     const tone = pick(TONES);
     const stageInstruction = announcementType === 'scheduled'
         ? 'The organizer has just scheduled this match. Confirm the fixture and time, build anticipation, and make both teams feel called out in a friendly way.'
@@ -263,7 +274,7 @@ async function buildMatchAnnouncement({
         `${slotHint(guildId, ['goals', 'assists', 'saves', 'calendar', 'vs', 'fire'])}\n\n` +
         `HARD RULES:\n` +
         `- NEVER write @everyone, @here, any <@&role> or <@user> mention — the system adds the team pings itself.\n` +
-        `- Never invent scores, stats or names: use only the facts provided.\n` +
+        `- Never invent scores, stats, names or a venue: use only the facts provided. If no venue is specified, omit venue wording.\n` +
         `- No hashtags, no "as an AI", no bullet lists, no headings.\n` +
         `- Write like a human running a league, not like a press release.\n` +
         `- The match time and teams are already shown above your text, so do not re-list them robotically.`;
@@ -271,7 +282,7 @@ async function buildMatchAnnouncement({
     const userPrompt =
         `Match: ${homeTeam} (home) ${slotEmojiText(guildId)} ${awayTeam} (away)\n` +
         `Kickoff: ${formatIst(scheduledAt)} — ${discordFull(scheduledAt)} (${discordRelative(scheduledAt)})\n` +
-        `Venue: ${venueName || 'home ground'}\n` +
+        `Venue: ${venueName || 'not specified — omit venue wording'}\n` +
         `Tournament: ${tournament?.name || 'the league'} (${tournament?.phase || 'league'} phase)\n` +
         `Match number: ${fixture?.matchNumber ?? '?'}\n` +
         (facts ? `FACTS: ${compactFacts(facts, 1400)}\n` : '') +

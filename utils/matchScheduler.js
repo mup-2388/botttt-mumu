@@ -56,7 +56,7 @@ async function applyLock({ client, guild, channelId, reason = 'Match day — cha
 
     await channel.permissionOverwrites.edit(
         everyone,
-        { SendMessages: false, AddReactions: false },
+        { SendMessages: false, AddReactions: true },
         { reason }
     );
 
@@ -153,6 +153,25 @@ async function buildPings({ guild, homeTeam, awayTeam, pingCaptains = false }) {
 
 /* ── Announcement text + delivery ── */
 
+function isPlaceholderVenue(value) {
+    return !String(value || '').trim() || /^(?:home\s+(?:ground|stadium)|away\s+(?:ground|stadium)|ground|stadium|venue|tbd|not\s+set|n\/?a)$/i.test(String(value).trim());
+}
+
+async function resolveFixtureVenueName(guild, fixture) {
+    const configured = String(fixture?.venueName || '').trim();
+    if (!isPlaceholderVenue(configured)) return configured;
+
+    const venueType = String(fixture?.venueType || 'home').toLowerCase();
+    if (venueType === 'neutral') return '';
+
+    const teamName = venueType === 'away' ? fixture?.awayTeam : fixture?.homeTeam;
+    if (!teamName) return '';
+
+    const team = await Team.findOne({ guildId: guild.id, name: teamName }).lean().catch(() => null);
+    const stadium = String(team?.stadium || '').trim();
+    return isPlaceholderVenue(stadium) ? '' : stadium;
+}
+
 async function buildAnnouncementMessage({
     guild,
     fixture,
@@ -167,6 +186,7 @@ async function buildAnnouncementMessage({
 
     const homeTeam = fixture.homeTeam;
     const awayTeam = fixture.awayTeam;
+    const venueName = await resolveFixtureVenueName(guild, fixture);
     const pings = includePings
         ? await buildPings({ guild, homeTeam, awayTeam, pingCaptains: !!plan.pingCaptains })
         : { roleIds: [], userIds: [], labelLine: '' };
@@ -178,7 +198,7 @@ async function buildAnnouncementMessage({
         fixture,
         homeTeam,
         awayTeam,
-        venueName: fixture.venueName || '',
+        venueName,
         scheduledAt: fixture.scheduledAt || new Date(),
         announcementType: stage,
         recordHistory
@@ -197,7 +217,7 @@ async function buildAnnouncementMessage({
         `🏟️ **${stageTitle} · MATCH ${fixture.matchNumber || ''} · ${tournament?.name || 'MATCH DAY'}**\n` +
         `**${vsLine(homeTeam, awayTeam, guild.id)}**\n` +
         `${calendar} ${formatIst(fixture.scheduledAt)} · ${discordFull(fixture.scheduledAt)} (${discordRelative(fixture.scheduledAt)})` +
-        (fixture.venueName ? `\n📍 ${fixture.venueName}` : '');
+        (venueName ? `\n📍 ${venueName}` : '');
 
     /* Belt and braces: even a hostile body cannot introduce a ping. */
     const { text: safeBody } = sanitizeAIText(body, { maxUserPings: 0 });
@@ -362,8 +382,19 @@ async function sendUnlockAnnouncement({ client, guild, fixture, now = new Date()
     }
 
     const kickoffPassed = new Date(claim.scheduledAt).getTime() <= now.getTime();
-    const stage = kickoffPassed ? 'kickoff' : 'unlock';
-    const result = await announceMatch({ client, guild, fixture: claim, stage }).catch(error => ({
+    if (kickoffPassed) {
+        await Fixture.updateOne(
+            { _id: fixture._id, 'channelPlan.state': { $in: ['locked', 'announced'] }, 'reserved.isReserved': { $ne: true } },
+            {
+                $set: { 'channelPlan.state': 'done', 'channelPlan.lastError': null },
+                $unset: { 'channelPlan.unlockClaimedAt': 1 }
+            }
+        ).catch(error => console.error('[matchScheduler] could not finish late unlock:', error?.message || error));
+
+        return { ok: true, skipped: true, unlocked: true, announcementSkipped: true };
+    }
+
+    const result = await announceMatch({ client, guild, fixture: claim, stage: 'unlock' }).catch(error => ({
         ok: false,
         error: error?.message || 'unlock announcement failed'
     }));
@@ -411,6 +442,8 @@ async function scheduleMatch({
         return { ok: false, error: 'kickoff is less than a minute away — pick a later time' };
     }
 
+    const venueName = await resolveFixtureVenueName(guild, fixture);
+
     /* 1. Lock now */
     const lock = await applyLock({
         client,
@@ -431,7 +464,7 @@ async function scheduleMatch({
                 $set: {
                     status: 'Pending',
                     scheduledAt: kickoff,
-                    venueName: fixture.venueName || '',
+                    venueName,
                     venueType: fixture.venueType || 'home',
                     /* A reserved fixture is back on the active schedule now. */
                     'reserved.isReserved': false,
@@ -802,6 +835,7 @@ module.exports = {
     announceMatch,
     buildAnnouncementMessage,
     buildPings,
+    resolveFixtureVenueName,
     applyLock,
     applyUnlock,
     DEFAULT_UNLOCK_BEFORE_MINUTES

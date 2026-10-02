@@ -36,8 +36,9 @@ function unsetPath(target, dottedPath) {
     if (cursor) delete cursor[parts[0]];
 }
 
-function makeScheduler({ fixture, fixtureFind }) {
+function makeScheduler({ fixture, fixtureFind, homeStadiums = {} }) {
     const events = [];
+    const overwriteEdits = [];
     const messages = [];
     const stages = [];
     let stored = structuredClone(fixture);
@@ -52,6 +53,7 @@ function makeScheduler({ fixture, fixtureFind }) {
         permissionOverwrites: {
             cache: new Map(),
             edit: async (target, permissions) => {
+                overwriteEdits.push({ targetId: target.id, permissions: { ...permissions } });
                 const isEveryone = target.id === 'everyone';
                 const unlock = permissions.SendMessages === null;
                 events.push(isEveryone ? (unlock ? 'unlock' : 'lock') : 'bot-overwrite');
@@ -124,7 +126,14 @@ function makeScheduler({ fixture, fixtureFind }) {
         'discord.js': fakeDiscord,
         '../models/Tournament': {
             Fixture,
-            Team: {},
+            Team: {
+                findOne: query => ({
+                    lean: async () => {
+                        const stadium = homeStadiums[query.name];
+                        return stadium ? { _id: `team-${query.name}`, name: query.name, stadium } : null;
+                    }
+                })
+            },
             TournamentSettings: {
                 findById: () => ({ lean: async () => ({ name: 'Test League', tournamentKey: 'default' }) })
             },
@@ -149,7 +158,7 @@ function makeScheduler({ fixture, fixtureFind }) {
         }
     });
 
-    return { scheduler, Fixture, guild, events, messages, stages, getStored: cloneStored };
+    return { scheduler, Fixture, guild, events, messages, stages, overwriteEdits, getStored: cloneStored };
 }
 
 function makeFixture(scheduledAt, channelPlan = {}) {
@@ -186,6 +195,7 @@ test('scheduling locks immediately and sends a role-ping announcement with the I
     assert.equal(harness.stages[0], 'scheduled');
     assert.ok(harness.events.indexOf('lock') < harness.events.indexOf('send'));
     assert.equal(harness.events.includes('unlock'), false);
+    assert.deepEqual(harness.overwriteEdits[0].permissions, { SendMessages: false, AddReactions: true });
     assert.match(harness.messages[0].content, /MATCH SCHEDULED/);
     assert.match(harness.messages[0].content, /<@&home-role>/);
     assert.match(harness.messages[0].content, /<@&away-role>/);
@@ -198,6 +208,33 @@ test('scheduling locks immediately and sends a role-ping announcement with the I
     assert.equal(harness.getStored().channelPlan.state, 'locked');
     assert.equal(harness.getStored().channelPlan.scheduledAnnouncementMessageId, 'message-1');
     assert.equal(result.unlockAt.getTime(), kickoff.getTime() - 60_000);
+});
+
+
+test('announcement uses the home team stadium instead of a generic Home Ground venue', async () => {
+    const fixture = makeFixture(new Date(Date.now() + 2 * 60 * 60 * 1000));
+    fixture.venueName = 'Home Ground';
+    const harness = makeScheduler({ fixture, homeStadiums: { Falcons: 'Falcons Arena' } });
+
+    const message = await harness.scheduler.buildAnnouncementMessage({
+        guild: harness.guild,
+        fixture,
+        includePings: false
+    });
+
+    assert.match(message.header, /📍 Falcons Arena/);
+    assert.doesNotMatch(message.content, /Home Ground/i);
+
+    const result = await harness.scheduler.scheduleMatch({
+        client: { guilds: { cache: new Map() } },
+        guild: harness.guild,
+        fixture,
+        channelId: 'stadium-1',
+        pingCaptains: false,
+        actorId: 'organizer-1'
+    });
+    assert.equal(result.ok, true);
+    assert.equal(harness.getStored().venueName, 'Falcons Arena');
 });
 
 test('one minute before kickoff, the scheduler unlocks first and sends the final team-role ping', async () => {
@@ -229,7 +266,7 @@ test('one minute before kickoff, the scheduler unlocks first and sends the final
     assert.equal(harness.getStored().channelPlan.unlockMessageId, 'message-1');
 });
 
-test('a delayed scheduler still unlocks and announces when kickoff has already arrived', async () => {
+test('a delayed scheduler unlocks after kickoff but does not send a kickoff-time ping', async () => {
     const now = new Date();
     const fixture = makeFixture(new Date(now.getTime() - 1_000), {
         scheduledAnnouncementMessageId: 'schedule-message',
@@ -245,8 +282,11 @@ test('a delayed scheduler still unlocks and announces when kickoff has already a
 
     await harness.scheduler.tick({ guilds: { cache: new Map([[harness.guild.id, harness.guild]]) } });
 
-    assert.deepEqual(harness.stages, ['kickoff']);
-    assert.ok(harness.events.indexOf('unlock') < harness.events.indexOf('send'));
-    assert.match(harness.messages[0].content, /KICKOFF TIME/);
+    assert.deepEqual(harness.stages, []);
+    assert.ok(harness.events.includes('unlock'));
+    assert.equal(harness.events.includes('send'), false);
+    assert.equal(harness.messages.length, 0);
+    assert.ok(harness.getStored().channelPlan.unlockedAt);
+    assert.equal(harness.getStored().channelPlan.unlockAnnouncedAt, null);
     assert.equal(harness.getStored().channelPlan.state, 'done');
 });
