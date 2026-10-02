@@ -107,15 +107,41 @@ async function route(question, ctx, teams) {
         calls.push(teamName ? { tool: 'team_next_match', args: { team: teamName } } : { tool: 'my_next_match', args: {} });
     }
 
-    if (/(our|my|the) (position|place|rank|standing)|where (are|do) (we|i)|league table|the table|standings|points table/i.test(lower)) {
-        calls.push(teamName ? { tool: 'team_position', args: { team: teamName } } : { tool: 'my_team', args: {} });
+    const asksPersonalPosition =
+        /\b(?:my|our) (?:team )?(?:position|place|rank|standing|spot)\b/i.test(lower)
+        || /\bwhere (?:are|do) (?:we|i) (?:in|on|at)\b/i.test(lower)
+        || /\bwhere am i\b/i.test(lower);
+    const asksNamedTeamPosition = !!teamName && (
+        /\b(?:position|place|rank|standing|spot)\b/i.test(lower)
+        || (/\bwhere\b/i.test(lower) && /\b(?:table|league|place|position)\b/i.test(lower))
+    );
+    const asksTableLeader =
+        /\btop of (?:the )?(?:table|league)\b/i.test(lower)
+        || /\b(?:who|which team)\b.{0,40}\b(?:top|first|leader|leads?|leading)\b/i.test(lower)
+        || /\b(?:leader|leaders|leading team)\b/i.test(lower);
+    const asksFullStandings =
+        /\b(?:standings?|league table|points table|full table|whole table)\b/i.test(lower)
+        || /\btable\b/i.test(lower)
+        || asksTableLeader;
+
+    // Resolve explicit top/table questions before considering team names found in
+    // quoted conversation context. A full-table request needs the full standings,
+    // not just the asking user's (possibly quoted) team row.
+    if (asksTableLeader) {
+        calls.push({ tool: 'standings', args: { group: null } });
+    } else if (asksPersonalPosition || asksNamedTeamPosition) {
+        calls.push(teamName
+            ? { tool: 'team_position', args: { team: teamName } }
+            : { tool: 'my_team', args: {} });
+    } else if (asksFullStandings) {
+        calls.push({ tool: 'standings', args: { group: null } });
     }
 
     if (/(qualify|qualification|go through|make it through|knockout (spot|place))/i.test(lower)) {
         calls.push({ tool: 'qualification_gap', args: { team: teamName || null } });
     }
 
-    if (/(golden boot|top ?scorer|scorer race|assist race|most (goals|assists|saves|tackles|interceptions|mvps)|leading (scorer|assister)|who leads|leader(board)?)/i.test(lower)) {
+    if (/(golden boot|top ?scorer|scorer race|assist race|most (goals|assists|saves|tackles|interceptions|mvps)|leading (scorer|assister)|leaderboard|(?:who leads|leader) (?:in|for) (goals|assists|saves|tackles|interceptions|mvps))/i.test(lower)) {
         calls.push({ tool: 'leaders', args: { metric: metric || 'goals', limit: 5 } });
     }
 
@@ -123,7 +149,7 @@ async function route(question, ctx, teams) {
         calls.push({ tool: 'gap_to_lead', args: { metric: metric || 'goals' } });
     }
 
-    if (/(my|our) rank|where am i|my position/i.test(lower)) {
+    if (/(my|our) rank|where am i|my position/i.test(lower) && !/\b(?:table|standings|league)\b/i.test(lower)) {
         calls.push({ tool: 'player_rank', args: { metric: metric || 'goals' } });
     }
 
@@ -203,7 +229,8 @@ async function plan(question, ctx, teams) {
         `You pick database queries for a Discord football-bot.\n` +
         `Available tools:\n${tools}\n\n` +
         `Teams in this server: ${teamNames || '(none)'}\n` +
-        `The asking user ${ctx.userId ? `(discord id ${ctx.userId})` : ''} may be referred to as "I", "me", "my team", "we", "us".\n\n` +
+        `The asking user ${ctx.userId ? `(discord id ${ctx.userId})` : ''} may be referred to as "I", "me", "my team", "we", "us".\n` +
+        `For who-is-top/leader/full-table questions, use standings; my_team and team_position return only one team's row.\n\n` +
         `User question: """${String(question).slice(0, 400)}"""\n\n` +
         `Reply with ONLY JSON: {"calls":[{"tool":"name","args":{...}}]} — at most 3 calls.\n` +
         `Use an empty array when no tool is needed.`;

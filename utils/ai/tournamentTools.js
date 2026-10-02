@@ -160,6 +160,29 @@ async function buildStandings(guildId, tournament, groupKey = null) {
     return rows;
 }
 
+function standingsStatus(rows) {
+    if (!rows.length) {
+        return {
+            playedMatchesRecorded: false,
+            positionProvisional: false,
+            note: 'no active teams are registered in this standings table'
+        };
+    }
+
+    if (rows.some(row => Number(row.played) > 0)) {
+        return { playedMatchesRecorded: true, positionProvisional: false, note: null };
+    }
+
+    const allOnZeroPoints = rows.every(row => Number(row.points) === 0);
+    return {
+        playedMatchesRecorded: false,
+        positionProvisional: true,
+        note: allOnZeroPoints
+            ? 'no played matches are recorded; all teams have 0 points, so the displayed order is provisional'
+            : 'no played matches are recorded; the displayed order is provisional'
+    };
+}
+
 async function teamFixtures(guildId, tournament, team) {
     return Fixture.find({
         guildId,
@@ -400,12 +423,14 @@ const TOOLS = {
 
         return {
             team: team?.name,
+            tournament: tournament.name,
             group: row?.group || null,
             position: row?.position || null,
             played: row?.played ?? 0,
             points: row?.points ?? 0,
             record: row ? `${row.wins}W ${row.draws}D ${row.losses}L` : null,
-            goalDifference: row?.gd ?? 0
+            goalDifference: row?.gd ?? 0,
+            ...standingsStatus(standings)
         };
     },
 
@@ -473,10 +498,13 @@ const TOOLS = {
 
         return {
             tournament: tournament.name,
+            phase: tournament.currentPhase || null,
             group: args.group || 'all',
+            ...standingsStatus(rows),
             table: rows.map(r => ({
                 pos: r.position,
                 team: r.team,
+                group: r.group,
                 played: r.played,
                 wins: r.wins,
                 draws: r.draws,
@@ -507,7 +535,8 @@ const TOOLS = {
             points: row.points,
             played: row.played,
             gd: row.gd,
-            gapToLeader: (rows[0]?.points ?? 0) - row.points
+            gapToLeader: (rows[0]?.points ?? 0) - row.points,
+            ...standingsStatus(rows)
         };
     },
 
@@ -951,11 +980,11 @@ const TOOL_LIST = [
     { name: 'list_tournaments', description: 'List every tournament in this server with its key and phase.', args: {} },
     { name: 'my_profile', description: 'The asking user\'s profile: team, captaincy and stats.', args: {} },
     { name: 'my_stats', description: 'One stat of the asking user.', args: { metric: 'goals|assists|saves|tackles|interceptions|mvps|played' } },
-    { name: 'my_team', description: 'The asking user\'s team: position, points, record.', args: {} },
+    { name: 'my_team', description: 'Only the asking user\'s own team position, points, and record. Never use this for a league leader or full-table question.', args: {} },
     { name: 'my_next_match', description: 'The asking user\'s next fixture.', args: {} },
     { name: 'team_next_match', description: 'A team\'s next fixture.', args: { team: 'team name' } },
     { name: 'team_form', description: 'A team\'s recent results (W/D/L sequence).', args: { team: 'team name', lastN: 'number, default 5' } },
-    { name: 'standings', description: 'League table, optionally one group.', args: { group: 'optional group key' } },
+    { name: 'standings', description: 'Full league/group table; use for standings, top-of-table, leader, and who-is-first questions. Returns every active team, including teams on zero points.', args: { group: 'optional group key' } },
     { name: 'team_position', description: 'A team\'s position, points and gap to the leader.', args: { team: 'team name' } },
     { name: 'team_schedule', description: 'A team\'s upcoming fixtures, including matches marked reserved/postponed.', args: { team: 'team name' } },
     { name: 'team_results', description: 'A team\'s recent results.', args: { team: 'team name' } },
