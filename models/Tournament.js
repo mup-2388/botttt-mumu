@@ -939,6 +939,11 @@ const serverConfigSchema = new mongoose.Schema(
             default: []
         },
 
+        potdChannelId: {
+            type: String,
+            default: ''
+        },
+
         aiEnabled: {
             type: Boolean,
             default: true

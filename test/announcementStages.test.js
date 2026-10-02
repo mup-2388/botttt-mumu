@@ -66,6 +66,11 @@ test('announcement fallbacks and prompts match scheduled, unlock, and kickoff st
         const scheduled = await buildMatchAnnouncement({ ...common, announcementType: 'scheduled' });
         const unlock = await buildMatchAnnouncement({ ...common, announcementType: 'unlock' });
         const kickoff = await buildMatchAnnouncement({ ...common, announcementType: 'kickoff' });
+        const noVenue = await buildMatchAnnouncement({
+            ...common,
+            fixture: { matchNumber: 12, venueName: 'Home Ground' },
+            announcementType: 'scheduled'
+        });
 
         assert.match(scheduled, /locked in/i);
         assert.match(unlock, /one minute/i);
@@ -76,8 +81,10 @@ test('announcement fallbacks and prompts match scheduled, unlock, and kickoff st
         assert.match(prompts[0].systemPrompt, /just scheduled this match/i);
         assert.match(prompts[1].systemPrompt, /unlocked one minute before kickoff/i);
         assert.match(prompts[2].systemPrompt, /kickoff time has arrived/i);
-        assert.equal(prompts.length, 3);
-        assert.doesNotMatch(`${scheduled}\n${unlock}\n${kickoff}`, /@everyone|@here/);
+        assert.match(prompts[3].messages[0].content, /Venue: not specified — omit venue wording/);
+        assert.doesNotMatch(prompts[3].messages[0].content, /Home Ground/i);
+        assert.equal(prompts.length, 4);
+        assert.doesNotMatch(`${scheduled}\n${unlock}\n${kickoff}\n${noVenue}`, /@everyone|@here/);
     } finally {
         Math.random = originalRandom;
     }
