@@ -7,6 +7,22 @@ const { createCanvas, GlobalFonts, loadImage } = require('@napi-rs/canvas');
 
 const BASE_WIDTH = 1254;
 const BASE_HEIGHT = 1254;
+
+/*
+ * Hierarchy rule: untouched HFSL 4 wordmark > portrait > player name > team/date > stat value > stat label.
+ * Secondary information must not compete with the name or portrait; each stat value is the anchor for its label.
+ * Keep all additions typographic/cutout-only—never add panels, badges, separators, or other containers.
+ */
+const VISUAL_HIERARCHY = Object.freeze({
+    portrait: { centerX: 715, centerY: 515, diameter: 255 },
+    playerName: { size: 40, minSize: 38, wrapSize: 30, color: '#F6FAFD' },
+    team: { size: 24, minSize: 21, color: '#75C9D9' },
+    date: { size: 21, minSize: 18, color: '#C6D0DA' },
+    statValue: { size: 32, color: '#F6FAFD' },
+    statLabel: { size: 17, color: '#83C7D3' },
+    textShadow: '#071A32'
+});
+
 const ASSETS_DIR = path.join(__dirname, '..', 'assets');
 const FONT_FILES = [
     ['Inter_18pt-Regular.ttf', 'Inter'],
@@ -189,7 +205,7 @@ function drawFittedText(ctx, text, {
     size,
     minSize = 10,
     family = 'Inter',
-    color = '#F5FCFF',
+    color = VISUAL_HIERARCHY.playerName.color,
     align = 'left',
     letterSpacing = 0,
     shadow = null
@@ -268,6 +284,7 @@ function drawAdaptiveText(ctx, text, {
     width,
     size,
     minSize,
+    wrapStartSize = minSize,
     fallbackMinSize,
     lineHeight,
     family,
@@ -287,11 +304,11 @@ function drawAdaptiveText(ctx, text, {
         return;
     }
 
-    // First honor the requested minimum (25 px for names, 19 px for teams) and use two lines.
-    // Only exceptionally long text falls below that size, as a last resort to stay inside the safe zone.
+    // Preserve a headline-sized single line first; wrap only when required by the fixed safe zone.
+    // Exceptionally long text may shrink slightly after wrapping so it never overlaps the artwork.
     let layout = null;
-    let chosenSize = minSize;
-    for (let candidateSize = minSize; candidateSize >= fallbackMinSize; candidateSize -= 0.5) {
+    let chosenSize = wrapStartSize;
+    for (let candidateSize = wrapStartSize; candidateSize >= fallbackMinSize; candidateSize -= 0.5) {
         layout = findTwoLineSplit(ctx, text, width, family, candidateSize, letterSpacing);
         if (layout) {
             chosenSize = candidateSize;
@@ -320,14 +337,14 @@ function drawMatchDate(ctx, parts) {
     if (!values.length) return;
 
     const text = values.join(' · ');
-    const x = 571;
+    const x = 959;
     const width = 388;
     const top = 646;
     const bottom = 755;
     const family = 'Inter SemiBold';
-    const size = 25;
-    const minSize = 18;
-    const letterSpacing = 0.3;
+    const size = VISUAL_HIERARCHY.date.size;
+    const minSize = VISUAL_HIERARCHY.date.minSize;
+    const letterSpacing = 0.2;
     const fitted = fitFontSize(ctx, text, width, size, minSize, family, letterSpacing);
     setFont(ctx, fitted, family);
 
@@ -339,10 +356,10 @@ function drawMatchDate(ctx, parts) {
             size: fitted,
             minSize: fitted,
             family,
-            color: '#F5FCFF',
-            align: 'left',
+            color: VISUAL_HIERARCHY.date.color,
+            align: 'right',
             letterSpacing,
-            shadow: { color: '#06205C', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 }
+            shadow: { color: VISUAL_HIERARCHY.textShadow, offsetX: 0, offsetY: 1, blur: 0, opacity: 0.55 }
         });
         return;
     }
@@ -374,10 +391,10 @@ function drawMatchDate(ctx, parts) {
         size: chosenSize,
         minSize: chosenSize,
         family,
-        color: '#F5FCFF',
-        align: 'left',
+        color: VISUAL_HIERARCHY.date.color,
+        align: 'right',
         letterSpacing,
-        shadow: { color: '#06205C', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 }
+        shadow: { color: VISUAL_HIERARCHY.textShadow, offsetX: 0, offsetY: 1, blur: 0, opacity: 0.55 }
     }));
 }
 async function fetchAvatar(url) {
@@ -395,25 +412,186 @@ async function fetchAvatar(url) {
     }
 }
 
+function isNeutralBackdropPixel(data, pixelIndex, referenceColor = null) {
+    const offset = pixelIndex * 4;
+    if (data[offset + 3] < 16) return false;
+
+    const red = data[offset];
+    const green = data[offset + 1];
+    const blue = data[offset + 2];
+    const spread = Math.max(red, green, blue) - Math.min(red, green, blue);
+    const luminance = (red + green + blue) / 3;
+    if (spread > 46 || luminance > 225) return false;
+
+    if (referenceColor) {
+        const colorDistance = Math.max(
+            Math.abs(red - referenceColor.red),
+            Math.abs(green - referenceColor.green),
+            Math.abs(blue - referenceColor.blue)
+        );
+        if (colorDistance > 58) return false;
+    }
+
+    return true;
+}
+
+function median(values) {
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+}
+
+// Remove only flat neutral gray/black backdrop pixels connected to the edge or an inset circular backdrop ring.
+// Transparent source pixels and isolated neutral details in the player are preserved.
+function removeNeutralEdgeBackground(imageData, width, height) {
+    const data = imageData?.data;
+    if (!data || width < 3 || height < 3 || data.length < width * height * 4) return 0;
+
+    const edgeIndices = [];
+    const edgeColors = [];
+    const addEdgePixel = (x, y) => {
+        const pixelIndex = y * width + x;
+        edgeIndices.push(pixelIndex);
+        if (!isNeutralBackdropPixel(data, pixelIndex)) return;
+        const offset = pixelIndex * 4;
+        edgeColors.push([data[offset], data[offset + 1], data[offset + 2]]);
+    };
+
+    for (let x = 0; x < width; x += 1) {
+        addEdgePixel(x, 0);
+        addEdgePixel(x, height - 1);
+    }
+    for (let y = 1; y < height - 1; y += 1) {
+        addEdgePixel(0, y);
+        addEdgePixel(width - 1, y);
+    }
+
+    let seedIndices = [];
+    let referenceSamples = [];
+    const edgePixelCount = width * 2 + (height - 2) * 2;
+    if (edgeColors.length / edgePixelCount >= 0.08) {
+        seedIndices = edgeIndices.filter(pixelIndex => isNeutralBackdropPixel(data, pixelIndex));
+        referenceSamples = edgeColors;
+    } else {
+        // Also detect a neutral circular backdrop that is inset from transparent square corners.
+        const centerX = (width - 1) / 2;
+        const centerY = (height - 1) / 2;
+        const side = Math.min(width, height);
+        let bestRing = null;
+        for (const radiusRatio of [0.3, 0.36, 0.42, 0.47]) {
+            const ring = new Set();
+            for (let step = 0; step < 40; step += 1) {
+                const angle = (step / 40) * Math.PI * 2;
+                const x = Math.max(0, Math.min(width - 1, Math.round(centerX + Math.cos(angle) * side * radiusRatio)));
+                const y = Math.max(0, Math.min(height - 1, Math.round(centerY + Math.sin(angle) * side * radiusRatio)));
+                const pixelIndex = y * width + x;
+                if (isNeutralBackdropPixel(data, pixelIndex)) ring.add(pixelIndex);
+            }
+            if (!bestRing || ring.size > bestRing.size) bestRing = ring;
+        }
+
+        if (!bestRing || bestRing.size < 10) return 0;
+        seedIndices = [...bestRing];
+        referenceSamples = seedIndices.map(pixelIndex => {
+            const offset = pixelIndex * 4;
+            return [data[offset], data[offset + 1], data[offset + 2]];
+        });
+    }
+
+    if (!seedIndices.length) return 0;
+    const referenceColor = {
+        red: median(referenceSamples.map(color => color[0])),
+        green: median(referenceSamples.map(color => color[1])),
+        blue: median(referenceSamples.map(color => color[2]))
+    };
+    const pixelCount = width * height;
+    const candidates = new Uint8Array(pixelCount);
+    const visited = new Uint8Array(pixelCount);
+    const queue = new Int32Array(pixelCount);
+
+    for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+        if (isNeutralBackdropPixel(data, pixelIndex, referenceColor)) candidates[pixelIndex] = 1;
+    }
+
+    let head = 0;
+    let tail = 0;
+    const enqueue = pixelIndex => {
+        if (!candidates[pixelIndex] || visited[pixelIndex]) return;
+        visited[pixelIndex] = 1;
+        queue[tail] = pixelIndex;
+        tail += 1;
+    };
+    seedIndices.forEach(enqueue);
+
+    while (head < tail) {
+        const pixelIndex = queue[head];
+        head += 1;
+        const x = pixelIndex % width;
+        const y = Math.floor(pixelIndex / width);
+        if (x > 0) enqueue(pixelIndex - 1);
+        if (x + 1 < width) enqueue(pixelIndex + 1);
+        if (y > 0) enqueue(pixelIndex - width);
+        if (y + 1 < height) enqueue(pixelIndex + width);
+    }
+
+    let opaquePixelCount = 0;
+    for (let offset = 3; offset < data.length; offset += 4) {
+        if (data[offset] >= 16) opaquePixelCount += 1;
+    }
+    if (!tail || tail > opaquePixelCount * 0.98) return 0;
+
+    for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+        if (visited[pixelIndex]) data[pixelIndex * 4 + 3] = 0;
+    }
+
+    return tail;
+}
+function createPortraitCutout(avatar) {
+    if (!avatar || !avatar.width || !avatar.height) return null;
+
+    const side = Math.floor(Math.min(avatar.width, avatar.height));
+    if (!side) return null;
+
+    try {
+        const canvas = createCanvas(side, side);
+        const ctx = canvas.getContext('2d');
+        if (typeof ctx.getImageData !== 'function' || typeof ctx.putImageData !== 'function') return null;
+
+        const sourceX = (avatar.width - side) / 2;
+        const sourceY = (avatar.height - side) / 2;
+        ctx.drawImage(avatar, sourceX, sourceY, side, side, 0, 0, side, side);
+        const imageData = ctx.getImageData(0, 0, side, side);
+        if (!removeNeutralEdgeBackground(imageData, side, side)) return null;
+        ctx.putImageData(imageData, 0, 0);
+        return canvas;
+    } catch (error) {
+        console.warn('[potdCard] Could not remove a neutral avatar backdrop; preserving the source alpha:', error?.message || error);
+        return null;
+    }
+}
+
 function drawPortrait(ctx, avatar, playerName) {
-    const cx = 715;
-    const cy = 525;
-    const diameter = 220;
+    const { centerX: cx, centerY: cy, diameter } = VISUAL_HIERARCHY.portrait;
     const radius = diameter / 2;
     const left = cx - radius;
     const top = cy - radius;
 
-    // A clean circular crop only; the original card artwork remains visible around it.
     ctx.save();
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     ctx.clip();
+
     if (avatar && avatar.width > 0 && avatar.height > 0) {
-        const cropSize = Math.min(avatar.width, avatar.height);
-        const sourceX = (avatar.width - cropSize) / 2;
-        const sourceY = (avatar.height - cropSize) / 2;
-        ctx.drawImage(avatar, sourceX, sourceY, cropSize, cropSize, left, top, diameter, diameter);
+        const cutout = createPortraitCutout(avatar);
+        if (cutout) {
+            ctx.drawImage(cutout, left, top, diameter, diameter);
+        } else {
+            const cropSize = Math.min(avatar.width, avatar.height);
+            const sourceX = (avatar.width - cropSize) / 2;
+            const sourceY = (avatar.height - cropSize) / 2;
+            ctx.drawImage(avatar, sourceX, sourceY, cropSize, cropSize, left, top, diameter, diameter);
+        }
     } else {
+        // Fallback only when no portrait can be loaded; no frame or badge is added.
         const gradient = ctx.createLinearGradient(left, top, left + diameter, top + diameter);
         gradient.addColorStop(0, '#0C83E8');
         gradient.addColorStop(1, '#061943');
@@ -421,7 +599,7 @@ function drawPortrait(ctx, avatar, playerName) {
         ctx.fillRect(left, top, diameter, diameter);
         const initials = cleanText(playerName, 48).split(/\s+/).map(part => part[0] || '').join('').slice(0, 2).toUpperCase();
         setFont(ctx, 48, 'Oswald');
-        ctx.fillStyle = '#F5FCFF';
+        ctx.fillStyle = VISUAL_HIERARCHY.playerName.color;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(initials || '?', cx, cy);
@@ -433,23 +611,27 @@ function drawStats(ctx, stats) {
     const count = stats.length;
     if (!count) return;
 
-    // For three stats these resolve to the requested centers: 420, 627 and 834 px.
-    const centerSpacing = 207;
-    const groupCenter = 627;
-    const firstCenter = groupCenter - ((count - 1) * centerSpacing) / 2;
-    const maxTextWidth = count === 1 ? 640 : 180;
-    const valueShadow = { color: '#061B55', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 };
+    // Center the actual group for each count; two stats use the requested x=470/785 pair.
+    const centersByCount = {
+        1: [627],
+        2: [470, 785],
+        3: [420, 627, 834]
+    };
+    const centers = centersByCount[count] || [627];
+    const maxTextWidth = count === 1 ? 640 : count === 2 ? 260 : 180;
+    const valueShadow = { color: VISUAL_HIERARCHY.textShadow, offsetX: 0, offsetY: 2, blur: 0, opacity: 0.7 };
+    const labelShadow = { color: VISUAL_HIERARCHY.textShadow, offsetX: 0, offsetY: 1, blur: 0, opacity: 0.55 };
 
     stats.forEach((stat, index) => {
-        const centerX = firstCenter + index * centerSpacing;
+        const centerX = centers[index];
         drawFittedText(ctx, stat.value, {
             x: centerX,
             y: 918,
             width: maxTextWidth,
-            size: 25,
-            minSize: 18,
+            size: VISUAL_HIERARCHY.statValue.size,
+            minSize: 24,
             family: 'Oswald',
-            color: '#F5FCFF',
+            color: VISUAL_HIERARCHY.statValue.color,
             align: 'center',
             letterSpacing: 0.2,
             shadow: valueShadow
@@ -459,13 +641,13 @@ function drawStats(ctx, stats) {
                 x: centerX,
                 y: 947,
                 width: maxTextWidth,
-                size: 17,
-                minSize: 12,
+                size: VISUAL_HIERARCHY.statLabel.size,
+                minSize: 14,
                 family: 'Inter SemiBold',
-                color: '#73EFFF',
+                color: VISUAL_HIERARCHY.statLabel.color,
                 align: 'center',
                 letterSpacing: 0.2,
-                shadow: valueShadow
+                shadow: labelShadow
             });
         }
     });
@@ -503,16 +685,17 @@ async function renderPotdCard({ playerName, teamName, avatarUrl, stats, matchLab
         x: 282,
         top: 637,
         bottom: 696,
-        baseline: 675,
+        baseline: 677,
         width: 203,
-        size: 31,
-        minSize: 25,
-        fallbackMinSize: 12,
+        size: VISUAL_HIERARCHY.playerName.size,
+        minSize: VISUAL_HIERARCHY.playerName.minSize,
+        wrapStartSize: VISUAL_HIERARCHY.playerName.wrapSize,
+        fallbackMinSize: 24,
         lineHeight: 29,
         family: 'Oswald',
-        color: '#F5FCFF',
+        color: VISUAL_HIERARCHY.playerName.color,
         letterSpacing: 0,
-        shadow: { color: '#071A50', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 }
+        shadow: { color: VISUAL_HIERARCHY.textShadow, offsetX: 0, offsetY: 2, blur: 0, opacity: 0.72 }
     });
     if (team) {
         drawAdaptiveText(ctx, team, {
@@ -521,14 +704,15 @@ async function renderPotdCard({ playerName, teamName, avatarUrl, stats, matchLab
             bottom: 755,
             baseline: 736,
             width: 203,
-            size: 23,
-            minSize: 19,
-            fallbackMinSize: 12,
+            size: VISUAL_HIERARCHY.team.size,
+            minSize: VISUAL_HIERARCHY.team.minSize,
+            wrapStartSize: VISUAL_HIERARCHY.team.minSize,
+            fallbackMinSize: 16,
             lineHeight: 27,
             family: 'Inter SemiBold',
-            color: '#73EFFF',
+            color: VISUAL_HIERARCHY.team.color,
             letterSpacing: 0.2,
-            shadow: { color: '#071A50', offsetX: 0, offsetY: 1, blur: 0, opacity: 0.8 }
+            shadow: { color: VISUAL_HIERARCHY.textShadow, offsetX: 0, offsetY: 1, blur: 0, opacity: 0.58 }
         });
     }
 
@@ -541,6 +725,7 @@ async function renderPotdCard({ playerName, teamName, avatarUrl, stats, matchLab
 
 module.exports = {
     parseStats,
+    removeNeutralEdgeBackground,
     resolveTemplatePath,
     renderPotdCard
 };
