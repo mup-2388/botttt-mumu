@@ -753,13 +753,14 @@ client.on('messageCreate', async (message) => {
             await message.react('<:hello:1488633282462744767>').catch(() => null);
         } else if (aiEnabled && (strippedContent || message.attachments.size > 0)) {
             try {
-                // If this mention is a reply, include the referenced message for context
+                // Keep referenced text as context, separate from the current request so
+                // quoted content cannot trigger unrelated database-tool lookups.
                 let contextMessage = '';
                 if (message.reference) {
                     const refMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
                     if (refMsg) {
                         const refAuthor = refMsg.member?.displayName || refMsg.author.username;
-                        contextMessage = `[${refAuthor} said: "${refMsg.content}"]\n\n`;
+                        contextMessage = `[${refAuthor} said: "${refMsg.content}"]`;
                     }
                 }
 
@@ -772,12 +773,13 @@ client.on('messageCreate', async (message) => {
 
                 const { askFootball } = require('./utils/footballAI');
                 message.channel.sendTyping().catch(() => null);
-                const answer = await askFootball(contextMessage + (strippedContent || 'What do you see in this image?'), {
+                const answer = await askFootball(strippedContent || 'What do you see in this image?', {
                     guildId: message.guild.id,
                     channelId: message.channel.id,
                     userId: message.author.id,
                     username: message.author.username,
                     displayName: message.member?.displayName,
+                    contextMessage,
                     imageData,
                     client
                 });
@@ -796,8 +798,8 @@ client.on('messageCreate', async (message) => {
         try {
             const referencedMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
             if (referencedMsg && referencedMsg.author.id === client.user.id) {
-                // Include what the bot said as context
-                let contextMessage = `[I (MUMU) previously said: "${referencedMsg.content}"]\n\n`;
+                // Pass the prior bot message as context, not as part of the user's query.
+                const contextMessage = `[I (MUMU) previously said: "${referencedMsg.content}"]`;
 
                 // Check for image attachment
                 const img = getFirstImage(message);
@@ -808,12 +810,13 @@ client.on('messageCreate', async (message) => {
 
                 const { askFootball } = require('./utils/footballAI');
                 message.channel.sendTyping().catch(() => null);
-                const answer = await askFootball(contextMessage + (message.content || 'What do you see in this image?'), {
+                const answer = await askFootball(message.content || 'What do you see in this image?', {
                     guildId: message.guild.id,
                     channelId: message.channel.id,
                     userId: message.author.id,
                     username: message.author.username,
                     displayName: message.member?.displayName,
+                    contextMessage,
                     imageData,
                     client
                 });

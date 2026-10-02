@@ -35,17 +35,36 @@ function registerFonts() {
     if (fontsRegistered) return;
 
     const fontsDir = path.join(__dirname, '..', 'assets', 'fonts');
+    const fontFiles = [
+        ['Inter_18pt-Regular.ttf', 'Inter'],
+        ['Inter_18pt-SemiBold.ttf', 'Inter SemiBold'],
+        ['Oswald-Bold.ttf', 'Oswald']
+    ];
+    const registered = [];
+    const failed = [];
 
-    try {
-        GlobalFonts.registerFromPath(path.join(fontsDir, 'Inter-Regular.ttf'), 'Inter');
-        GlobalFonts.registerFromPath(path.join(fontsDir, 'Inter-SemiBold.ttf'), 'Inter SemiBold');
-        GlobalFonts.registerFromPath(path.join(fontsDir, 'Oswald-Bold.ttf'), 'Oswald');
-        console.log('[generateStandingsImage] Fonts registered.');
-    } catch (err) {
-        console.warn('[generateStandingsImage] Font registration failed:', err.message);
+    for (const [fileName, family] of fontFiles) {
+        const fontPath = path.join(fontsDir, fileName);
+        if (!fs.existsSync(fontPath)) {
+            failed.push(`${fileName} (file not found)`);
+            continue;
+        }
+
+        try {
+            const result = GlobalFonts.registerFromPath(fontPath, family);
+            if (result === false) throw new Error('Canvas rejected the font');
+            registered.push(family);
+        } catch (err) {
+            failed.push(`${fileName} (${err.message})`);
+        }
     }
 
     fontsRegistered = true;
+    if (failed.length) {
+        console.warn(`[generateStandingsImage] Registered ${registered.length}/${fontFiles.length} fonts; failed: ${failed.join(', ')}`);
+    } else {
+        console.log(`[generateStandingsImage] Fonts registered: ${registered.join(', ')}.`);
+    }
 }
 
 /*
@@ -922,4 +941,4 @@ function drawCircularImage(ctx, image, x, y, size) {
     ctx.stroke();
 }
 
-module.exports = { generateStandingsImage };
+module.exports = { generateStandingsImage, registerFonts };

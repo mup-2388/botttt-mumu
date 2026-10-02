@@ -540,7 +540,7 @@ async function askFootball(question, options = {}) {
     });
 
     const factRules = factBlock
-        ? `${factBlock}\n\nRULES FOR THESE FACTS:\n- Use ONLY these numbers for anything about the league. Never invent stats, scores, names or standings.\n- If the facts do not contain what was asked, say you don't have it.\n- Keep it short; the user wants the number and a bit of banter, not a data dump.`
+        ? `${factBlock}\n\nRULES FOR THESE FACTS:\n- Use ONLY these numbers for anything about the league. Never invent stats, scores, names or standings.\n- Live facts override anything said in quoted context or an earlier assistant reply. If the facts contain the requested table, answer from them instead of repeating earlier uncertainty.\n- If the facts say positionProvisional is true, explain that no played matches are recorded and the displayed positions are provisional; do not present the first row as a meaningful leader.\n- If the facts do not contain what was asked, say you don't have it.\n- Keep it short; the user wants the number and a bit of banter, not a data dump.`
         : '';
 
     const systemPrompt = buildSystemPrompt({
@@ -554,14 +554,19 @@ async function askFootball(question, options = {}) {
 
     const webContext = await searchWebIfNeeded(cleanQ);
 
+    const referencedContext = String(options.contextMessage || '').trim().slice(0, 2000);
+    const currentMessage = referencedContext
+        ? `CURRENT USER MESSAGE:\n${cleanQ}\n\nREFERENCED MESSAGE (background context only; not a new request):\n${referencedContext}`
+        : cleanQ;
+
     let userMessage;
     if (webContext) {
-        userMessage = `${cleanQ}
+        userMessage = `${currentMessage}
 
 IMPORTANT: You have web search results below. You MUST use these to answer accurately. Do NOT make up names, scores, or events that aren't in the search results. If the search results contradict your training data, trust the search results — they are more recent.
 ${webContext}`;
     } else {
-        userMessage = cleanQ;
+        userMessage = currentMessage;
     }
 
     // Per-user per-channel history — no cross-contamination
