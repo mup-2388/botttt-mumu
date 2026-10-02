@@ -2,9 +2,8 @@
  * schedule.js
  *
  * Tell the bot WHEN and WHERE a match is played:
- *   • it locks the stadium channel right away and announces/pings both teams
- *   • it sends a one-minute reminder without unlocking
- *   • at kickoff it unlocks the channel and pings both teams again
+ *   • it locks the chosen channel and pings both teams when scheduled
+ *   • one minute before kickoff it restores channel permissions and pings again
  *
  * Usage:
  *   .schedule 12 at 21:30 tomorrow in #stadium-1
@@ -13,7 +12,7 @@
  *   .schedule cancel 12
  *   .schedule preview 12 at 21:30 in #stadium-1
  *
- * Slash: /schedule set|list|cancel
+ * Slash: /schedule set|preview|list|cancel
  */
 
 const {
@@ -32,7 +31,8 @@ const {
     scheduleMatch,
     cancelPlan,
     listPlans,
-    DEFAULT_REMINDER_BEFORE_MINUTES
+    DEFAULT_UNLOCK_BEFORE_MINUTES,
+    buildAnnouncementMessage
 } = require('../../utils/matchScheduler');
 
 const VENUE_RE = /venue\s*[=:]\s*("[^"]+"|'[^']+'|\S+)/i;
@@ -43,8 +43,8 @@ function stripQuotes(s) {
 
 module.exports = {
     name: 'schedule',
-    description: 'Lock a stadium channel and auto-announce a match.',
-    usage: '.schedule <match no> at <time> in <#channel> [venue:"..." ] [caps] | .schedule list | .schedule cancel <match no>',
+    description: 'Lock a selected match channel, ping now, then unlock and ping one minute before kickoff.',
+    usage: '.schedule <match no> at <time> in <#channel> [venue:"..." ] [caps] | .schedule preview <match> [time] | .schedule list | .schedule cancel <match no>',
     aliases: ['matchschedule', 'mschedule'],
     hidden: false,
     cooldown: 3,
@@ -52,10 +52,10 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('schedule')
-        .setDescription('Announce and lock a match channel; unlock and ping again at kickoff')
+        .setDescription('Ping teams now, then unlock and ping again one minute before kickoff')
         .addSubcommand(sub =>
             sub.setName('set')
-                .setDescription('Ping teams now, remind them 1 min before, unlock and ping at kickoff')
+                .setDescription('Ping teams now; unlock and ping again 1 minute before kickoff')
                 .addStringOption(opt =>
                     opt.setName('match')
                         .setDescription('Choose a match or search by team name / match number')
@@ -81,6 +81,26 @@ module.exports = {
                 .addBooleanOption(opt =>
                     opt.setName('ping_captains')
                         .setDescription('Also ping both captains')
+                        .setRequired(false)
+                )
+        )
+        .addSubcommand(sub =>
+            sub.setName('preview')
+                .setDescription('Preview both announcement texts without sending pings or locking a channel')
+                .addStringOption(opt =>
+                    opt.setName('match')
+                        .setDescription('Choose a match or search by team name / match number')
+                        .setRequired(true)
+                        .setAutocomplete(true)
+                )
+                .addStringOption(opt =>
+                    opt.setName('time')
+                        .setDescription('Optional kickoff time in IST; defaults to the fixture time')
+                        .setRequired(false)
+                )
+                .addStringOption(opt =>
+                    opt.setName('venue')
+                        .setDescription('Optional venue name for the preview')
                         .setRequired(false)
                 )
         )
@@ -129,7 +149,7 @@ module.exports = {
                     '`.schedule <match> at <time> in <#channel> [venue:"..."] [caps]`\n' +
                     '`.schedule list` · `.schedule cancel <match>` · `.schedule preview ...`\n' +
                     'Times are **IST** (e.g. `tomorrow 9:30pm`, `25/10 21:00`).\n' +
-                    'The channel locks immediately: both teams are pinged when scheduled, reminded **1 minute before kickoff**, then pinged again as it unlocks at kickoff.'
+                    'The channel locks immediately and teams are pinged; **1 minute before kickoff**, it unlocks and teams are pinged again.'
                 );
             }
 
@@ -154,15 +174,19 @@ module.exports = {
                 });
             }
 
-            const preview = sub === 'preview';
-            const rest = preview ? args.slice(1) : args;
+            if (sub === 'preview') {
+                return runPreview({
+                    guild: message.guild,
+                    raw: args.slice(1).join(' '),
+                    reply: p => message.reply(p)
+                });
+            }
 
             return runSet({
                 client: message.client,
                 guild: message.guild,
-                raw: rest.join(' '),
+                raw: args.join(' '),
                 actorId: message.author.id,
-                preview,
                 reply: p => message.reply(p)
             });
         } catch (error) {
@@ -184,7 +208,7 @@ module.exports = {
             }
 
             const sub = interaction.options.getSubcommand(false);
-            if (!['set', 'cancel'].includes(sub)) return respond([]);
+            if (!['set', 'preview', 'cancel'].includes(sub)) return respond([]);
 
             const tournamentKey = sub === 'cancel'
                 ? interaction.options.getString('tournament')
@@ -270,6 +294,16 @@ module.exports = {
                 });
             }
 
+            if (sub === 'preview') {
+                return runPreview({
+                    guild: interaction.guild,
+                    fixtureId: interaction.options.getString('match'),
+                    timeText: interaction.options.getString('time'),
+                    venue: interaction.options.getString('venue'),
+                    reply: p => interaction.editReply(p)
+                });
+            }
+
             const channel = interaction.options.getChannel('channel');
             const time = interaction.options.getString('time');
             const venue = interaction.options.getString('venue');
@@ -284,7 +318,6 @@ module.exports = {
                 venue,
                 pingCaptains: interaction.options.getBoolean('ping_captains') ?? false,
                 actorId: interaction.user.id,
-                preview: false,
                 reply: p => interaction.editReply(p)
             });
         } catch (error) {
@@ -302,6 +335,116 @@ module.exports = {
    CORE
 ==================================================== */
 
+async function runPreview({
+    guild,
+    raw = '',
+    matchNumber = null,
+    fixtureId = null,
+    timeText = null,
+    venue = null,
+    reply
+}) {
+    let text = String(raw || '');
+
+    if (venue == null) {
+        const venueMatch = text.match(VENUE_RE);
+        if (venueMatch) {
+            venue = stripQuotes(venueMatch[1]);
+            text = text.replace(venueMatch[0], ' ');
+        }
+    }
+
+    if (matchNumber == null) {
+        const match = text.match(/\b(?:match|m|#)?\s*(\d{1,4})\b/);
+        if (match) {
+            matchNumber = Number(match[1]);
+            text = text.replace(match[0], ' ');
+        }
+    }
+
+    const parsedKey = await extractTournamentFromArgs(guild.id, text.split(/\s+/).filter(Boolean), { tokenOnly: true });
+    const resolved = await resolveTournament(guild.id, parsedKey.explicit ? parsedKey.tournament.tournamentKey : null);
+
+    if (!resolved.tournament) return reply({ content: resolved.error || '📭 No default tournament is set.' });
+    if (!matchNumber && !fixtureId) return reply({ content: '❓ Choose a match to preview.' });
+
+    const fixture = await Fixture.findOne({
+        guildId: guild.id,
+        tournamentId: resolved.tournament._id,
+        ...(fixtureId ? { _id: fixtureId } : { matchNumber })
+    });
+
+    if (!fixture) {
+        const label = matchNumber ? `#${matchNumber}` : 'selected match';
+        return reply({ content: `❌ ${label} was not found in **${resolved.tournament.name}**.` });
+    }
+
+    const timeSource = timeText || parsedKey.rest.join(' ');
+    let kickoff = fixture.scheduledAt ? new Date(fixture.scheduledAt) : null;
+
+    if (timeSource && timeSource.trim()) {
+        const clean = timeSource.replace(/\b(tournament|key|t)=\S+/gi, ' ').trim();
+        if (clean) {
+            const parsed = parseScheduleTime(clean);
+            if (!parsed.ok) {
+                return reply({
+                    content: `❌ ${parsed.error}\nTry: \`tomorrow 9:30pm\`, \`25/10 21:00\`, or \`in 2h\`.`
+                });
+            }
+            kickoff = parsed.date;
+        }
+    }
+
+    if (!kickoff) {
+        return reply({
+            content: `❌ Match **#${fixture.matchNumber}** has no kickoff time. Give an IST time to preview it.`
+        });
+    }
+
+    if (kickoff.getTime() - Date.now() < 60_000) {
+        return reply({ content: '❌ Kickoff must be at least a minute away to schedule; choose a later time to preview.' });
+    }
+
+    fixture.scheduledAt = kickoff;
+    if (venue != null) fixture.venueName = venue;
+
+    const unlockAt = new Date(kickoff.getTime() - DEFAULT_UNLOCK_BEFORE_MINUTES * 60_000);
+    const scheduledMessage = await buildAnnouncementMessage({
+        guild,
+        fixture,
+        stage: 'scheduled',
+        includePings: false,
+        recordHistory: false
+    });
+    const unlockMessage = await buildAnnouncementMessage({
+        guild,
+        fixture,
+        stage: 'unlock',
+        includePings: false,
+        recordHistory: false
+    });
+    const footer = 'Preview only — no channel was locked, no message was sent, and no one was pinged. The final prose may vary when scheduled.';
+
+    const scheduleEmbed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('📣 Preview — when the match is scheduled')
+        .setDescription(scheduledMessage.content.slice(0, 4000))
+        .setFooter({ text: footer });
+    const unlockEmbed = new EmbedBuilder()
+        .setColor(0xFEE75C)
+        .setTitle('🔓 Preview — one minute before kickoff')
+        .setDescription(unlockMessage.content.slice(0, 4000))
+        .setFooter({ text: footer });
+
+    return reply({
+        content:
+            `🔎 **Preview only** · Match **#${fixture.matchNumber}** · ` +
+            `${formatIst(kickoff)} kickoff · channel unlocks and teams are pinged again at ${formatIst(unlockAt)}.`,
+        embeds: [scheduleEmbed, unlockEmbed],
+        allowedMentions: { parse: [], roles: [], users: [] }
+    });
+}
+
 async function runSet({
     client,
     guild,
@@ -313,7 +456,6 @@ async function runSet({
     venue = null,
     pingCaptains = false,
     actorId = null,
-    preview = false,
     reply
 }) {
     let text = String(raw || '');
@@ -457,21 +599,7 @@ async function runSet({
         return reply({ content: '❌ I cannot see that channel. Mention it again or check my permissions.' });
     }
 
-    const announceAt = new Date(kickoff.getTime() - DEFAULT_REMINDER_BEFORE_MINUTES * 60_000);
-
-    if (preview) {
-        return reply({
-            content:
-                `🔎 **Preview — nothing changed**\n` +
-                `Match: **#${matchNumber}** · ${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}\n` +
-                `Tournament: ${tournament.name}\n` +
-                `Channel: <#${channelId}>\n` +
-                `Kickoff: ${formatIst(kickoff)} · ${discordFull(kickoff)} (${discordRelative(kickoff)})\n` +
-                `Lock: now · Schedule ping: immediately · Reminder: ${formatIst(announceAt)}\n` +
-                `Unlock + kickoff ping: ${formatIst(kickoff)}\n` +
-                `Pings: ${fixture.homeTeam} + ${fixture.awayTeam}${pingCaps ? ' + captains' : ''}`
-        });
-    }
+    const unlockAt = new Date(kickoff.getTime() - DEFAULT_UNLOCK_BEFORE_MINUTES * 60_000);
 
     /* Keep proposed values in memory; scheduleMatch persists them atomically
        with the channel plan only after it has successfully locked the channel. */
@@ -483,7 +611,7 @@ async function runSet({
         guild,
         fixture,
         channelId,
-        reminderBeforeMinutes: DEFAULT_REMINDER_BEFORE_MINUTES,
+        unlockBeforeMinutes: DEFAULT_UNLOCK_BEFORE_MINUTES,
         pingCaptains: pingCaps,
         actorId
     });
@@ -509,10 +637,10 @@ async function runSet({
         .addFields(
             { name: '🔒 Locked now', value: `<#${channelId}>`, inline: true },
             { name: '📣 Schedule ping', value: noticeState, inline: true },
-            { name: '🔔 One-minute reminder', value: `${formatIst(announceAt)}\n${discordRelative(announceAt)}`, inline: true },
-            { name: '🔓 Unlock + kickoff ping (IST)', value: `${formatIst(kickoff)}\n${discordRelative(kickoff)}`, inline: true }
+            { name: '🔓 Unlock + second ping (1 min before)', value: `${formatIst(unlockAt)}\n${discordRelative(unlockAt)}`, inline: true },
+            { name: '⚽ Kickoff time', value: `${formatIst(kickoff)}\n${discordRelative(kickoff)}`, inline: true }
         )
-        .setFooter({ text: 'Teams are pinged now, reminded one minute before, then pinged again as the channel unlocks at kickoff.' })
+        .setFooter({ text: 'Teams are pinged now, then pinged again as the channel unlocks one minute before kickoff.' })
         .setTimestamp();
 
     return reply({ embeds: [embed] });

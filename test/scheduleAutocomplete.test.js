@@ -67,17 +67,20 @@ class SlashCommandBuilder {
 }
 
 class EmbedBuilder {
-    setColor() { return this; }
-    setTitle() { return this; }
-    setDescription() { return this; }
-    addFields() { return this; }
-    setFooter() { return this; }
+    constructor() { this.data = {}; }
+    setColor(color) { this.data.color = color; return this; }
+    setTitle(title) { this.data.title = title; return this; }
+    setDescription(description) { this.data.description = description; return this; }
+    addFields(...fields) { this.data.fields = fields; return this; }
+    setFooter(footer) { this.data.footer = footer; return this; }
     setTimestamp() { return this; }
 }
 
-function loadScheduleCommand(fixtures) {
+function loadScheduleCommand(fixtures, { selectedFixture = null } = {}) {
     const queries = [];
     const tournamentLookups = [];
+    const previewCalls = [];
+    const scheduleCalls = [];
     const command = requireWithMocks('../commands/tournament/schedule', {
         'discord.js': {
             SlashCommandBuilder,
@@ -94,7 +97,7 @@ function loadScheduleCommand(fixtures) {
                         lean: async () => fixtures
                     };
                 },
-                findOne: async () => null
+                findOne: async () => selectedFixture
             },
             TournamentSettings: { find: async () => [] }
         },
@@ -119,13 +122,18 @@ function loadScheduleCommand(fixtures) {
             vsLine: (home, away) => `${home} vs ${away}`
         },
         '../../utils/matchScheduler': {
-            scheduleMatch: async () => ({ ok: true }),
+            scheduleMatch: async input => { scheduleCalls.push(input); return { ok: true }; },
+            buildAnnouncementMessage: async input => {
+                previewCalls.push(input);
+                return { content: `Rendered ${input.stage} for match #${input.fixture.matchNumber}` };
+            },
             cancelPlan: async () => ({ ok: true, cancelled: true, unlocked: true }),
-            listPlans: async () => []
+            listPlans: async () => [],
+            DEFAULT_UNLOCK_BEFORE_MINUTES: 1
         }
     });
 
-    return { command, queries, tournamentLookups };
+    return { command, queries, tournamentLookups, previewCalls, scheduleCalls };
 }
 
 function fixture(number, homeTeam = `Home ${number}`, awayTeam = `Away ${number}`) {
@@ -170,6 +178,12 @@ test('slash match options use autocomplete and return at most Discord’s 25 fix
     assert.equal(matchOption.required, true);
     assert.equal(matchOption.autocomplete, true);
 
+    const previewSubcommand = harness.command.data.toJSON().options.find(option => option.name === 'preview');
+    const previewMatchOption = previewSubcommand.options.find(option => option.name === 'match');
+    const previewTimeOption = previewSubcommand.options.find(option => option.name === 'time');
+    assert.equal(previewMatchOption.autocomplete, true);
+    assert.equal(previewTimeOption.required, false);
+
     await harness.command.autocomplete(interaction);
 
     assert.equal(response.choices.length, 25);
@@ -198,4 +212,34 @@ test('autocomplete searches fixture numbers and team names', async () => {
     const numberInteraction = autocompleteInteraction('#14');
     await numberHarness.command.autocomplete(numberInteraction.interaction);
     assert.deepEqual(numberInteraction.response.choices.map(choice => choice.value), ['fixture-14']);
+});
+
+
+test('/schedule preview shows both texts without pinging or changing a schedule', async () => {
+    const selectedFixture = fixture(7, 'Falcons', 'Tigers');
+    const harness = loadScheduleCommand([selectedFixture], { selectedFixture });
+    let response = null;
+    let deferred = false;
+    const interaction = {
+        guild: { id: 'guild-1' },
+        user: { id: 'organizer-1' },
+        client: {},
+        options: {
+            getSubcommand: () => 'preview',
+            getString: name => name === 'match' ? 'fixture-7' : null
+        },
+        deferReply: async () => { deferred = true; },
+        editReply: async payload => { response = payload; }
+    };
+
+    await harness.command.slashExecute(interaction);
+
+    assert.equal(deferred, true);
+    assert.equal(response.embeds.length, 2);
+    assert.match(response.content, /Preview only/);
+    assert.match(response.embeds[0].data.description, /Rendered scheduled/);
+    assert.match(response.embeds[1].data.description, /Rendered unlock/);
+    assert.deepEqual(harness.previewCalls.map(call => call.stage), ['scheduled', 'unlock']);
+    assert.ok(harness.previewCalls.every(call => call.includePings === false && call.recordHistory === false));
+    assert.equal(harness.scheduleCalls.length, 0);
 });

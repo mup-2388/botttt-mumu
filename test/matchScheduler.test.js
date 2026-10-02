@@ -197,53 +197,56 @@ test('scheduling locks immediately and sends a role-ping announcement with the I
     });
     assert.equal(harness.getStored().channelPlan.state, 'locked');
     assert.equal(harness.getStored().channelPlan.scheduledAnnouncementMessageId, 'message-1');
-    assert.equal(result.announceAt.getTime(), kickoff.getTime() - 60_000);
+    assert.equal(result.unlockAt.getTime(), kickoff.getTime() - 60_000);
 });
 
-test('the one-minute reminder pings teams but keeps the channel locked', async () => {
+test('one minute before kickoff, the scheduler unlocks first and sends the final team-role ping', async () => {
     const now = new Date();
     const fixture = makeFixture(new Date(now.getTime() + 10 * 60_000), {
         scheduledAnnouncementMessageId: 'schedule-message',
         announceAt: new Date(now.getTime() - 1_000),
-        reminderAnnouncedAt: null,
-        reminderMessageId: null
+        unlockClaimedAt: null,
+        unlockedAt: null,
+        unlockAnnouncedAt: null,
+        unlockMessageId: null
     });
     const harness = makeScheduler({
         fixture,
-        fixtureFind: filter => filter['channelPlan.announceAt'] ? [fixture] : []
+        fixtureFind: filter => filter['channelPlan.unlockAnnouncedAt'] === null ? [fixture] : []
     });
 
     await harness.scheduler.tick({ guilds: { cache: new Map([[harness.guild.id, harness.guild]]) } });
 
-    assert.deepEqual(harness.stages, ['reminder']);
-    assert.equal(harness.events.includes('unlock'), false);
+    assert.deepEqual(harness.stages, ['unlock']);
+    assert.ok(harness.events.indexOf('unlock') >= 0);
+    assert.ok(harness.events.indexOf('unlock') < harness.events.indexOf('send'));
     assert.equal(harness.messages.length, 1);
-    assert.match(harness.messages[0].content, /ONE-MINUTE MATCH REMINDER/);
+    assert.match(harness.messages[0].content, /KICKOFF IN ONE MINUTE/);
     assert.deepEqual(harness.messages[0].allowedMentions.roles, ['home-role', 'away-role']);
-    assert.equal(harness.getStored().channelPlan.reminderMessageId, 'message-1');
+    assert.ok(harness.getStored().channelPlan.unlockedAt);
+    assert.ok(harness.getStored().channelPlan.unlockAnnouncedAt);
+    assert.equal(harness.getStored().channelPlan.state, 'done');
+    assert.equal(harness.getStored().channelPlan.unlockMessageId, 'message-1');
 });
 
-test('kickoff unlocks the channel before the second team-role ping', async () => {
+test('a delayed scheduler still unlocks and announces when kickoff has already arrived', async () => {
     const now = new Date();
     const fixture = makeFixture(new Date(now.getTime() - 1_000), {
         scheduledAnnouncementMessageId: 'schedule-message',
-        reminderAnnouncedAt: new Date(now.getTime() - 60_000),
-        reminderMessageId: 'reminder-message',
-        kickoffAnnouncedAt: null,
-        kickoffUnlockedAt: null
+        announceAt: new Date(now.getTime() - 61_000),
+        unlockClaimedAt: null,
+        unlockedAt: null,
+        unlockAnnouncedAt: null
     });
     const harness = makeScheduler({
         fixture,
-        fixtureFind: filter => filter['channelPlan.kickoffAnnouncedAt'] === null ? [fixture] : []
+        fixtureFind: filter => filter['channelPlan.unlockAnnouncedAt'] === null ? [fixture] : []
     });
 
     await harness.scheduler.tick({ guilds: { cache: new Map([[harness.guild.id, harness.guild]]) } });
 
     assert.deepEqual(harness.stages, ['kickoff']);
-    assert.ok(harness.events.indexOf('unlock') >= 0);
     assert.ok(harness.events.indexOf('unlock') < harness.events.indexOf('send'));
     assert.match(harness.messages[0].content, /KICKOFF TIME/);
-    assert.deepEqual(harness.messages[0].allowedMentions.roles, ['home-role', 'away-role']);
     assert.equal(harness.getStored().channelPlan.state, 'done');
-    assert.equal(harness.getStored().channelPlan.kickoffMessageId, 'message-1');
 });

@@ -22,7 +22,7 @@ function requireWithMocks(modulePath, mocks) {
     }
 }
 
-test('announcement fallbacks and prompts match schedule, reminder, and kickoff stages', async () => {
+test('announcement fallbacks and prompts match scheduled, unlock, and kickoff stages', async () => {
     const prompts = [];
     const fakeFs = {
         readFileSync: () => '[]',
@@ -64,20 +64,20 @@ test('announcement fallbacks and prompts match schedule, reminder, and kickoff s
         };
 
         const scheduled = await buildMatchAnnouncement({ ...common, announcementType: 'scheduled' });
-        const reminder = await buildMatchAnnouncement({ ...common, announcementType: 'reminder' });
+        const unlock = await buildMatchAnnouncement({ ...common, announcementType: 'unlock' });
         const kickoff = await buildMatchAnnouncement({ ...common, announcementType: 'kickoff' });
 
         assert.match(scheduled, /locked in/i);
-        assert.match(reminder, /one minute/i);
+        assert.match(unlock, /one minute/i);
         assert.match(kickoff, /Two teams/i);
         assert.match(scheduled, /12 Oct, 9:00 PM IST/);
-        assert.match(reminder, /12 Oct, 9:00 PM IST/);
+        assert.match(unlock, /12 Oct, 9:00 PM IST/);
         assert.match(kickoff, /12 Oct, 9:00 PM IST/);
         assert.match(prompts[0].systemPrompt, /just scheduled this match/i);
-        assert.match(prompts[1].systemPrompt, /one-minute warning/i);
+        assert.match(prompts[1].systemPrompt, /unlocked one minute before kickoff/i);
         assert.match(prompts[2].systemPrompt, /kickoff time has arrived/i);
         assert.equal(prompts.length, 3);
-        assert.doesNotMatch(`${scheduled}\n${reminder}\n${kickoff}`, /@everyone|@here/);
+        assert.doesNotMatch(`${scheduled}\n${unlock}\n${kickoff}`, /@everyone|@here/);
     } finally {
         Math.random = originalRandom;
     }

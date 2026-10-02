@@ -183,7 +183,7 @@ function compactFacts(facts, limit = 2000) {
 function templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId = null, announcementType = 'kickoff' }) {
     const templates = announcementType === 'scheduled'
         ? SCHEDULE_TEMPLATES
-        : announcementType === 'reminder'
+        : ['reminder', 'unlock'].includes(announcementType)
             ? REMINDER_TEMPLATES
             : TEMPLATES;
 
@@ -209,6 +209,7 @@ async function buildMatchAnnouncement({
     venueName = '',
     scheduledAt,
     announcementType = 'kickoff',
+    recordHistory = true,
     extraFacts = null
 }) {
     /* Accept fixture fields directly — no caller should ever print "undefined". */
@@ -249,8 +250,8 @@ async function buildMatchAnnouncement({
     const tone = pick(TONES);
     const stageInstruction = announcementType === 'scheduled'
         ? 'The organizer has just scheduled this match. Confirm the fixture and time, build anticipation, and make both teams feel called out in a friendly way.'
-        : announcementType === 'reminder'
-            ? 'This is the one-minute warning. Tell both teams to get ready now; do not imply the match is already underway.'
+        : ['reminder', 'unlock'].includes(announcementType)
+            ? 'The channel is being unlocked one minute before kickoff. Tell both teams to get ready now; do not imply the match is already underway.'
             : 'The scheduled kickoff time has arrived. Tell both teams to get started now; do not say kickoff is still in the future.';
 
     const systemPrompt =
@@ -302,7 +303,7 @@ async function buildMatchAnnouncement({
         body = body.replace(/<@&\d+>/g, '');
     }
 
-    pushHistory(body.split('\n')[0].slice(0, 120));
+    if (recordHistory) pushHistory(body.split('\n')[0].slice(0, 120));
 
     return body;
 }
