@@ -728,6 +728,45 @@ const fixtureSchema = new mongoose.Schema(
             default: null
         },
 
+        /*
+         * Match-day channel plan (see utils/matchScheduler.js):
+         * the stadium channel is locked as soon as the match is scheduled and
+         * unlocked + announced one minute before kickoff.
+         */
+        channelPlan: {
+            channelId: { type: String, default: null },
+            state: {
+                type: String,
+                enum: ['pending', 'locked', 'announced', 'done', 'cancelled'],
+                default: 'pending'
+            },
+            lockAt: { type: Date, default: null },
+            announceAt: { type: Date, default: null },
+            lockedAt: { type: Date, default: null },
+            announcedAt: { type: Date, default: null },
+            lockedBy: { type: String, default: null },
+            previousOverwrite: { type: mongoose.Schema.Types.Mixed, default: null },
+            pingCaptains: { type: Boolean, default: false },
+            announcementMessageId: { type: String, default: null },
+            lastError: { type: String, default: null },
+            scheduledBy: { type: String, default: null }
+        },
+
+        /*
+         * A match the organizers could not play on its matchday. Reserved
+         * fixtures stay Pending (so they can still be reported/played whenever),
+         * keep their new kickoff in scheduledAt, and are flagged everywhere
+         * fixtures are listed. Reserving also releases the stadium channel lock.
+         */
+        reserved: {
+            isReserved: { type: Boolean, default: false },
+            at: { type: Date, default: null },          // when it was marked
+            by: { type: String, default: null },        // organizer user id
+            from: { type: Date, default: null },        // kickoff that was missed
+            until: { type: Date, default: null },       // new day/time (null = not decided)
+            note: { type: String, default: null }
+        },
+
         status: {
             type: String,
             enum: ['Pending', 'Live', 'Played', 'Cancelled'],

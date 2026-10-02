@@ -19,6 +19,7 @@ const {
 const { Fixture, Team, TournamentTeam } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine } = require('../../utils/ai/emojiSlots');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 module.exports = {
@@ -193,7 +194,7 @@ async function runFixFixture({ guild, key, matchNumber, home, away, round, phase
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
             `Match #**${fixture.matchNumber}**\n` +
-            `**${fixture.homeTeam} vs ${fixture.awayTeam}**`
+            `**${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}**`
         )
         .addFields(
             { name: 'Phase', value: fixture.phase || '—', inline: true },

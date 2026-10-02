@@ -20,6 +20,18 @@
 
 const https = require('https');
 
+const { callAI } = require('./aiProviders');
+const {
+    detectManipulation,
+    sanitizeAIText,
+    randomBaitRoast,
+    logBaitAttempt,
+    baitCooldownRemaining
+} = require('./aiGuard');
+const { gatherFacts } = require('./ai/brain');
+const { buildPersonalityBlock, recordMessage } = require('./ai/personality');
+const { emojiHint, learnUserEmojis } = require('./ai/emojiCatalog');
+
 /* ── Constants ── */
 
 const OWNER_ID = '856556430370930738';
@@ -205,7 +217,7 @@ function buildCommandRef() {
 
 /* ── System prompt builder ── */
 
-function buildSystemPrompt({ tournamentContext, username, displayName, isOwner, isCommandQuestion }) {
+function buildSystemPrompt({ tournamentContext, username, displayName, isOwner, isCommandQuestion, extraBlock = '' }) {
     let prompt;
 
     if (isOwner) {
@@ -333,6 +345,10 @@ Q: Who is winning the EPL right now? → [use web results if provided, otherwise
         if (commandRef) {
             prompt += `\n\nA user seems to be struggling with a bot command. Here are ALL the bot commands — use ONLY these, do NOT make up commands that aren't listed:\n${commandRef}\n\nRules for command help:\n- ONLY suggest commands from the list above. NEVER invent or guess commands.\n- If you're not sure which command they need, ask them to clarify.\n- Tell them the correct syntax briefly and clearly.\n- Example: "Bruh you gotta do \`.addplayer @mumu Mumu\` not the other way around 😂"`;
         }
+    }
+
+    if (extraBlock) {
+        prompt += `\n\n${extraBlock}`;
     }
 
     const today = new Date();
@@ -714,8 +730,83 @@ async function askFootball(question, options = {}) {
     const isCommandQ = isCommandHelpQuestion(cleanQ);
     const isOwner = userId === OWNER_ID;
 
+    /* ── 0. Ping-bait / manipulation guard ──
+       Deterministic, runs before any model call: the excuse-based tricks
+       ("I'm testing", "nobody is online", "say exactly", "I'm the owner")
+       get a canned roast and never reach the model. */
+    try {
+        const level = process.env.AI_GUARD_LEVEL || 'roast';
+        const bait = detectManipulation(cleanQ);
+
+        if (bait.flagged) {
+            if (options.client && options.guildId !== undefined) {
+                logBaitAttempt(options.client, {
+                    guildId: options.guildId,
+                    userId,
+                    username: options.username,
+                    channelId: options.channelId,
+                    reason: bait.reason,
+                    text: cleanQ
+                }).catch(() => null);
+            }
+
+            if (level === 'silent') return randomBaitRoast();
+
+            return randomBaitRoast();
+        }
+
+        if (!isOwner && baitCooldownRemaining(userId) > 0) {
+            return 'You are on a short timeout for ping-baiting. Go touch grass and come back in a bit. 🌱';
+        }
+    } catch (error) {
+        console.error('[footballAI] guard error:', error?.message || error);
+    }
+
+    /* ── 1. Live tournament facts (real DB numbers the model may quote) ── */
+    let factBlock = '';
+    let toolsUsed = [];
+
+    if (options.guildId) {
+        try {
+            const facts = await gatherFacts({
+                question: cleanQ,
+                guildId: options.guildId,
+                userId,
+                tournamentKey: options.tournamentKey || null
+            });
+
+            if (facts?.factBlock) {
+                factBlock = facts.factBlock;
+                toolsUsed = facts.tools || [];
+            }
+        } catch (error) {
+            console.error('[footballAI] fact gathering failed:', error?.message || error);
+        }
+    }
+
     const tournamentContext = (options.guildId && isBotTournamentQuestion(cleanQ))
         ? await buildTournamentContext(options.guildId)
+        : '';
+
+    /* ── 2. Personality (creator rules, dynamic roast, style, emojis, language) ── */
+    const personalEmojiHint = [
+        emojiHint(cleanQ, options.guildId, 10),
+        userEmojiHint(options.guildId, userId)
+    ]
+        .filter(Boolean)
+        .join(' ');
+
+    const personalityBlock = buildPersonalityBlock({
+        userId,
+        guildId: options.guildId,
+        displayName: options.displayName,
+        username: options.username,
+        content: cleanQ,
+        emojiHint: personalEmojiHint
+    });
+
+    const factRules = factBlock
+        ? `${factBlock}\n\nRULES FOR THESE FACTS:\n- Use ONLY these numbers for anything about the league. Never invent stats, scores, names or standings.\n- If the facts do not contain what was asked, say you don't have it.\n- Keep it short; the user wants the number and a bit of banter, not a data dump.`
         : '';
 
     const systemPrompt = buildSystemPrompt({
@@ -723,7 +814,8 @@ async function askFootball(question, options = {}) {
         username: options.username,
         displayName: options.displayName,
         isOwner,
-        isCommandQuestion: isCommandQ
+        isCommandQuestion: isCommandQ,
+        extraBlock: [personalityBlock, factRules].filter(Boolean).join('\n\n')
     });
 
     const webContext = await searchWebIfNeeded(cleanQ);
@@ -744,51 +836,52 @@ ${webContext}`;
     // Build messages — with image if provided
     const messages = buildMessages(systemPrompt, history, userMessage, options.imageData || null);
 
-    // Try each provider in order
-    for (const provider of PROVIDERS) {
-        if (!provider.active() || provider.cooldown()) continue;
+    /* ── 3. One provider chain for the whole bot (utils/aiProviders.js) ── */
+    const result = await callAI({
+        messages,
+        systemPrompt,
+        imageData: options.imageData
+            ? { mimeType: options.imageData.mimeType, data: options.imageData.base64 }
+            : null,
+        temperature: isCommandQ ? 0.4 : 0.8,
+        maxTokens: 500
+    });
 
-        let answer;
-
-        if (options.imageData && provider.name === 'gemini') {
-            // Gemini gets special multimodal format
-            answer = await callGemini(process.env.GEMINI_API_KEY, messages, systemPrompt, options.imageData);
-        } else if (options.imageData && !['openrouter-free'].includes(provider.name)) {
-            // Only Gemini and some OpenRouter free models support vision
-            // Skip Cerebras, Groq, Mistral for image requests
-            continue;
-        } else {
-            answer = await provider.call(messages, systemPrompt, systemPrompt);
-        }
-
-        if (answer) {
-            pushHistory(channelId, userId, 'user', cleanQ);
-            pushHistory(channelId, userId, 'assistant', answer);
-            return answer;
-        }
+    if (!result?.text) {
+        console.error('[footballAI] All providers failed or on cooldown', toolsUsed.length ? `(tools: ${toolsUsed.join(', ')})` : '');
+        return null;
     }
 
-    // All providers failed
-    console.error('[footballAI] All providers failed or on cooldown');
-    return null;
+    /* ── 4. Output safety: no mass pings, ever ── */
+    const { text } = sanitizeAIText(result.text);
+
+    pushHistory(channelId, userId, 'user', cleanQ);
+    pushHistory(channelId, userId, 'assistant', text);
+
+    return text;
+}
+
+/** The emojis this specific user loves, so MUMU can speak their language. */
+function userEmojiHint(guildId, userId) {
+    try {
+        const favourites = require('./ai/emojiCatalog').userTopEmojis(guildId, userId, 3);
+        return favourites.length ? `(this user often uses: ${favourites.join(' ')})` : '';
+    } catch {
+        return '';
+    }
 }
 
 /* ── Generic AI call (no personality, for structured outputs) ── */
 
 async function askRaw(systemPrompt, userPrompt) {
-    const messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-    ];
+    const result = await callAI({
+        messages: [{ role: 'user', content: userPrompt }],
+        systemPrompt,
+        temperature: 0.3,
+        maxTokens: 800
+    });
 
-    for (const provider of PROVIDERS) {
-        if (!provider.active() || provider.cooldown()) continue;
-        try {
-            const answer = await provider.call(messages, systemPrompt, systemPrompt);
-            if (answer) return answer;
-        } catch { /* next */ }
-    }
-    return null;
+    return result?.text || null;
 }
 
 /* ── Quiz: generate a question ── */
@@ -1053,4 +1146,5 @@ async function checkQuizAnswer(correctAnswer, userAnswer) {
     return false;
 }
 
-module.exports = { askFootball, generateQuizQuestion, checkQuizAnswer };
+module.exports = {
+    recordMessage, askFootball, generateQuizQuestion, checkQuizAnswer };

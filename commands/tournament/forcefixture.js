@@ -19,6 +19,7 @@ const {
 const { Fixture } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine } = require('../../utils/ai/emojiSlots');
 
 module.exports = {
     name: 'forcefixture',
@@ -141,6 +142,10 @@ async function runForceFixture({ guild, key, matchNumber, status, reply }) {
 
     /* ── Apply status change ── */
     fixture.status = status;
+    if (['Played', 'Cancelled'].includes(status) && fixture.reserved?.isReserved) {
+        fixture.reserved.isReserved = false;
+        fixture.reserved.until = null;
+    }
     await fixture.save();
 
     /* ── Response ── */
@@ -151,7 +156,7 @@ async function runForceFixture({ guild, key, matchNumber, status, reply }) {
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
             `Match #**${fixture.matchNumber}**\n` +
-            `**${fixture.homeTeam} vs ${fixture.awayTeam}**\n\n` +
+            `**${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}**\n\n` +
             `New status: **${fixture.status}**`
         )
         .setTimestamp();
