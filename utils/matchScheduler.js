@@ -382,19 +382,8 @@ async function sendUnlockAnnouncement({ client, guild, fixture, now = new Date()
     }
 
     const kickoffPassed = new Date(claim.scheduledAt).getTime() <= now.getTime();
-    if (kickoffPassed) {
-        await Fixture.updateOne(
-            { _id: fixture._id, 'channelPlan.state': { $in: ['locked', 'announced'] }, 'reserved.isReserved': { $ne: true } },
-            {
-                $set: { 'channelPlan.state': 'done', 'channelPlan.lastError': null },
-                $unset: { 'channelPlan.unlockClaimedAt': 1 }
-            }
-        ).catch(error => console.error('[matchScheduler] could not finish late unlock:', error?.message || error));
-
-        return { ok: true, skipped: true, unlocked: true, announcementSkipped: true };
-    }
-
-    const result = await announceMatch({ client, guild, fixture: claim, stage: 'unlock' }).catch(error => ({
+    const stage = kickoffPassed ? 'kickoff' : 'unlock';
+    const result = await announceMatch({ client, guild, fixture: claim, stage }).catch(error => ({
         ok: false,
         error: error?.message || 'unlock announcement failed'
     }));

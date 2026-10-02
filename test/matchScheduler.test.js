@@ -266,7 +266,7 @@ test('one minute before kickoff, the scheduler unlocks first and sends the final
     assert.equal(harness.getStored().channelPlan.unlockMessageId, 'message-1');
 });
 
-test('a delayed scheduler unlocks after kickoff but does not send a kickoff-time ping', async () => {
+test('a delayed scheduler unlocks and sends the kickoff-time role ping when kickoff has arrived', async () => {
     const now = new Date();
     const fixture = makeFixture(new Date(now.getTime() - 1_000), {
         scheduledAnnouncementMessageId: 'schedule-message',
@@ -282,11 +282,8 @@ test('a delayed scheduler unlocks after kickoff but does not send a kickoff-time
 
     await harness.scheduler.tick({ guilds: { cache: new Map([[harness.guild.id, harness.guild]]) } });
 
-    assert.deepEqual(harness.stages, []);
-    assert.ok(harness.events.includes('unlock'));
-    assert.equal(harness.events.includes('send'), false);
-    assert.equal(harness.messages.length, 0);
-    assert.ok(harness.getStored().channelPlan.unlockedAt);
-    assert.equal(harness.getStored().channelPlan.unlockAnnouncedAt, null);
+    assert.deepEqual(harness.stages, ['kickoff']);
+    assert.ok(harness.events.indexOf('unlock') < harness.events.indexOf('send'));
+    assert.match(harness.messages[0].content, /KICKOFF TIME/);
     assert.equal(harness.getStored().channelPlan.state, 'done');
 });
