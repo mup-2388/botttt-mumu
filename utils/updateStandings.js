@@ -16,10 +16,18 @@
 
 const { AttachmentBuilder } = require('discord.js');
 
-const { TournamentSettings } = require('../models/Tournament');
+const { TournamentSettings, TournamentTeam } = require('../models/Tournament');
 const LiveMessage = require('../models/LiveMessage');
 
-const { generateStandingsImage } = require('./generateStandingsImage');
+let generateStandingsImage = null;
+let imageRendererLoadError = null;
+
+try {
+    ({ generateStandingsImage } = require('./generateStandingsImage'));
+} catch (error) {
+    imageRendererLoadError = error;
+    console.warn('[updateStandings] Image renderer unavailable; text fallback enabled:', error.message);
+}
 const { sortTeams, compactName, getQualificationZone } = require('./standingsHelpers');
 
 /*
@@ -74,6 +82,10 @@ async function updateLiveStandings(
         let imageResult = null;
 
         try {
+            if (!generateStandingsImage) {
+                throw imageRendererLoadError || new Error('Standings image renderer is unavailable.');
+            }
+
             imageResult = await generateStandingsImage({
                 settings,
                 guildId,
@@ -103,6 +115,7 @@ async function updateLiveStandings(
             message,
             liveData,
             settings,
+            guildId,
             groupKey
         });
     } catch (error) {
@@ -144,6 +157,7 @@ async function sendImageStandings({
             await message.edit({
                 content,
                 files: [attachment],
+                attachments: [],
                 embeds: [],
                 components: []
             });
@@ -225,14 +239,25 @@ async function sendTextStandings({
     message,
     liveData,
     settings,
+    guildId,
     groupKey
 }) {
-    const content = buildStandingsText({ settings, guildId: channel.guildId, groupKey });
+    const query = {
+        guildId,
+        tournamentId: settings._id,
+        isActive: true
+    };
+    if (groupKey) query.groupKey = groupKey;
+
+    const teams = await TournamentTeam.find(query)
+        .populate('teamId')
+        .lean();
+    const content = buildStandingsText({ settings, groupKey, teams });
 
     // ── TRY EDIT FIRST ──
     if (message) {
         try {
-            await message.edit({ content });
+            await message.edit({ content, attachments: [], embeds: [], components: [] });
             return true;
         } catch (editError) {
             console.warn(
@@ -274,20 +299,69 @@ async function sendTextStandings({
  *
  * Uses shared helpers. No duplicated sort/zone logic.
  */
-function buildStandingsText({ settings, guildId, groupKey }) {
-    // Note: We don't have teams here since this is a fallback.
-    // For a proper text fallback we'd need to query TournamentTeam
-    // again, but that's wasteful. Instead, show a simple message.
+function buildStandingsText({ settings, groupKey, teams = [] }) {
     const emoji = settings.emoji || '🏆';
     const name = settings.name || 'Tournament';
     const groupLabel = groupKey ? ` — Group ${groupKey}` : '';
+    const sorted = sortTeams(teams);
+    const updated = `Updated: <t:${Math.floor(Date.now() / 1000)}:R>`;
+    const header = [
+        `${emoji} **${name.toUpperCase()}${groupLabel} LIVE STANDINGS**`,
+        `Key: \`${settings.tournamentKey}\``
+    ];
 
-    return (
-        `${emoji} **${name.toUpperCase()}${groupLabel} LIVE STANDINGS**\n` +
-        `Key: \`${settings.tournamentKey}\`\n\n` +
-        `⚠️ Image generation unavailable. Use \`.standings\` for current table.\n` +
-        `Updated: <t:${Math.floor(Date.now() / 1000)}:R>`
-    );
+    if (!sorted.length) {
+        return [...header, '', 'No active teams yet.', updated].join('\n');
+    }
+
+    if (sorted.every(entry => !(entry.stats?.played || 0))) {
+        header.push('_Positions are provisional until a match is reported._');
+    }
+
+    const lines = [
+        ...header,
+        '',
+        '```text',
+        'Pos  Team              P  W  D  L  GF GA  GD Pts',
+        '---  ---------------- -- -- -- -- --- -- --- ---'
+    ];
+    let shown = 0;
+
+    for (let index = 0; index < sorted.length; index++) {
+        const entry = sorted[index];
+        const stats = entry.stats || {};
+        const teamName = compactName(entry.teamNameSnapshot || entry.teamId?.name || 'Unknown', 16);
+        const played = Number(stats.played) || 0;
+        const wins = Number(stats.wins) || 0;
+        const draws = Number(stats.draws) || 0;
+        const losses = Number(stats.losses) || 0;
+        const goalsFor = Number(stats.gf) || 0;
+        const goalsAgainst = Number(stats.ga) || 0;
+        const goalDifference = goalsFor - goalsAgainst;
+        const points = Number(stats.points) || 0;
+        const zone = getQualificationZone({ position: index + 1, settings, groupKey });
+        const zoneMark = zone === 'ucl' ? '★' : zone === 'qualification' ? '↑' : '';
+        const row = [
+            `${String(index + 1).padStart(2)}.`,
+            teamName.padEnd(16),
+            String(played).padStart(2),
+            String(wins).padStart(2),
+            String(draws).padStart(2),
+            String(losses).padStart(2),
+            String(goalsFor).padStart(3),
+            String(goalsAgainst).padStart(2),
+            String(goalDifference >= 0 ? `+${goalDifference}` : goalDifference).padStart(3),
+            `${String(points).padStart(3)}${zoneMark ? ` ${zoneMark}` : ''}`
+        ].join(' ');
+
+        if ([...lines, row, '```', updated].join('\n').length > 1850) break;
+        lines.push(row);
+        shown++;
+    }
+
+    if (shown < sorted.length) lines.push(`…and ${sorted.length - shown} more team(s)`);
+    lines.push('```', updated);
+    return lines.join('\n');
 }
 
 /*
