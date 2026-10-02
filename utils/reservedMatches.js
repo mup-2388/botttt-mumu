@@ -53,7 +53,13 @@ async function markReserved({ client = null, guild = null, fixture, until = null
     const updated = await Fixture.findOneAndUpdate(
         {
             _id: fixture._id,
-            status: { $in: ['Pending', 'Live', 'Cancelled'] }
+            $or: [
+                { status: { $in: ['Pending', 'Live', 'Cancelled'] } },
+                {
+                    scheduledAt: { $ne: null },
+                    status: { $nin: ['Played', 'Cancelled'] }
+                }
+            ]
         },
         {
             $set: {

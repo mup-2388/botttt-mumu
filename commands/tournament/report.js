@@ -283,12 +283,12 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
         guildId: guild.id,
         tournamentId: tournament._id,
         _id: fixtureId,
-        status: { $in: ['Pending', 'Live'] }
+        ...reportableFixtureStatusFilter()
     });
 
     if (!fixture) {
         return interaction.reply({
-            content: '❌ This fixture is no longer pending/live.',
+            content: '❌ This fixture is no longer available to report.',
             ephemeral: true
         });
     }
@@ -556,7 +556,8 @@ async function setFixtureReserved({ client, guild, tournament, matchNumber, time
         return { ok: false, error: `Match #${matchNumber} has already been played; it cannot be reserved.` };
     }
 
-    if (!['Pending', 'Live', 'Cancelled'].includes(fixture.status)) {
+    const isScheduledUnplayed = !!fixture.scheduledAt && !['Played', 'Cancelled'].includes(fixture.status);
+    if (!['Pending', 'Live', 'Cancelled'].includes(fixture.status) && !isScheduledUnplayed) {
         return { ok: false, error: `Match #${matchNumber} is ${String(fixture.status || 'not pending').toLowerCase()}, so it cannot be reserved.` };
     }
 
@@ -632,14 +633,26 @@ function buildReservationConfirmation(result, guildId) {
    PENDING FIXTURES
 ==================================================== */
 
+function reportableFixtureStatusFilter() {
+    return {
+        $or: [
+            { status: { $in: ['Pending', 'Live'] } },
+            {
+                scheduledAt: { $ne: null },
+                status: { $nin: ['Played', 'Cancelled'] }
+            }
+        ]
+    };
+}
+
 /**
- * Fetch pending/live fixtures for a tournament, optionally filtered by group.
+ * Fetch unplayed fixtures, including scheduled ones, optionally filtered by group.
  */
 async function getPendingFixtures(guildId, tournamentId, groupKey = null) {
     const query = {
         guildId,
         tournamentId,
-        status: { $in: ['Pending', 'Live'] }
+        ...reportableFixtureStatusFilter()
     };
 
     if (groupKey && groupKey !== 'all') {
@@ -647,7 +660,8 @@ async function getPendingFixtures(guildId, tournamentId, groupKey = null) {
     }
 
     return Fixture.find(query)
-        .sort({ scheduledAt: 1, matchNumber: 1, createdAt: 1 })
+        // Keep the report choices in match-number order, regardless of kickoff date.
+        .sort({ matchNumber: 1 })
         .limit(groupKey ? GROUP_FIXTURE_LIMIT : FIXTURE_LIMIT)
         .lean();
 }
@@ -666,7 +680,7 @@ function buildMenuEmbed(tournament, fixtures, selectedGroup = 'all', guildId = t
 
             return `#${f.matchNumber} — **${vsLine(f.homeTeam, f.awayTeam, guildId)}** (${f.roundLabel || prettyPhase(f.phase)})${badge}`;
         }).join('\n')
-        : 'No pending/live fixtures found.';
+        : 'No unplayed reportable fixtures found.';
 
     return new EmbedBuilder()
         .setColor(0xFEBE10)
@@ -753,11 +767,11 @@ async function buildMenuComponents(tournaments, selectedTournament, fixtures, gu
             new ActionRowBuilder().addComponents(
                 new StringSelectMenuBuilder()
                     .setCustomId('report_fixture')
-                    .setPlaceholder('Select pending fixture')
+                    .setPlaceholder('Select an unplayed fixture')
                     .addOptions(
                         fixtures.slice(0, 25).map(fixture => ({
                             label: truncate(`${isReserved(fixture) ? 'RESERVED · ' : ''}#${fixture.matchNumber} ${fixture.homeTeam} vs ${fixture.awayTeam}`, 100),
-                            description: truncate(fixture.roundLabel || prettyPhase(fixture.phase) || 'Pending fixture', 100),
+                            description: truncate(fixture.roundLabel || prettyPhase(fixture.phase) || 'Unplayed fixture', 100),
                             emoji: toDiscordEmoji(slotEmoji('vs', guildId)) || undefined,
                             value: String(fixture._id)
                         }))
@@ -785,7 +799,7 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
         guildId: guild.id,
         tournamentId: tournament._id,
         _id: fixtureId,
-        status: { $in: ['Pending', 'Live'] }
+        ...reportableFixtureStatusFilter()
     });
 
     if (!fixture) {
