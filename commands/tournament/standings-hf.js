@@ -32,9 +32,15 @@ const {
     getTournamentByKey
 } = require('../../utils/getTournament');
 
-const {
-    generateStandingsImage
-} = require('../../utils/generateStandingsImage');
+let generateStandingsImage = null;
+let imageRendererLoadError = null;
+
+try {
+    ({ generateStandingsImage } = require('../../utils/generateStandingsImage'));
+} catch (error) {
+    imageRendererLoadError = error;
+    console.warn('[standings-hf] Image renderer unavailable; text fallback enabled:', error.message);
+}
 
 const {
     sortTeams,
@@ -215,6 +221,10 @@ async function buildStandingsPayload({
     let imageResult = null;
 
     try {
+        if (!generateStandingsImage) {
+            throw imageRendererLoadError || new Error('Standings image renderer is unavailable.');
+        }
+
         imageResult = await generateStandingsImage({
             settings: tournament,
             guildId,
