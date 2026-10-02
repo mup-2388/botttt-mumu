@@ -108,61 +108,278 @@ function setFont(ctx, size, family) {
     ctx.font = `${Math.max(8, size)}px "${family}"`;
 }
 
-function fitFontSize(ctx, text, maxWidth, startSize, minSize, family) {
-    let size = startSize;
-    setFont(ctx, size, family);
-    while (size > minSize && ctx.measureText(text).width > maxWidth) {
-        size -= 1;
-        setFont(ctx, size, family);
-    }
-    return size;
+function hasNativeLetterSpacing(ctx) {
+    return Boolean(ctx && 'letterSpacing' in ctx);
 }
 
-function drawFittedText(ctx, text, { x, y, width, size, minSize = 10, family = 'Inter', color = '#F4FBFF', align = 'left', stroke = null, strokeWidth = 0 }) {
-    if (!text) return;
-    const fitted = fitFontSize(ctx, text, width, size, minSize, family);
+function measureTextWidth(ctx, text, letterSpacing = 0) {
+    const value = String(text ?? '');
+    if (!value) return 0;
+
+    if (!letterSpacing) return ctx.measureText(value).width;
+
+    if (hasNativeLetterSpacing(ctx)) {
+        const previous = ctx.letterSpacing;
+        ctx.letterSpacing = `${letterSpacing}px`;
+        const width = ctx.measureText(value).width;
+        ctx.letterSpacing = previous;
+        return width;
+    }
+
+    const glyphs = Array.from(value);
+    const glyphWidth = glyphs.reduce((width, glyph) => width + ctx.measureText(glyph).width, 0);
+    return glyphWidth + letterSpacing * Math.max(0, glyphs.length - 1);
+}
+
+function fitFontSize(ctx, text, maxWidth, startSize, minSize, family, letterSpacing = 0) {
+    if (!text || maxWidth <= 0) return startSize;
+
+    setFont(ctx, startSize, family);
+    const measuredWidth = measureTextWidth(ctx, text, letterSpacing);
+    if (measuredWidth <= maxWidth) return startSize;
+
+    let size = Math.max(minSize, startSize * maxWidth / measuredWidth);
+    setFont(ctx, size, family);
+    while (size > minSize && measureTextWidth(ctx, text, letterSpacing) > maxWidth) {
+        size = Math.max(minSize, size - 0.1);
+        setFont(ctx, size, family);
+    }
+    return Number(size.toFixed(2));
+}
+
+function drawTrackedText(ctx, text, x, y, align, letterSpacing = 0) {
+    if (!letterSpacing || hasNativeLetterSpacing(ctx)) {
+        if (hasNativeLetterSpacing(ctx)) {
+            const previous = ctx.letterSpacing;
+            ctx.letterSpacing = `${letterSpacing}px`;
+            ctx.fillText(text, x, y);
+            ctx.letterSpacing = previous;
+        } else {
+            ctx.fillText(text, x, y);
+        }
+        return;
+    }
+
+    const glyphs = Array.from(String(text));
+    const totalWidth = measureTextWidth(ctx, text, letterSpacing);
+    let cursorX = align === 'center' ? x - totalWidth / 2 : align === 'right' ? x - totalWidth : x;
+    const previousAlign = ctx.textAlign;
+    ctx.textAlign = 'left';
+
+    glyphs.forEach((glyph, index) => {
+        ctx.fillText(glyph, cursorX, y);
+        cursorX += ctx.measureText(glyph).width;
+        if (index < glyphs.length - 1) cursorX += letterSpacing;
+    });
+
+    ctx.textAlign = previousAlign;
+}
+
+function shadowColor(hex, opacity = 0.8) {
+    const match = String(hex || '').match(/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i);
+    if (!match) return 'rgba(0, 0, 0, 0)';
+    const [, red, green, blue] = match;
+    return `rgba(${parseInt(red, 16)}, ${parseInt(green, 16)}, ${parseInt(blue, 16)}, ${opacity})`;
+}
+
+function drawFittedText(ctx, text, {
+    x,
+    y,
+    width,
+    size,
+    minSize = 10,
+    family = 'Inter',
+    color = '#F5FCFF',
+    align = 'left',
+    letterSpacing = 0,
+    shadow = null
+}) {
+    if (!text) return size;
+
+    ctx.save();
+    const fitted = fitFontSize(ctx, text, width, size, minSize, family, letterSpacing);
     setFont(ctx, fitted, family);
     ctx.textAlign = align;
     ctx.textBaseline = 'alphabetic';
-    ctx.shadowColor = 'rgba(0, 7, 28, 0.85)';
-    ctx.shadowBlur = 3;
-    ctx.shadowOffsetY = 1;
-    if (stroke) {
-        ctx.lineJoin = 'round';
-        ctx.lineWidth = strokeWidth;
-        ctx.strokeStyle = stroke;
-        ctx.strokeText(text, x, y, width);
-    }
     ctx.fillStyle = color;
-    ctx.fillText(text, x, y, width);
-    ctx.shadowBlur = 0;
-    ctx.shadowOffsetY = 0;
-}
-
-function drawRoundedPanel(ctx, { x, y, width, height, radius = 12, fill, stroke = null, strokeWidth = 1 }) {
-    const r = Math.min(radius, width / 2, height / 2);
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + width - r, y);
-    ctx.quadraticCurveTo(x + width, y, x + width, y + r);
-    ctx.lineTo(x + width, y + height - r);
-    ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
-    ctx.lineTo(x + r, y + height);
-    ctx.quadraticCurveTo(x, y + height, x, y + height - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-    if (stroke) {
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = strokeWidth;
-        ctx.stroke();
-    }
+    ctx.shadowColor = shadow ? shadowColor(shadow.color, shadow.opacity ?? 0.8) : 'rgba(0, 0, 0, 0)';
+    ctx.shadowBlur = shadow?.blur ?? 0;
+    ctx.shadowOffsetX = shadow?.offsetX ?? 0;
+    ctx.shadowOffsetY = shadow?.offsetY ?? 0;
+    drawTrackedText(ctx, text, x, y, align, letterSpacing);
     ctx.restore();
+    return fitted;
 }
 
+function findTwoLineSplit(ctx, text, maxWidth, family, size, letterSpacing = 0) {
+    const value = String(text ?? '').trim();
+    if (!value) return null;
+    setFont(ctx, size, family);
+
+    const candidates = [];
+    const consider = (first, second) => {
+        const lineOne = String(first || '').trim();
+        const lineTwo = String(second || '').trim();
+        if (!lineOne || !lineTwo) return;
+        const widthOne = measureTextWidth(ctx, lineOne, letterSpacing);
+        const widthTwo = measureTextWidth(ctx, lineTwo, letterSpacing);
+        if (widthOne <= maxWidth && widthTwo <= maxWidth) {
+            candidates.push({
+                lines: [lineOne, lineTwo],
+                balance: Math.abs(widthOne - widthTwo),
+                widest: Math.max(widthOne, widthTwo)
+            });
+        }
+    };
+
+    const words = value.split(/\s+/);
+    for (let index = 1; index < words.length; index += 1) {
+        consider(words.slice(0, index).join(' '), words.slice(index).join(' '));
+    }
+    if (candidates.length) {
+        candidates.sort((a, b) => a.widest - b.widest || a.balance - b.balance);
+        return candidates[0].lines;
+    }
+
+    const glyphs = Array.from(value);
+    for (let index = 1; index < glyphs.length; index += 1) {
+        consider(glyphs.slice(0, index).join(''), glyphs.slice(index).join(''));
+    }
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => a.widest - b.widest || a.balance - b.balance);
+    return candidates[0].lines;
+}
+
+function centeredBaselines(ctx, family, size, top, bottom, lineHeight, count) {
+    setFont(ctx, size, family);
+    const metrics = ctx.measureText('Hg');
+    const ascent = metrics.actualBoundingBoxAscent || size * 0.8;
+    const descent = metrics.actualBoundingBoxDescent || size * 0.2;
+    const blockHeight = ascent + descent + (count - 1) * lineHeight;
+    const firstBaseline = top + Math.max(0, (bottom - top - blockHeight) / 2) + ascent;
+    return Array.from({ length: count }, (_, index) => firstBaseline + index * lineHeight);
+}
+
+function drawAdaptiveText(ctx, text, {
+    x,
+    top,
+    bottom,
+    baseline,
+    width,
+    size,
+    minSize,
+    fallbackMinSize,
+    lineHeight,
+    family,
+    color,
+    letterSpacing = 0,
+    shadow = null
+}) {
+    if (!text) return;
+
+    const fitted = fitFontSize(ctx, text, width, size, minSize, family, letterSpacing);
+    setFont(ctx, fitted, family);
+    if (measureTextWidth(ctx, text, letterSpacing) <= width) {
+        drawFittedText(ctx, text, {
+            x, y: baseline, width, size: fitted, minSize: fitted, family, color,
+            align: 'left', letterSpacing, shadow
+        });
+        return;
+    }
+
+    // First honor the requested minimum (25 px for names, 19 px for teams) and use two lines.
+    // Only exceptionally long text falls below that size, as a last resort to stay inside the safe zone.
+    let layout = null;
+    let chosenSize = minSize;
+    for (let candidateSize = minSize; candidateSize >= fallbackMinSize; candidateSize -= 0.5) {
+        layout = findTwoLineSplit(ctx, text, width, family, candidateSize, letterSpacing);
+        if (layout) {
+            chosenSize = candidateSize;
+            break;
+        }
+    }
+    if (!layout) return;
+
+    const baselines = centeredBaselines(ctx, family, chosenSize, top, bottom, lineHeight, 2);
+    layout.forEach((line, index) => drawFittedText(ctx, line, {
+        x,
+        y: baselines[index],
+        width,
+        size: chosenSize,
+        minSize: chosenSize,
+        family,
+        color,
+        align: 'left',
+        letterSpacing,
+        shadow
+    }));
+}
+
+function drawMatchDate(ctx, parts) {
+    const values = parts.filter(Boolean);
+    if (!values.length) return;
+
+    const text = values.join(' · ');
+    const x = 571;
+    const width = 388;
+    const top = 646;
+    const bottom = 755;
+    const family = 'Inter SemiBold';
+    const size = 25;
+    const minSize = 18;
+    const letterSpacing = 0.3;
+    const fitted = fitFontSize(ctx, text, width, size, minSize, family, letterSpacing);
+    setFont(ctx, fitted, family);
+
+    if (measureTextWidth(ctx, text, letterSpacing) <= width) {
+        drawFittedText(ctx, text, {
+            x,
+            y: 696,
+            width,
+            size: fitted,
+            minSize: fitted,
+            family,
+            color: '#F5FCFF',
+            align: 'left',
+            letterSpacing,
+            shadow: { color: '#06205C', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 }
+        });
+        return;
+    }
+
+    let lines = values.length > 1 ? values.slice(0, 2) : null;
+    let chosenSize = size;
+    let fits = false;
+    while (chosenSize >= minSize) {
+        setFont(ctx, chosenSize, family);
+        if (lines && lines.every(line => measureTextWidth(ctx, line, letterSpacing) <= width)) {
+            fits = true;
+            break;
+        }
+        lines = findTwoLineSplit(ctx, text, width, family, chosenSize, letterSpacing);
+        if (lines) {
+            fits = true;
+            break;
+        }
+        chosenSize -= 0.5;
+        lines = null;
+    }
+    if (!fits || !lines) return;
+
+    const baselines = centeredBaselines(ctx, family, chosenSize, top, bottom, 30, 2);
+    lines.forEach((line, index) => drawFittedText(ctx, line, {
+        x,
+        y: baselines[index],
+        width,
+        size: chosenSize,
+        minSize: chosenSize,
+        family,
+        color: '#F5FCFF',
+        align: 'left',
+        letterSpacing,
+        shadow: { color: '#06205C', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 }
+    }));
+}
 async function fetchAvatar(url) {
     if (!url) return null;
     try {
@@ -179,102 +396,79 @@ async function fetchAvatar(url) {
 }
 
 function drawPortrait(ctx, avatar, playerName) {
-    const cx = 0.57 * BASE_WIDTH;
-    const cy = 0.4185 * BASE_HEIGHT;
-    const radius = 0.086 * BASE_HEIGHT;
+    const cx = 715;
+    const cy = 525;
+    const diameter = 220;
+    const radius = diameter / 2;
+    const left = cx - radius;
+    const top = cy - radius;
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius + 8, 0, Math.PI * 2);
-    ctx.shadowColor = '#00CFFF';
-    ctx.shadowBlur = 24;
-    ctx.fillStyle = '#071944';
-    ctx.fill();
-    ctx.restore();
-
+    // A clean circular crop only; the original card artwork remains visible around it.
     ctx.save();
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     ctx.clip();
-    if (avatar) {
-        ctx.drawImage(avatar, cx - radius, cy - radius, radius * 2, radius * 2);
+    if (avatar && avatar.width > 0 && avatar.height > 0) {
+        const cropSize = Math.min(avatar.width, avatar.height);
+        const sourceX = (avatar.width - cropSize) / 2;
+        const sourceY = (avatar.height - cropSize) / 2;
+        ctx.drawImage(avatar, sourceX, sourceY, cropSize, cropSize, left, top, diameter, diameter);
     } else {
-        const gradient = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
+        const gradient = ctx.createLinearGradient(left, top, left + diameter, top + diameter);
         gradient.addColorStop(0, '#0C83E8');
         gradient.addColorStop(1, '#061943');
         ctx.fillStyle = gradient;
-        ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+        ctx.fillRect(left, top, diameter, diameter);
         const initials = cleanText(playerName, 48).split(/\s+/).map(part => part[0] || '').join('').slice(0, 2).toUpperCase();
         setFont(ctx, 48, 'Oswald');
-        ctx.fillStyle = '#EAFBFF';
+        ctx.fillStyle = '#F5FCFF';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(initials || '?', cx, cy);
     }
     ctx.restore();
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
-    ctx.strokeStyle = '#F4FBFF';
-    ctx.lineWidth = 5;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius + 10, 0, Math.PI * 2);
-    ctx.strokeStyle = '#00CFFF';
-    ctx.lineWidth = 5;
-    ctx.shadowColor = '#00CFFF';
-    ctx.shadowBlur = 12;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
 }
 
 function drawStats(ctx, stats) {
-    const left = 0.225 * BASE_WIDTH;
-    const right = 0.775 * BASE_WIDTH;
     const count = stats.length;
-    const columnWidth = (right - left) / count;
+    if (!count) return;
+
+    // For three stats these resolve to the requested centers: 420, 627 and 834 px.
+    const centerSpacing = 207;
+    const groupCenter = 627;
+    const firstCenter = groupCenter - ((count - 1) * centerSpacing) / 2;
+    const maxTextWidth = count === 1 ? 640 : 180;
+    const valueShadow = { color: '#061B55', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 };
 
     stats.forEach((stat, index) => {
-        const centerX = left + columnWidth * (index + 0.5);
+        const centerX = firstCenter + index * centerSpacing;
         drawFittedText(ctx, stat.value, {
             x: centerX,
-            y: 0.752 * BASE_HEIGHT,
-            width: columnWidth * 0.82,
-            size: 46,
-            minSize: 26,
+            y: 918,
+            width: maxTextWidth,
+            size: 25,
+            minSize: 18,
             family: 'Oswald',
-            color: '#F4FBFF',
+            color: '#F5FCFF',
             align: 'center',
-            stroke: '#061B43',
-            strokeWidth: 2
+            letterSpacing: 0.2,
+            shadow: valueShadow
         });
         if (stat.label) {
             drawFittedText(ctx, stat.label, {
                 x: centerX,
-                y: 0.777 * BASE_HEIGHT,
-                width: columnWidth * 0.92,
-                size: 15,
-                minSize: 10,
+                y: 947,
+                width: maxTextWidth,
+                size: 17,
+                minSize: 12,
                 family: 'Inter SemiBold',
-                color: '#72E8FF',
-                align: 'center'
+                color: '#73EFFF',
+                align: 'center',
+                letterSpacing: 0.2,
+                shadow: valueShadow
             });
         }
     });
-
-    if (count > 1) {
-        ctx.save();
-        ctx.strokeStyle = 'rgba(93, 223, 255, 0.7)';
-        ctx.lineWidth = 1.25;
-        for (let index = 1; index < count; index += 1) {
-            const x = left + columnWidth * index;
-            ctx.beginPath();
-            ctx.moveTo(x, 0.735 * BASE_HEIGHT);
-            ctx.lineTo(x, 0.78 * BASE_HEIGHT);
-            ctx.stroke();
-        }
-        ctx.restore();
-    }
 }
 
 async function renderPotdCard({ playerName, teamName, avatarUrl, stats, matchLabel = '', dateText = '' }) {
@@ -303,151 +497,42 @@ async function renderPotdCard({ playerName, teamName, avatarUrl, stats, matchLab
     ctx.save();
     ctx.scale(scaleX, scaleY);
 
-    // Keep the supplied card art untouched; overlays follow its portrait, info and stat zones.
+    // The source template is the untouched background; only user data is overlaid in its safe zones.
     drawPortrait(ctx, await fetchAvatar(avatarUrl), name);
-
-    const leftX = 0.225 * BASE_WIDTH;
-    const leftWidth = 0.17 * BASE_WIDTH;
-    drawFittedText(ctx, 'PLAYER OF THE DAY', {
-        x: leftX,
-        y: 0.484 * BASE_HEIGHT,
-        width: leftWidth,
-        size: 16,
-        minSize: 11,
-        family: 'Inter SemiBold',
-        color: '#8AF2FF',
-        align: 'left'
-    });
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(leftX, 0.502 * BASE_HEIGHT);
-    ctx.lineTo(leftX + leftWidth * 0.9, 0.502 * BASE_HEIGHT);
-    ctx.strokeStyle = 'rgba(36, 220, 255, 0.9)';
-    ctx.lineWidth = 2.5;
-    ctx.shadowColor = '#00CFFF';
-    ctx.shadowBlur = 6;
-    ctx.stroke();
-    ctx.restore();
-
-    drawFittedText(ctx, name.toUpperCase(), {
-        x: leftX,
-        y: 0.542 * BASE_HEIGHT,
-        width: leftWidth,
-        size: 36,
-        minSize: 20,
+    drawAdaptiveText(ctx, name.toUpperCase(), {
+        x: 282,
+        top: 637,
+        bottom: 696,
+        baseline: 675,
+        width: 203,
+        size: 31,
+        minSize: 25,
+        fallbackMinSize: 12,
+        lineHeight: 29,
         family: 'Oswald',
-        color: '#F4FBFF',
-        align: 'left',
-        stroke: '#06245D',
-        strokeWidth: 2
+        color: '#F5FCFF',
+        letterSpacing: 0,
+        shadow: { color: '#071A50', offsetX: 0, offsetY: 2, blur: 0, opacity: 0.8 }
     });
     if (team) {
-        setFont(ctx, 15, 'Inter SemiBold');
-        const teamPillWidth = Math.min(leftWidth, Math.max(74, ctx.measureText(team).width + 20));
-        drawRoundedPanel(ctx, {
-            x: leftX - 5,
-            y: 0.563 * BASE_HEIGHT,
-            width: teamPillWidth,
-            height: 0.036 * BASE_HEIGHT,
-            radius: 12,
-            fill: 'rgba(3, 20, 55, 0.62)',
-            stroke: 'rgba(92, 229, 255, 0.48)',
-            strokeWidth: 1
-        });
-        drawFittedText(ctx, team, {
-            x: leftX + 5,
-            y: 0.589 * BASE_HEIGHT,
-            width: leftWidth - 10,
-            size: 15,
-            minSize: 10,
+        drawAdaptiveText(ctx, team, {
+            x: 282,
+            top: 696,
+            bottom: 755,
+            baseline: 736,
+            width: 203,
+            size: 23,
+            minSize: 19,
+            fallbackMinSize: 12,
+            lineHeight: 27,
             family: 'Inter SemiBold',
-            color: '#8AF2FF',
-            align: 'left'
+            color: '#73EFFF',
+            letterSpacing: 0.2,
+            shadow: { color: '#071A50', offsetX: 0, offsetY: 1, blur: 0, opacity: 0.8 }
         });
     }
 
-    const matchDate = [match || 'MATCH DAY', date].filter(Boolean);
-    if (matchDate.length) {
-        const centerX = 0.61 * BASE_WIDTH;
-        const boxWidth = 0.31 * BASE_WIDTH;
-        const boxHeight = 0.043 * BASE_HEIGHT;
-        const boxX = centerX - boxWidth / 2;
-        const boxY = 0.55 * BASE_HEIGHT;
-        drawRoundedPanel(ctx, {
-            x: boxX,
-            y: boxY,
-            width: boxWidth,
-            height: boxHeight,
-            radius: 18,
-            fill: 'rgba(3, 18, 50, 0.52)',
-            stroke: 'rgba(92, 229, 255, 0.52)',
-            strokeWidth: 1
-        });
-
-        if (match && date) {
-            drawFittedText(ctx, match, {
-                x: boxX + boxWidth * 0.25,
-                y: boxY + boxHeight * 0.67,
-                width: boxWidth * 0.43,
-                size: 15,
-                minSize: 10,
-                family: 'Inter SemiBold',
-                color: '#F4FBFF',
-                align: 'center'
-            });
-            ctx.save();
-            ctx.beginPath();
-            ctx.moveTo(centerX, boxY + 10);
-            ctx.lineTo(centerX, boxY + boxHeight - 10);
-            ctx.strokeStyle = 'rgba(92, 229, 255, 0.8)';
-            ctx.lineWidth = 1.25;
-            ctx.stroke();
-            ctx.restore();
-            drawFittedText(ctx, date, {
-                x: boxX + boxWidth * 0.75,
-                y: boxY + boxHeight * 0.67,
-                width: boxWidth * 0.43,
-                size: 15,
-                minSize: 10,
-                family: 'Inter SemiBold',
-                color: '#8AF2FF',
-                align: 'center'
-            });
-        } else {
-            drawFittedText(ctx, matchDate[0], {
-                x: centerX,
-                y: boxY + boxHeight * 0.67,
-                width: boxWidth * 0.9,
-                size: 15,
-                minSize: 10,
-                family: 'Inter SemiBold',
-                color: '#F4FBFF',
-                align: 'center'
-            });
-        }
-    }
-
-    drawRoundedPanel(ctx, {
-        x: 0.205 * BASE_WIDTH,
-        y: 0.684 * BASE_HEIGHT,
-        width: 0.59 * BASE_WIDTH,
-        height: 0.104 * BASE_HEIGHT,
-        radius: 18,
-        fill: 'rgba(3, 16, 48, 0.5)',
-        stroke: 'rgba(92, 229, 255, 0.62)',
-        strokeWidth: 1.25
-    });
-    drawFittedText(ctx, 'MATCH-DAY PERFORMANCE', {
-        x: BASE_WIDTH / 2,
-        y: 0.714 * BASE_HEIGHT,
-        width: 0.52 * BASE_WIDTH,
-        size: 15,
-        minSize: 10,
-        family: 'Inter SemiBold',
-        color: '#8AF2FF',
-        align: 'center'
-    });
+    drawMatchDate(ctx, [match, date]);
     drawStats(ctx, cardStats);
     ctx.restore();
 
