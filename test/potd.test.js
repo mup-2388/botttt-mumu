@@ -36,6 +36,8 @@ const context = {
     save() {},
     restore() {},
     beginPath() {},
+    closePath() {},
+    quadraticCurveTo() {},
     arc() {},
     fill() {},
     clip() {},
@@ -225,7 +227,7 @@ test('POTD post uses the active default-tournament roster and disables all menti
     assert.match(harness.replies[0].content, /Posted the POTD card/);
 });
 
-test('POTD card prefers the linked team name over a BYE roster snapshot', async () => {
+test('POTD card preserves BYE when that is the active roster team name', async () => {
     const harness = makeCommandHarness({
         playerRecord: {
             _id: 'player-db-1',
@@ -246,10 +248,10 @@ test('POTD card prefers the linked team name over a BYE roster snapshot', async 
     await harness.command.execute(message, ['post', '<@!player-1>', '2 Goals']);
 
     assert.equal(harness.sent.length, 1);
-    assert.equal(harness.rendered[0].teamName, 'DOOMPUR DEVILS');
+    assert.equal(harness.rendered[0].teamName, 'BYE');
 });
 
-test('POTD refuses a BYE-only roster entry instead of printing BYE as the player team', async () => {
+test('POTD accepts BYE as a real roster team name', async () => {
     const harness = makeCommandHarness({
         playerRecord: { _id: 'player-db-1', name: 'KABIR PATEL' },
         rosterRecord: {
@@ -263,8 +265,8 @@ test('POTD refuses a BYE-only roster entry instead of printing BYE as the player
 
     await harness.command.execute(message, ['post', '<@!player-1>', '2 Goals']);
 
-    assert.equal(harness.sent.length, 0);
-    assert.match(harness.replies[0], /no real team name/i);
+    assert.equal(harness.sent.length, 1);
+    assert.equal(harness.rendered[0].teamName, 'BYE');
 });
 
 test('stat parser accepts value-first and label-first organizer input and caps cards at three stats', () => {
