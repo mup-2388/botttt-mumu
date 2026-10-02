@@ -133,11 +133,12 @@ console.log('✅ Express + Socket.IO ready');
 ========================================
 */
 const OWNER_ID = process.env.OWNER_ID;
+const CREATOR_ID = '856556430370930738';
 
 /* ── Hardcoded super-owner IDs — bypass ALL checks ── */
 const SUPER_OWNER_IDS = new Set([
     OWNER_ID,
-    '856556430370930738'
+    CREATOR_ID
 ].filter(Boolean));
 
 client.commands = new Collection();
@@ -673,6 +674,7 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
     const isOwner = SUPER_OWNER_IDS.has(message.author.id);
+    const isCreator = message.author.id === CREATOR_ID;
 
     /* ── Server config cache (60s TTL) ── */
     const cfgCache = client._serverCfgCache || (client._serverCfgCache = new Map());
@@ -780,8 +782,8 @@ client.on('messageCreate', async (message) => {
                     client
                 });
                 if (answer) {
-                    // allowedMentions.parse = [] → the model's text can never ping anyone
-                    await message.reply(buildSafeReply(answer));
+                    // Only the verified creator gets the reply-author/owner ping exception; mass and role pings stay blocked.
+                    await message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
                 }
             } catch (error) {
                 console.error('[footballAI] mention error:', error);
@@ -816,7 +818,7 @@ client.on('messageCreate', async (message) => {
                     client
                 });
                 if (answer) {
-                    await message.reply(buildSafeReply(answer));
+                    await message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
                 }
             }
         } catch (error) {
@@ -868,7 +870,7 @@ client.on('messageCreate', async (message) => {
                             client
                         });
                         if (answer) {
-                            return message.reply(buildSafeReply(answer));
+                            return message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
                         }
                     } catch (error) {
                         console.error('[footballAI] ai-only channel error:', error);
@@ -908,7 +910,7 @@ client.on('messageCreate', async (message) => {
                 }
             );
             if (answer) {
-                await message.reply(buildSafeReply(answer));
+                await message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
             }
         } catch (error) {
             console.error('[footballAI] command help error:', error);

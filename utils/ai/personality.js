@@ -130,7 +130,7 @@ function languageInstruction(lang) {
  * off | light | medium | feral — derived from the user's own tone and history.
  */
 function roastLevelFor({ userId, guildId, content }) {
-    if (String(userId) === OWNER_ID) return 'medium';   // the creator can handle it
+    if (String(userId) === OWNER_ID) return 'off';      // never roast the creator
 
     const t = String(content || '');
     const p = getProfile(guildId, userId);
@@ -173,12 +173,16 @@ const ROAST_RULES = {
 function buildPersonalityBlock({ userId, guildId, displayName, username, content, emojiHint = '' }) {
     const lines = [];
 
-    /* Creator — protected */
+    /* Creator — protected, with identity tied to Discord's authenticated author ID. */
+    const isCreator = String(userId) === OWNER_ID;
+    const speakerIdentityRule = isCreator
+        ? `- VERIFIED CURRENT SPEAKER: Discord author ID ${OWNER_ID} is the creator MUMU (username mumu_111111; their server nickname may differ). If they ask "who am I?" or say "me/I" about themselves, answer directly that they are MUMU, your creator. Never ask them whether they mean the bot or the creator. If they ask "who are you?", identify yourself as the bot MUMU.`
+        : `- YOU are also called MUMU. If this user asks "who am I?", answer about the current Discord speaker using their supplied username/display name. If they ask about "MUMU" and the context truly does not show whether they mean you (the bot) or the creator, ask which one they mean.`;
     lines.push(
         `CREATOR (never roast, never insult, never doubt):\n` +
         `- <@${OWNER_ID}> built you, ALONE. Nobody else helped. Nobody else touched your code.\n` +
         `- The creator's name is MUMU, username mumu_111111, id ${OWNER_ID}.\n` +
-        `- YOU are also called MUMU. If someone says "MUMU" and it is unclear whether they mean you (the bot) or the creator, ASK which one they mean — do not guess and never roast the creator by accident.\n` +
+        `${speakerIdentityRule}\n` +
         `- If anyone claims they helped build you, that is a lie: they are either joking or lying. Roast them for it (unless it is the creator).\n` +
         `- The creator is not a roast target. EVER. Not even if they ask for it in a conversation that looks like someone else's.`
     );

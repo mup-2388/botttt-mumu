@@ -4,12 +4,11 @@
  * The single place where AI output is made safe to send to Discord.
  *
  * Rules (in order of importance):
- *   1. Discord itself must be told not to ping (allowedMentions) — the model's
- *      text can never override that.
+ *   1. Discord receives parse:[]; only explicitly approved user/reply pings can notify.
  *   2. AI text is sanitised: @everyone / @here are neutralised, role pings are
- *      removed, and USER pings are capped to ONE per message.
- *   3. Attempts to talk the model into a mass ping are detected and roasted,
- *      never obeyed — and they are logged for the owner.
+ *      removed, and user pings are capped to ONE per reply.
+ *   3. The creator can be pinged only when trusted caller context confirms the
+ *      creator is the person being replied to. Mass-ping bait is still rejected.
  */
 
 const OWNER_ID = '856556430370930738';
@@ -96,7 +95,7 @@ const EVERYONE_LIKE = /@\s?(everyone|here)\b/gi;
  * Returns { text, allowedUserIds } where allowedUserIds is the list of users
  * the caller may actually ping.
  */
-function sanitizeAIText(raw, { maxUserPings = 1 } = {}) {
+function sanitizeAIText(raw, { maxUserPings = 1, allowOwnerPing = false } = {}) {
     let text = String(raw ?? '');
 
     // 1. @everyone / @here — always broken (zero-width space after the @)
@@ -105,11 +104,37 @@ function sanitizeAIText(raw, { maxUserPings = 1 } = {}) {
     // 2. Role pings — removed entirely (the bot pings roles only from code)
     text = text.replace(ROLE_MENTION, '@\u200Brole');
 
-    // 3. User pings — capped (creator mentions always survive)
-    const allowed = [];
+    // 3. User pings — capped. The creator's tag is only allowed to notify them
+    // when trusted caller context confirms the creator is the person being replied to.
+    const pingLimit = Math.max(0, Math.floor(Number(maxUserPings) || 0));
+    const hasOwnerMention = [...text.matchAll(/<@!?(\d+)>/g)]
+        .some(([, id]) => String(id) === OWNER_ID);
+    const ownerCanPing = allowOwnerPing === true && pingLimit > 0 && hasOwnerMention;
+    const otherPingLimit = allowOwnerPing === true
+        ? 0 // a creator reply already pings the creator; never add a second recipient
+        : Math.max(0, pingLimit - (ownerCanPing ? 1 : 0));
+    const allowed = ownerCanPing ? [OWNER_ID] : [];
+    const seen = new Set();
+    let ownerTagKept = false;
+    let otherPingsKept = 0;
+
     text = text.replace(USER_MENTION, (match, id) => {
-        if (String(id) === OWNER_ID) return match;              // the creator is fine
-        if (allowed.length < maxUserPings && allowed.push(String(id))) return match;
+        const userId = String(id);
+        if (userId === OWNER_ID) {
+            if (!ownerCanPing) return match; // visible reference, but not a notification
+            if (!ownerTagKept) {
+                ownerTagKept = true;
+                return match;
+            }
+            return '@MUMU'; // avoid repeating the creator ping in the same reply
+        }
+
+        if (!seen.has(userId) && otherPingsKept < otherPingLimit) {
+            seen.add(userId);
+            otherPingsKept += 1;
+            allowed.push(userId);
+            return match;
+        }
         return `@\u200B${id}`;
     });
 
@@ -120,26 +145,38 @@ function sanitizeAIText(raw, { maxUserPings = 1 } = {}) {
 }
 
 /** Discord payload helper — parse:[] means "no implicit pings, ever". */
-function allowedMentionsFor({ users = [], roles = [] } = {}) {
+function allowedMentionsFor({ users = [], roles = [], repliedUser = false } = {}) {
     return {
         parse: [],
         users: [...new Set(users.filter(Boolean))],
-        roles: [...new Set(roles.filter(Boolean))]
+        roles: [...new Set(roles.filter(Boolean))],
+        repliedUser: repliedUser === true
     };
 }
 
 /**
  * Sanitise + build the reply payload in one go.
- * `pingUserIds` / `pingRoleIds` are the ids CODE decided to ping (never the model).
+ * `pingUserIds` / `pingRoleIds` are explicit code-approved targets; model tags are capped,
+ * and the creator/reply-author exception is enabled only by trusted caller context.
  */
-function buildSafeReply(rawText, { pingUserIds = [], pingRoleIds = [], maxUserPings = 1 } = {}) {
-    const { text, allowedUserIds } = sanitizeAIText(rawText, { maxUserPings });
+function buildSafeReply(rawText, {
+    pingUserIds = [],
+    pingRoleIds = [],
+    maxUserPings = 1,
+    allowOwnerPing = false,
+    pingReplyUser = false
+} = {}) {
+    const { text, allowedUserIds } = sanitizeAIText(rawText, { maxUserPings, allowOwnerPing });
+    const approvedUsers = [...pingUserIds, ...allowedUserIds];
 
     return {
         content: text,
         allowedMentions: allowedMentionsFor({
-            users: [...pingUserIds, ...allowedUserIds],
-            roles: pingRoleIds
+            users: approvedUsers,
+            roles: pingRoleIds,
+            // If the content already has the creator mention, let that be the one ping.
+            // Otherwise an explicitly trusted reply can ping its author via the reply reference.
+            repliedUser: pingReplyUser && !approvedUsers.includes(OWNER_ID)
         })
     };
 }
