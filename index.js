@@ -10,6 +10,7 @@ console.log('✅ mongoose loaded');
 const {
     Client,
     GatewayIntentBits,
+    Partials,
     Collection,
     EmbedBuilder,
     PermissionFlagsBits
@@ -30,6 +31,8 @@ const path = require('path');
 const { getGuildPrefix, DEFAULT_PREFIX } = require('./utils/prefixManager');
 const { sanitizeMentions } = require('./utils/stringHelpers');
 const { buildSafeReply } = require('./utils/aiGuard');
+const { fitSlashCommandsToLimit } = require('./utils/slashCommandLimit');
+const selfRoleService = require('./utils/selfRoles');
 console.log('✅ utils loaded');
 
 process.setMaxListeners(20);
@@ -53,7 +56,14 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildPresences
+        GatewayIntentBits.GuildPresences,
+        GatewayIntentBits.GuildMessageReactions
+    ],
+    partials: [
+        Partials.Message,
+        Partials.Channel,
+        Partials.Reaction,
+        Partials.User
     ]
 });
 
@@ -230,18 +240,24 @@ async function registerSlashCommands() {
         if (command.data && typeof command.data.toJSON === 'function') {
             slashCommands.push({
                 name: command.name,
+                hidden: command.hidden === true,
                 json: command.data.toJSON()
             });
         }
     }
 
+    const { selected: registeredCommands, omitted: omittedCommands } = fitSlashCommandsToLimit(slashCommands);
+    if (omittedCommands.length) {
+        console.warn(`⚠️ Discord allows at most 100 global chat-input commands. Visible commands are prioritized; omitted commands remain prefix-accessible where supported: ${omittedCommands.map(command => command.name).join(', ')}`);
+    }
+
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
     try {
-        console.log(`🔄 Validating ${slashCommands.length} slash command(s)...`);
+        console.log(`🔄 Validating ${registeredCommands.length} slash command(s)...`);
 
-        for (let i = 0; i < slashCommands.length; i++) {
-            const cmd = slashCommands[i];
+        for (let i = 0; i < registeredCommands.length; i++) {
+            const cmd = registeredCommands[i];
             const opts = cmd.json.options || [];
 
             let foundOptional = false;
@@ -270,11 +286,11 @@ async function registerSlashCommands() {
             }
         }
 
-        console.log(`🔄 Registering ${slashCommands.length} global slash command(s)...`);
+        console.log(`🔄 Registering ${registeredCommands.length} global slash command(s)...`);
 
         await rest.put(
             Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: slashCommands.map(c => c.json) }
+            { body: registeredCommands.map(c => c.json) }
         );
 
         console.log('✅ Global slash commands registered.');
@@ -290,7 +306,7 @@ async function registerSlashCommands() {
             try {
                 await rest.put(
                     Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId),
-                    { body: slashCommands.map(c => c.json) }
+                    { body: registeredCommands.map(c => c.json) }
                 );
                 console.log(`✅ Guild slash commands registered for ${guildId}`);
             } catch (guildError) {
@@ -302,8 +318,8 @@ async function registerSlashCommands() {
 
         console.log('🔍 Trying individual command registration to find the bad one...');
 
-        for (let i = 0; i < slashCommands.length; i++) {
-            const cmd = slashCommands[i];
+        for (let i = 0; i < registeredCommands.length; i++) {
+            const cmd = registeredCommands[i];
 
             try {
                 await rest.post(
@@ -341,6 +357,12 @@ client.once(Events.ClientReady, async () => {
     }
 
     console.log(`🧹 Match cache cleaned. Monitoring ${matchKeys.length} active/recent matches.`);
+
+    try {
+        await selfRoleService.startExpiryWorker(client);
+    } catch (error) {
+        console.error('❌ Failed to start self-role expiry worker:', error);
+    }
 
     try {
         const { checkGoals } = require('./utils/goalAlerts');
@@ -481,6 +503,13 @@ async function runCommand(command, input, args, isSlash) {
 ========================================
 */
 client.on('interactionCreate', async (interaction) => {
+    /* ── Persistent self-role components ── */
+    if ((interaction.isButton?.() || interaction.isStringSelectMenu?.()) &&
+        String(interaction.customId || '').startsWith('sr:')) {
+        await selfRoleService.handleComponentInteraction(interaction);
+        return;
+    }
+
     /* ── Slash-command autocomplete ── */
     if (interaction.isAutocomplete()) {
         try {
@@ -510,7 +539,22 @@ client.on('interactionCreate', async (interaction) => {
 
 /*
 ========================================
-11. MEMBER EVENTS
+11. SELF-ROLE REACTION EVENTS
+========================================
+*/
+client.on('messageReactionAdd', async (reaction, user) => {
+    if (user?.bot) return;
+    await selfRoleService.handleMessageReaction(reaction, user, true, client);
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+    if (user?.bot) return;
+    await selfRoleService.handleMessageReaction(reaction, user, false, client);
+});
+
+/*
+========================================
+12. MEMBER EVENTS
 ========================================
 */
 client.on('guildMemberAdd', async (member) => {
