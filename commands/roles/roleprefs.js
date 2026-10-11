@@ -14,7 +14,7 @@ module.exports = {
 
     async execute(message) {
         if (!message.guild) return;
-        return message.reply('Use `/roleprefs` for a private view, or click **Choose / update roles** on a published self-role panel.');
+        return message.reply('Use `/roleprefs` for a private view. To change a role, react with its emoji on the published reaction-role panel.');
     },
 
     async slashExecute(interaction) {

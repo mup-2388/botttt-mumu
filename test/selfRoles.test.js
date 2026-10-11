@@ -21,10 +21,11 @@ function requireWithMocks(modulePath, mocks) {
 }
 
 class FakeBuilder {
-    setColor() { return this; }
-    setTitle() { return this; }
-    setDescription() { return this; }
-    setFooter() { return this; }
+    setColor(value) { this.color = value; return this; }
+    setTitle(value) { this.title = value; return this; }
+    setDescription(value) { this.description = value; return this; }
+    setFooter(value) { this.footer = value; return this; }
+    addFields(fields) { this.fields = fields; return this; }
     setCustomId() { return this; }
     setLabel() { return this; }
     setStyle() { return this; }
@@ -128,7 +129,7 @@ function safeRole(id, position = 1, permissions = []) {
     };
 }
 
-test('component panel validation requires distinct reaction emojis only when reaction mode is enabled', () => {
+test('reaction panel validation requires a unique emoji for every option', () => {
     const service = loadSelfRoles();
     const panel = {
         groups: [{
@@ -143,12 +144,74 @@ test('component panel validation requires distinct reaction emojis only when rea
         }]
     };
 
-    assert.doesNotThrow(() => service.validatePanelDefinition(panel, 'components'));
     assert.throws(() => service.validatePanelDefinition(panel, 'reactions'), /Add an emoji/);
 
     panel.groups[0].options[0].emoji = '🔔';
     panel.groups[0].options[1].emoji = '🔔';
-    assert.throws(() => service.validatePanelDefinition(panel, 'both'), /unique emoji/);
+    assert.throws(() => service.validatePanelDefinition(panel, 'reactions'), /unique emoji/);
+
+    panel.groups[0].options = Array.from({ length: 21 }, (_, index) => ({
+        roleId: `role-${index}`, label: `Role ${index}`, emoji: `emoji-${index}`
+    }));
+    assert.throws(() => service.validatePanelDefinition(panel, 'reactions'), /at most 20/);
+});
+
+test('published reaction embeds preserve admin-written copy and contain no interactive components', () => {
+    const service = loadSelfRoles();
+    const panel = {
+        title: 'Choose **your** roles',
+        description: 'React below to opt in.\\nNo pings: @everyone.',
+        color: 0,
+        groups: [{
+            name: 'Interests',
+            options: [{
+                roleId: 'role-1', label: 'Gaming', emoji: '🎮',
+                description: 'Updates for **games** and tournaments.'
+            }]
+        }]
+    };
+    const payload = service.publicPanelPayload(panel);
+
+    assert.deepEqual(payload.components, []);
+    assert.deepEqual(payload.allowedMentions, { parse: [], users: [], roles: [] });
+    assert.equal(payload.embeds[0].title, panel.title);
+    assert.equal(payload.embeds[0].description, panel.description);
+    assert.equal(payload.embeds[0].color, 0);
+    assert.equal(payload.embeds[1].fields[0].value, 'Updates for **games** and tournaments.');
+    assert.equal(payload.embeds[1].fields[0].name, 'Interests • 🎮 Gaming');
+});
+
+test('reaction emoji parsing rejects plain text and accepts Unicode or server custom emoji', () => {
+    const service = loadSelfRoles();
+    const emoji = { id: '123456789012345678', toString: () => '<:community:123456789012345678>' };
+    const guild = { emojis: { cache: new Map([[emoji.id, emoji]]) } };
+
+    assert.equal(service.getEmojiDescriptor('⭐', guild).key, '⭐');
+    assert.equal(service.getEmojiDescriptor('<:community:123456789012345678>', guild).key, emoji.id);
+    assert.throws(() => service.getEmojiDescriptor('not-an-emoji', guild), /one complete Unicode emoji/);
+});
+
+test('role preferences remain informational and direct members to panel reactions', async () => {
+    const panels = [{
+        key: 'community', title: 'Community', status: 'published',
+        groups: [{ name: 'Interests', options: [{ roleId: 'role-1', label: 'Gaming' }] }]
+    }];
+    const panelModel = {
+        find: () => ({
+            sort() { return this; },
+            limit() { return this; },
+            lean: async () => panels
+        })
+    };
+    const service = loadSelfRoles({ panelModel });
+    const payload = await service.buildRolePrefsPayload(
+        { id: 'guild-1' },
+        { roles: { cache: new Map([['role-1', {}]]) } }
+    );
+
+    assert.deepEqual(payload.components, []);
+    assert.match(payload.content, /react with the matching emoji/i);
+    assert.match(payload.embeds[0].description, /Gaming/);
 });
 
 test('self-role assignment writes a timed grant and adds the role to the member', async () => {
@@ -376,7 +439,7 @@ test('clone creates a separate draft copy and preserves the advanced panel rules
     assert.equal(saved[0].key, 'copy');
     assert.equal(saved[0].title, 'Copied panel');
     assert.equal(saved[0].status, 'draft');
-    assert.equal(saved[0].mode, 'components');
+    assert.equal(saved[0].mode, 'reactions');
     assert.equal(saved[0].messageId, '');
     assert.equal(saved[0].groups[0].options[0].durationMs, 86_400_000);
     assert.deepEqual(saved[0].groups[0].options[0].bundleRoleIds, ['666666666666666666']);

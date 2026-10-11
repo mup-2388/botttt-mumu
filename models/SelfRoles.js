@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const selfRoleOptionSchema = new mongoose.Schema({
     roleId: { type: String, required: true },
     label: { type: String, required: true, trim: true, maxlength: 100 },
-    description: { type: String, default: '', trim: true, maxlength: 100 },
+    description: { type: String, default: '', trim: true, maxlength: 500 },
     emoji: { type: String, default: '' },
     bundleRoleIds: { type: [String], default: [] },
     requiredRoleIds: { type: [String], default: [] },
@@ -30,7 +30,7 @@ const selfRolePanelSchema = new mongoose.Schema({
     description: { type: String, default: '', trim: true, maxlength: 1500 },
     color: { type: Number, default: 0x5865F2 },
     status: { type: String, enum: ['draft', 'published', 'paused', 'deleted'], default: 'draft' },
-    mode: { type: String, enum: ['components', 'reactions', 'both'], default: 'components' },
+    mode: { type: String, enum: ['components', 'reactions', 'both'], default: 'reactions' },
     channelId: { type: String, default: '' },
     messageId: { type: String, default: '', index: true },
     auditChannelId: { type: String, default: '' },

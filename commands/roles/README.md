@@ -1,36 +1,31 @@
 # Self-role panels
 
-Self-role panels live in the `roles` command category and are separate from tournament role tools. Configuration is done in Discord; there is no web dashboard.
+Self-role panels live in the non-tournament `roles` command category. Setup and management happen in Discord; there is no web dashboard. Public panels use **emoji reactions only**—they do not publish buttons or dropdowns.
 
-## Quick setup
+## Guided setup
 
-1. Ensure the bot has **Manage Roles**, and move its highest role above every role you plan to offer.
-2. Create a draft:
-   - `/selfroles create key:community title:Community roles`
-3. Add a choice group:
-   - `/selfroles group panel:community name:Interests mode:Multiple choices min:0 max:3`
-4. Add role options (repeat as needed):
-   - `/selfroles role panel:community group:interests role:@Football label:Football duration:permanent`
-   - Optional settings include `emoji`, `duration` (`30m`, `12h`, or `7d`), up to four bundled roles, a required role, a blocked role, and an excluded role.
-5. Preview, then publish:
-   - `/selfroles preview panel:community mode:Buttons and dropdowns`
-   - `/selfroles publish panel:community mode:Buttons and dropdowns channel:#roles`
+1. Give the bot **Manage Roles** and move its highest role above every role you plan to offer.
+2. In the server, run bare `.selfroles`. The bot asks one question at a time and waits up to three minutes for each reply. Type `cancel` at any point to stop without saving a panel.
+3. Choose the embed heading, write the intro/instructions exactly as members should see them (Markdown and multiple lines are supported), choose an accent color, and select the channel and choice rules.
+4. Add role choices. For each, choose a role and unique emoji, set the visible label, write optional custom embed text, choose a duration (`permanent`, `12h`, `7d`, and so on), and optionally mention up to four bundled roles. Reply `done` when finished.
+5. Choose `publish` to post the panel immediately, or `draft` to save it and publish later.
 
-Members click **Choose / update roles** and make changes in a private menu. `/roleprefs` also shows their current self-role choices privately.
+The wizard supports one choice group and up to 20 reaction roles per panel. Intro text is limited to 1,500 characters and custom text per role to 500 characters. A `-` reply skips optional copy. Custom panel wording cannot trigger role or everyone mentions.
 
-## Choice and access rules
+## Advanced configuration
 
-- Groups support **single** or **multiple** choice and optional minimum/maximum selections. Select menus page through 25 roles at a time.
-- Panel and group required-role rules are any-of gates; blocked roles deny new selections. Option rules can require a role, deny a role, or exclude a role.
-- Members may remove choices if they lose an access gate. Selection rules are checked again when a change is submitted.
-- A role option can grant up to four bundled roles. A bundle role that a member already held independently is preserved when the option is removed or expires.
-- Timed grants last from one minute to 90 days and are removed automatically by the bot’s expiry worker. Timers continue after a panel is paused or deleted.
+The slash command supports additional groups, gates, dependencies, bundles, timed grants, previews, audit logging, cloning, and panel lifecycle controls:
 
-## Reactions and panel management
+- `/selfroles create` makes a draft with a custom heading and intro.
+- `/selfroles group` configures single- or multiple-choice rules. Reaction panels cannot enforce minimum picks because members can remove reactions at any time; use a minimum of zero.
+- `/selfroles role` adds a role with a reaction emoji, label, optional embed text, duration, up to four bundled roles, and optional prerequisite, blocked, or exclusion roles.
+- `/selfroles preview` privately previews the reaction embed, and `/selfroles publish` posts or refreshes it.
+- `/selfroles audit`, `/selfroles clone`, `/selfroles pause`, `/selfroles resume`, and `/selfroles delete` provide additional management.
 
-- Publish as **Emoji reactions** or **Both** to enable reaction-to-role toggles. Every option needs a unique Unicode or server emoji; reaction panels support up to 20 role options and cannot enforce minimum selections.
-- Reaction publishing requires the bot to have **View Channel**, **Read Message History**, **Send Messages**, **Embed Links**, **Add Reactions**, and **Manage Messages** in the target channel. Component panels only need the usual view/send/embed permissions plus **Manage Roles** at the server level.
-- `/selfroles clone` makes a new editable draft. `/selfroles audit` configures an optional audit channel. `/selfroles pause`, `/selfroles resume`, and `/selfroles delete` manage a panel’s lifecycle.
-- Deleting a panel leaves permanent roles members already have in place; timed grants still expire. Removing a role option or group also leaves existing member roles in place.
+Panels and timed-grant records persist in the database. Timed roles expire automatically after a duration from one minute to 90 days. A bundled role that the member held independently is preserved when a grant is removed or expires. Deleting a panel leaves permanent roles already granted in place; active timed grants continue until expiry.
 
-Only members with **Manage Roles** can configure panels. Offered roles are rechecked at publish time and when granted; managed roles, roles above the bot, and roles carrying sensitive permissions are rejected.
+## Member experience and safeguards
+
+Members add a role by reacting with its matching emoji and remove it by removing that reaction. In a single-choice group, reacting to another option replaces the previous choice. Multiple-choice groups may have a maximum; a rejected reaction is removed. `/roleprefs` privately lists the member’s current roles and explains how to change them.
+
+Reaction publishing requires the bot to have **View Channel**, **Read Message History**, **Send Messages**, **Embed Links**, **Add Reactions**, and **Manage Messages** in the target channel, plus **Manage Roles** and a role hierarchy above every offered or bundled role. Managed roles, roles above the bot, and roles carrying sensitive permissions are rejected. Role safety is checked again before publishing and granting.
