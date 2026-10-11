@@ -7,7 +7,10 @@ const {
 const selfRoles = require('../../utils/selfRoles');
 const { getPanelByKey } = selfRoles;
 const { SelfRolePanel } = require('../../models/SelfRoles');
-const { parseDuration } = require('../../utils/selfRoleRules');
+const { parseDuration, normalizeKey } = require('../../utils/selfRoleRules');
+
+const ACTIVE_SETUP_WIZARDS = new Set();
+const WIZARD_TIMEOUT_MS = 180_000;
 
 function panelOption(option, required = true) {
     option.setName('panel')
@@ -20,15 +23,15 @@ function panelOption(option, required = true) {
 module.exports = {
     name: 'selfroles',
     aliases: ['selfrole', 'sr'],
-    description: 'Build and manage safe, interactive self-role panels.',
-    usage: '.selfroles list | create/group/role/publish/... (or /selfroles)',
+    description: 'Set up reaction-role panels through a guided chat wizard.',
+    usage: '.selfroles (guided setup) | .selfroles list | /selfroles (advanced settings)',
     hidden: false,
     cooldown: 3,
     userPermissions: [PermissionFlagsBits.ManageRoles],
 
     data: new SlashCommandBuilder()
         .setName('selfroles')
-        .setDescription('Build and manage interactive self-role panels')
+        .setDescription('Set up and manage reaction-role panels')
         .addSubcommand(sub => sub
             .setName('create')
             .setDescription('Create a self-role panel draft')
@@ -56,9 +59,9 @@ module.exports = {
             .addStringOption(option => panelOption(option))
             .addStringOption(option => option.setName('group').setDescription('Group name').setRequired(true).setAutocomplete(true))
             .addRoleOption(option => option.setName('role').setDescription('The safe role members may choose').setRequired(true))
-            .addStringOption(option => option.setName('label').setDescription('Text shown in the menu').setMaxLength(100).setRequired(false))
-            .addStringOption(option => option.setName('description').setDescription('Short option description').setMaxLength(100).setRequired(false))
-            .addStringOption(option => option.setName('emoji').setDescription('Unicode or server custom emoji (required for reaction mode)').setMaxLength(64).setRequired(false))
+            .addStringOption(option => option.setName('label').setDescription('Role label shown in the panel embed').setMaxLength(100).setRequired(false))
+            .addStringOption(option => option.setName('description').setDescription('Custom text shown beside this reaction role in the embed').setMaxLength(500).setRequired(false))
+            .addStringOption(option => option.setName('emoji').setDescription('Unicode or server custom emoji members react with').setMaxLength(64).setRequired(false))
             .addStringOption(option => option.setName('duration').setDescription('Optional expiry, e.g. 12h, 7d; use permanent for no expiry').setMaxLength(16).setRequired(false))
             .addRoleOption(option => option.setName('bundle_role').setDescription('Optional extra role granted with this choice').setRequired(false))
             .addRoleOption(option => option.setName('bundle_role_two').setDescription('Optional second bundled role').setRequired(false))
@@ -100,33 +103,22 @@ module.exports = {
         )
         .addSubcommand(sub => sub
             .setName('publish')
-            .setDescription('Publish or refresh a panel')
+            .setDescription('Publish or refresh this reaction-role panel')
             .addStringOption(option => panelOption(option))
-            .addStringOption(option => option.setName('mode').setDescription('How members pick roles').setRequired(true)
-                .addChoices(
-                    { name: 'Buttons and dropdowns', value: 'components' },
-                    { name: 'Emoji reactions', value: 'reactions' },
-                    { name: 'Both', value: 'both' }
-                ))
             .addChannelOption(option => option.setName('channel').setDescription('Channel to publish in').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement).setRequired(false))
         )
         .addSubcommand(sub => sub
             .setName('preview')
-            .setDescription('Preview a panel privately before publishing')
+            .setDescription('Preview a reaction-role panel privately')
             .addStringOption(option => panelOption(option))
-            .addStringOption(option => option.setName('mode').setDescription('Preview style').setRequired(false)
-                .addChoices(
-                    { name: 'Buttons and dropdowns', value: 'components' },
-                    { name: 'Emoji reactions', value: 'reactions' },
-                    { name: 'Both', value: 'both' }
-                ))
         )
         .addSubcommand(sub => sub
             .setName('edit')
             .setDescription('Edit a panel heading or description')
             .addStringOption(option => panelOption(option))
             .addStringOption(option => option.setName('title').setDescription('New heading').setMaxLength(256).setRequired(false))
-            .addStringOption(option => option.setName('description').setDescription('New instructions').setMaxLength(1500).setRequired(false))
+            .addStringOption(option => option.setName('description').setDescription('New embed text (Markdown allowed)').setMaxLength(1500).setRequired(false))
+            .addStringOption(option => option.setName('color').setDescription('Embed accent color, e.g. #5865F2').setMaxLength(7).setRequired(false))
         )
         .addSubcommand(sub => sub
             .setName('clone')
@@ -199,7 +191,7 @@ module.exports = {
             }
 
             const action = String(args[0] || '').toLowerCase();
-            if (!action) return message.reply(prefixHelp());
+            if (!action || action === 'setup' || action === 'wizard') return await startSetupWizard(message);
             const options = parsePrefixOptions(message, args.slice(1), action);
             const result = await selfRoles.runAdminAction({
                 action,
@@ -253,6 +245,347 @@ module.exports = {
     }
 };
 
+class SetupWizardCancelled extends Error {}
+
+class SetupWizardTimedOut extends Error {}
+
+async function startSetupWizard(message) {
+    if (!message.guild) return message.reply('❌ The setup wizard must be started inside a server.');
+    if (!message.member?.permissions?.has(PermissionFlagsBits.ManageRoles)) {
+        return message.reply('🚫 You need **Manage Roles** to configure self-role panels.');
+    }
+
+    const lockKey = `${message.guild.id}:${message.author.id}`;
+    if (ACTIVE_SETUP_WIZARDS.has(lockKey)) {
+        return message.reply('You already have a self-role setup running in this server. Reply to its current question, or type `cancel`.');
+    }
+    ACTIVE_SETUP_WIZARDS.add(lockKey);
+
+    const send = content => message.channel.send({ content, allowedMentions: { parse: [] } });
+    const ask = async prompt => {
+        await send(prompt);
+        let collected;
+        try {
+            collected = await message.channel.awaitMessages({
+                filter: response => response.author.id === message.author.id && response.channelId === message.channel.id,
+                max: 1,
+                time: WIZARD_TIMEOUT_MS,
+                errors: ['time']
+            });
+        } catch {
+            throw new SetupWizardTimedOut();
+        }
+        const response = collected.first();
+        if (!response) throw new SetupWizardTimedOut();
+        if (String(response.content || '').trim().toLowerCase() === 'cancel') throw new SetupWizardCancelled();
+        return response;
+    };
+    const askParsed = async (prompt, parse) => {
+        while (true) {
+            const response = await ask(prompt);
+            try {
+                return await parse(response);
+            } catch (error) {
+                await send(`❌ ${error.message || 'That answer was not valid.'} Try again, or type \`cancel\` to stop.`);
+            }
+        }
+    };
+
+    let createdPanelKey = '';
+    try {
+        await send('🧭 **Reaction-role setup** — I will ask one question at a time. Reply in this channel; type `cancel` at any time to stop. I will only use emoji reactions, not buttons or dropdowns.');
+
+        const title = await askParsed('1/7 — What should the embed heading say? (1–256 characters)', response => {
+            const value = String(response.content || '').trim();
+            if (!value || value.length > 256) throw new Error('Enter a heading between 1 and 256 characters.');
+            return value;
+        });
+
+        const description = await askParsed('2/7 — What exact text should appear in the embed? You can use Markdown and multiple lines. Reply `-` for no intro text.', response => {
+            const value = String(response.content || '');
+            if (value.trim() === '-') return '';
+            if (value.length > 1500) throw new Error('The embed intro is limited to 1,500 characters.');
+            return value;
+        });
+
+        const color = await askParsed('3/7 — What embed accent color should I use? Send a hex color like `#5865F2`, or `default`.', response => {
+            const value = String(response.content || '').trim();
+            if (['default', 'skip', '-'].includes(value.toLowerCase())) return null;
+            const match = value.match(/^#?([0-9a-f]{6})$/i);
+            if (!match) throw new Error('Use a six-digit hex color such as `#5865F2`, or reply `default`.');
+            return parseInt(match[1], 16);
+        });
+
+        const targetChannel = await askParsed('4/7 — Where should I post the panel? Mention a text channel, type its exact name, or reply `here` if this is a text or announcement channel.', response =>
+            resolveWizardChannel(response, message)
+        );
+
+        const group = await askParsed('5/7 — What should this set of role choices be called? Reply `skip` to call it **Roles**.', response => {
+            const value = String(response.content || '').trim();
+            const name = !value || ['skip', 'default', '-'].includes(value.toLowerCase()) ? 'Roles' : value;
+            if (name.length > 80) throw new Error('Group names are limited to 80 characters.');
+            const key = normalizeKey(name, 32);
+            if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(key)) throw new Error('Use a group name containing letters or numbers.');
+            return { name, key };
+        });
+
+        const choiceMode = await askParsed('6/7 — Should members pick `single` (one role) or `multiple` roles?', response => {
+            const value = String(response.content || '').trim().toLowerCase();
+            if (['single', 'one', '1'].includes(value)) return 'single';
+            if (['multiple', 'multi', 'many', 'several'].includes(value)) return 'multiple';
+            throw new Error('Reply `single` or `multiple`.');
+        });
+
+        const maxSelections = choiceMode === 'single'
+            ? 1
+            : await askParsed('7/7 — What is the maximum number of roles a member may choose from this panel? Reply `0` for no extra limit, or a number from 1 to 20.', response => {
+                const value = Number(String(response.content || '').trim());
+                if (!Number.isInteger(value) || value < 0 || value > 20) throw new Error('Enter 0 (unlimited) or a whole number from 1 to 20.');
+                return value;
+            });
+
+        await send('Now I will add the reaction-role choices. For each choice, I’ll ask for a role, emoji, label, optional embed text, duration, and any bundled roles. You can type `done` when finished (up to 20 choices).');
+        const options = [];
+        const primaryRoleIds = new Set();
+        const bundleRoleIdsUsed = new Set();
+        const emojiKeys = new Set();
+
+        while (options.length < 20) {
+            const roleAnswer = await ask(`Role ${options.length + 1}/20 — mention the role, type its exact name, or send its ID. Type \`done\` when you have added at least one role.`);
+            const roleText = String(roleAnswer.content || '').trim();
+            if (['done', 'finish'].includes(roleText.toLowerCase())) {
+                if (!options.length) {
+                    await send('Add at least one role before finishing.');
+                    continue;
+                }
+                break;
+            }
+
+            let role;
+            try {
+                role = resolveWizardRole(roleAnswer, message.guild);
+                if (primaryRoleIds.has(String(role.id)) || bundleRoleIdsUsed.has(String(role.id))) {
+                    throw new Error('That role is already used by another choice or bundle.');
+                }
+                await selfRoles.validateAssignableRole(message.guild, role.id);
+            } catch (error) {
+                await send(`❌ ${error.message || 'I could not find that server role.'} Mention a different role, or type \`cancel\`.`);
+                continue;
+            }
+
+            const emoji = await askParsed(`What emoji should members react with for **${role.name}**? Send a Unicode emoji or a custom emoji from this server.`, response => {
+                const descriptor = selfRoles.getEmojiDescriptor(String(response.content || '').trim(), message.guild);
+                if (!descriptor) throw new Error('Send one emoji.');
+                if (emojiKeys.has(descriptor.key)) throw new Error('Each role needs a different emoji.');
+                return descriptor;
+            });
+
+            const label = await askParsed(`What label should appear beside ${emoji.display} in the embed? Reply \`same\` to use **${role.name}**.`, response => {
+                const value = String(response.content || '').trim();
+                const result = ['same', 'default', 'skip'].includes(value.toLowerCase()) ? role.name : value;
+                if (!result || result.length > 100) throw new Error('The label must be between 1 and 100 characters.');
+                return result;
+            });
+
+            const optionDescription = await askParsed(`What extra text should appear in the embed for **${label}**? Write it exactly as you want it shown (Markdown and multiple lines are okay), or reply \`-\` for none.`, response => {
+                const value = String(response.content || '');
+                if (value.trim() === '-') return '';
+                if (value.length > 500) throw new Error('Each role’s embed text is limited to 500 characters.');
+                return value;
+            });
+
+            const durationMs = await askParsed(`How long should **${label}** last? Reply \`permanent\` or a duration like \`12h\` or \`7d\`.`, response =>
+                parseDuration(String(response.content || '').trim() || 'permanent')
+            );
+
+            const bundles = await askParsed(`Any extra roles to grant together with **${label}**? Mention up to four roles, or reply \`-\` for none.`, async response => {
+                const text = String(response.content || '').trim();
+                if (!text || ['-', 'none', 'no'].includes(text.toLowerCase())) return [];
+                const mentioned = response.mentions?.roles ? [...response.mentions.roles.values()] : [];
+                const ids = mentioned.map(item => String(item.id));
+                if (!ids.length) {
+                    const rawIds = text.match(/\b\d{17,20}\b/g) || [];
+                    ids.push(...rawIds);
+                }
+                const uniqueIds = [...new Set(ids)];
+                if (!uniqueIds.length || uniqueIds.length > 4) throw new Error('Mention between one and four server roles, or reply `-`.');
+                if (uniqueIds.includes(String(role.id)) || uniqueIds.some(id => primaryRoleIds.has(id) || bundleRoleIdsUsed.has(id))) {
+                    throw new Error('A bundled role cannot duplicate a role already used in this setup.');
+                }
+                const foundRoles = [];
+                for (const id of uniqueIds) {
+                    const bundleRole = message.guild.roles.cache.get(id);
+                    if (!bundleRole) throw new Error(`Role ${id} is not in this server.`);
+                    await selfRoles.validateAssignableRole(message.guild, id);
+                    foundRoles.push(bundleRole);
+                }
+                return foundRoles;
+            });
+
+            primaryRoleIds.add(String(role.id));
+            for (const bundleRole of bundles) bundleRoleIdsUsed.add(String(bundleRole.id));
+            emojiKeys.add(emoji.key);
+            options.push({
+                roleId: String(role.id),
+                label,
+                description: optionDescription,
+                emoji: emoji.display,
+                durationMs,
+                bundleRoleIds: bundles.map(bundleRole => String(bundleRole.id))
+            });
+
+            if (options.length >= 20) {
+                await send('You have reached the 20-role reaction-panel limit.');
+                break;
+            }
+            const more = await askParsed('Add another reaction role? Reply `yes` or `no`.', response => {
+                const value = String(response.content || '').trim().toLowerCase();
+                if (['yes', 'y', 'add'].includes(value)) return true;
+                if (['no', 'n', 'done', 'finish'].includes(value)) return false;
+                throw new Error('Reply `yes` or `no`.');
+            });
+            if (!more) break;
+        }
+
+        const draftPanel = {
+            title,
+            description,
+            color: color ?? 0x5865F2,
+            groups: [{
+                key: group.key,
+                name: group.name,
+                mode: choiceMode,
+                minSelections: 0,
+                maxSelections,
+                options
+            }]
+        };
+        selfRoles.validatePanelDefinition(draftPanel, 'reactions');
+
+        const publishNow = await askParsed('Setup is ready. Reply `publish` to post the panel now, or `draft` to save it and publish later.', response => {
+            const value = String(response.content || '').trim().toLowerCase();
+            if (['publish', 'yes', 'y', 'post', 'now'].includes(value)) return true;
+            if (['draft', 'no', 'n', 'later'].includes(value)) return false;
+            throw new Error('Reply `publish` or `draft`.');
+        });
+
+        const panelKey = await chooseUniquePanelKey(message.guild, title);
+        await selfRoles.runAdminAction({
+            action: 'create', guild: message.guild, userId: message.author.id,
+            options: { key: panelKey, title, description }, client: message.client
+        });
+        createdPanelKey = panelKey;
+        await selfRoles.runAdminAction({
+            action: 'group', guild: message.guild, userId: message.author.id,
+            options: {
+                panelKey,
+                groupName: group.name,
+                mode: choiceMode,
+                minSelections: 0,
+                maxSelections,
+                requiredRoleId: '',
+                deniedRoleId: ''
+            }, client: message.client
+        });
+        for (const option of options) {
+            await selfRoles.runAdminAction({
+                action: 'role', guild: message.guild, userId: message.author.id,
+                options: {
+                    panelKey,
+                    groupName: group.name,
+                    roleId: option.roleId,
+                    label: option.label,
+                    description: option.description,
+                    emoji: option.emoji,
+                    durationMs: option.durationMs,
+                    bundleRoleIds: option.bundleRoleIds
+                }, client: message.client
+            });
+        }
+        if (color !== null) {
+            await selfRoles.runAdminAction({
+                action: 'edit', guild: message.guild, userId: message.author.id,
+                options: { panelKey, color: `#${color.toString(16).padStart(6, '0')}` }, client: message.client
+            });
+        }
+
+        if (!publishNow) {
+            return send(`✅ Saved **${title}** as a draft (key: \`${panelKey}\`). Publish it later with \`/selfroles publish panel:${panelKey}\`.`);
+        }
+
+        try {
+            const result = await selfRoles.runAdminAction({
+                action: 'publish', guild: message.guild, userId: message.author.id,
+                options: { panelKey, channel: targetChannel }, client: message.client
+            });
+            return send(result);
+        } catch (error) {
+            return send(`✅ Draft saved as \`${panelKey}\`, but I could not publish it: ${error.message || error}. Fix the permissions and run \`/selfroles publish panel:${panelKey}\`.`);
+        }
+    } catch (error) {
+        if (error instanceof SetupWizardCancelled) return send('Setup cancelled. No panel was saved.');
+        if (error instanceof SetupWizardTimedOut) return send('Setup timed out. No panel was saved. Run `.selfroles` again when you are ready.');
+        console.error('[selfroles] guided setup failed:', error);
+        const savedNote = createdPanelKey ? ` A draft named \`${createdPanelKey}\` may already have been saved.` : '';
+        return send(`❌ ${error.message || 'Setup could not be completed.'}${savedNote}`);
+    } finally {
+        ACTIVE_SETUP_WIZARDS.delete(lockKey);
+    }
+}
+
+async function chooseUniquePanelKey(guild, title) {
+    let base = normalizeKey(title).slice(0, 26);
+    if (base.length < 2) base = 'self-roles';
+    let candidate = base;
+    for (let suffix = 2; suffix < 10_000; suffix++) {
+        if (!await getPanelByKey(guild.id, candidate)) return candidate;
+        const suffixText = `-${suffix}`;
+        candidate = `${base.slice(0, 32 - suffixText.length)}${suffixText}`;
+    }
+    throw new Error('Could not generate a unique panel key. Try a different heading.');
+}
+
+function resolveWizardChannel(response, message) {
+    const mentioned = response.mentions?.channels?.first?.();
+    const text = String(response.content || '').trim();
+    if (mentioned) return validateWizardChannel(mentioned, message.guild);
+    if (['here', 'this', 'this channel', 'current'].includes(text.toLowerCase())) {
+        return validateWizardChannel(message.channel, message.guild);
+    }
+    const id = text.match(/^<#?(\d{17,20})>?$/)?.[1];
+    let channel = id ? message.guild.channels.cache.get(id) : null;
+    if (!channel) {
+        const name = text.replace(/^#/, '').toLowerCase();
+        const matches = [...message.guild.channels.cache.values()].filter(item => item.name?.toLowerCase() === name);
+        if (matches.length === 1) channel = matches[0];
+        else if (matches.length > 1) throw new Error('That channel name is ambiguous. Mention the channel instead.');
+    }
+    if (!channel) throw new Error('Mention a text channel, send its exact name, or use `here`.');
+    return validateWizardChannel(channel, message.guild);
+}
+
+function validateWizardChannel(channel, guild) {
+    if (channel.guildId !== guild.id || ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) {
+        throw new Error('Choose a text or announcement channel in this server.');
+    }
+    return channel;
+}
+
+function resolveWizardRole(response, guild) {
+    const mentioned = response.mentions?.roles?.first?.();
+    if (mentioned) return mentioned;
+    const text = String(response.content || '').trim();
+    const id = text.match(/^<@&(\d{17,20})>$|^(\d{17,20})$/)?.slice(1).find(Boolean);
+    if (id) {
+        const role = guild.roles.cache.get(id);
+        if (role) return role;
+    }
+    const matches = [...guild.roles.cache.values()].filter(role => role.name.toLowerCase() === text.toLowerCase());
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) throw new Error('More than one role has that name. Mention the role to choose the right one.');
+    throw new Error('I could not find that role. Mention it, or send its exact name or ID.');
+}
+
 function parseSlashOptions(interaction, action) {
     const getString = name => interaction.options.getString(name);
     const getRole = name => interaction.options.getRole(name);
@@ -300,15 +633,15 @@ function parseSlashOptions(interaction, action) {
         requiredRoleId: getRole('required_role')?.id || '',
         deniedRoleId: getRole('blocked_role')?.id || ''
     };
-    if (action === 'clear-access' || action === 'pause' || action === 'resume' || action === 'delete') return { panelKey };
-    if (action === 'preview') return { panelKey, mode: getString('mode') || undefined };
+    if (action === 'clear-access' || action === 'pause' || action === 'resume' || action === 'delete' || action === 'preview') return { panelKey };
     if (action === 'audit') return { panelKey, channel: interaction.options.getChannel('channel') };
-    if (action === 'publish') return {
+    if (action === 'publish') return { panelKey, channel: interaction.options.getChannel('channel') || interaction.channel };
+    if (action === 'edit') return {
         panelKey,
-        mode: getString('mode'),
-        channel: interaction.options.getChannel('channel') || interaction.channel
+        title: getString('title') ?? undefined,
+        description: getString('description') ?? undefined,
+        color: getString('color') ?? undefined
     };
-    if (action === 'edit') return { panelKey, title: getString('title') ?? undefined, description: getString('description') ?? undefined };
     if (action === 'clone') return {
         sourceKey: getString('source'),
         key: getString('key'),
@@ -355,8 +688,7 @@ function parsePrefixOptions(message, args, action) {
     if (action === 'remove-group') return { panelKey, groupName: rest[1] };
     if (action === 'publish') {
         const channel = message.mentions.channels.first() || null;
-        const mode = rest.find(value => ['components', 'reactions', 'both'].includes(String(value).toLowerCase())) || 'components';
-        return { panelKey, channel, mode };
+        return { panelKey, channel };
     }
     if (action === 'preview' || action === 'pause' || action === 'resume' || action === 'delete' || action === 'clear-access') {
         return { panelKey };
@@ -377,13 +709,11 @@ function parsePrefixOptions(message, args, action) {
 
 function prefixHelp() {
     return [
-        '**Self-role panel setup** (requires Manage Roles)',
-        '`.selfroles create <key> <title...>`',
-        '`.selfroles group <panel> <group> <single|multiple> [min] [max]`',
-        '`.selfroles role <panel> <group> @role [label...]`',
-        '`.selfroles publish <panel> [#channel] [components|reactions|both]`',
+        '**Self-role panels** (requires Manage Roles)',
+        '`.selfroles` — start the guided reaction-panel setup; reply `cancel` at any time.',
         '`.selfroles list` · `.selfroles preview <panel>` · `.selfroles pause|resume|delete <panel>`',
-        'Use `/selfroles` for all advanced settings, gates, durations, and audit-channel controls.'
+        '`.selfroles create <key> <title...>` · `.selfroles publish <panel> [#channel]`',
+        'Panels use emoji reactions only. Use `/selfroles` for advanced groups, access gates, timed grants, bundles, and audit logging.'
     ].join('\n');
 }
 

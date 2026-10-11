@@ -16,6 +16,7 @@ const OPTIONS_PER_PAGE = 25;
 const MAX_GROUPS = 25;
 const MAX_REACTIONS_PER_PANEL = 20;
 const MAX_BUNDLED_ROLES = 4;
+const UNICODE_EMOJI_RE = /^(?:\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?\p{Emoji_Modifier}?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?\p{Emoji_Modifier}?)*|\p{Regional_Indicator}{2}|[0-9#*]\uFE0F?\u20E3)$/u;
 const LOCKS = new Map();
 let expiryTimer = null;
 let expiryTickActive = false;
@@ -57,10 +58,13 @@ function safeText(value, maxLength = 100) {
         .slice(0, maxLength);
 }
 
-function formatPanelMode(mode) {
-    if (mode === 'reactions') return 'Emoji reactions';
-    if (mode === 'both') return 'Buttons, dropdowns, and reactions';
-    return 'Buttons and dropdowns';
+function formatPanelMode() {
+    return 'Emoji reactions';
+}
+
+function getPanelColor(panel) {
+    const color = Number(panel?.color);
+    return Number.isInteger(color) && color >= 0 && color <= 0xFFFFFF ? color : 0x5865F2;
 }
 
 function formatGroupMode(group) {
@@ -71,49 +75,45 @@ function formatGroupMode(group) {
     return `choose up to ${max}`;
 }
 
-function makePanelEmbed(panel, mode = panel.mode || 'components') {
-    const embed = new EmbedBuilder()
-        .setColor(Number(panel.color) || 0x5865F2)
-        .setTitle(safeText(panel.title, 256))
-        .setDescription(safeText(panel.description || '', 1500) || 'Choose the roles that match your interests.')
-        .setFooter({ text: `Self roles • ${formatPanelMode(mode)}` });
-
-    if (panel.groups?.length) {
-        const groupText = isReactionMode(mode)
-            ? panel.groups.map(group => {
-                const choices = (group.options || []).map(option =>
-                    `${option.emoji || '•'} **${safeText(option.label, 80)}**`
-                ).join('\n');
-                return `**${safeText(group.name, 80)}**\n${choices}`;
-            }).join('\n\n')
-            : panel.groups
-                .slice(0, MAX_GROUPS)
-                .map(group => `• **${safeText(group.name, 80)}** — ${formatGroupMode(group)} (${group.options?.length || 0})`)
-                .join('\n');
-        const current = embed.data.description || '';
-        const heading = isReactionMode(mode) ? '**React with the emoji shown to toggle a role**' : '**Available role groups**';
-        const combined = `${current}${current ? '\n\n' : ''}${heading}\n${groupText}`;
-        embed.setDescription(combined.slice(0, 4000));
-    }
-
-    return embed;
+function safeEmbedText(value, maxLength = 4000) {
+    // Embed copy is intentionally not Markdown-escaped: administrators control the wording and formatting.
+    // Public panel payloads always disable allowed mentions, so custom copy cannot ping the server.
+    return String(value ?? '').slice(0, maxLength);
 }
 
-function makePublicComponents(panel) {
-    if (!isComponentMode(panel.mode)) return [];
+function makePanelEmbed(panel, mode = 'reactions') {
+    return new EmbedBuilder()
+        .setColor(getPanelColor(panel))
+        .setTitle(safeEmbedText(panel.title, 256) || 'Self roles')
+        .setDescription(safeEmbedText(panel.description || '\u200b', 1500))
+        .setFooter({ text: `Self roles • ${formatPanelMode(mode)}` });
+}
 
-    return [new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`sr:open:${String(panel._id)}`)
-            .setLabel('Choose / update roles')
-            .setStyle(ButtonStyle.Primary)
-    )];
+function makePanelEmbeds(panel, mode = 'reactions') {
+    const embeds = [makePanelEmbed(panel, mode)];
+    const fields = (panel.groups || []).flatMap(group => (group.options || []).map(option => ({
+        name: `${safeEmbedText(group.name, 70)} • ${option.emoji || '•'} ${safeEmbedText(option.label, 100)}`.slice(0, 256),
+        value: safeEmbedText(option.description || '\u200b', 500) || '\u200b',
+        inline: false
+    })));
+    if (fields.length) {
+        embeds.push(new EmbedBuilder()
+            .setColor(getPanelColor(panel))
+            .setTitle('React with the matching emoji')
+            .setDescription('React to add a role; remove your reaction to remove it.')
+            .addFields(fields));
+    }
+    return embeds;
+}
+
+function makePublicComponents() {
+    return [];
 }
 
 function publicPanelPayload(panel) {
     return {
-        embeds: [makePanelEmbed(panel)],
-        components: makePublicComponents(panel),
+        embeds: makePanelEmbeds(panel, 'reactions'),
+        components: [],
         allowedMentions: { parse: [], users: [], roles: [] }
     };
 }
@@ -158,7 +158,7 @@ function makeGroupSelector(panel, member, userId) {
         })));
 
     const embed = new EmbedBuilder()
-        .setColor(Number(panel.color) || 0x5865F2)
+        .setColor(getPanelColor(panel))
         .setTitle(safeText(panel.title, 256))
         .setDescription('Choose a category to view and update your roles. Your changes are private.');
 
@@ -244,7 +244,7 @@ function makeRolePicker(panel, group, member, userId, page = 0, notice = '') {
     const body = `${safeText(panel.description || 'Select the roles you want to have.', 900)}\n\n**${safeText(group.name, 80)}** — ${constraints}${pageInfo}${notice ? `\n\n${safeText(notice, 400)}` : ''}`;
 
     const embed = new EmbedBuilder()
-        .setColor(Number(panel.color) || 0x5865F2)
+        .setColor(getPanelColor(panel))
         .setTitle(safeText(panel.title, 256))
         .setDescription(body.slice(0, 4000));
 
@@ -348,6 +348,7 @@ function getEmojiDescriptor(input, guild) {
     if (raw.length > 32 || /<[@#]/.test(raw)) {
         throw new Error('Provide a Unicode emoji or a custom emoji from this server.');
     }
+    if (!UNICODE_EMOJI_RE.test(raw)) throw new Error('Provide one complete Unicode emoji or a custom emoji from this server.');
     return { key: raw, reactionValue: raw, display: raw };
 }
 
@@ -365,6 +366,11 @@ function validatePanelDefinition(panel, mode) {
     if (panel.groups.length > MAX_GROUPS) throw new Error(`A panel can have at most ${MAX_GROUPS} groups.`);
 
     let reactionCount = 0;
+    let embedCharacterCount = String(panel.title || 'Self roles').slice(0, 256).length
+        + String(panel.description || '\u200b').slice(0, 1500).length
+        + 'Self roles • Emoji reactions'.length
+        + 'React with the matching emoji'.length
+        + 'React to add a role; remove your reaction to remove it.'.length;
     const usedEmojiKeys = new Set();
 
     for (const group of panel.groups) {
@@ -383,18 +389,25 @@ function validatePanelDefinition(panel, mode) {
 
         for (const option of group.options || []) {
             if (!option.roleId || !option.label) throw new Error(`The **${safeText(group.name)}** group has an incomplete role option.`);
+            if (String(option.description || '').length > 500) throw new Error(`The embed text for **${safeText(option.label)}** is limited to 500 characters.`);
             if (isReactionMode(mode)) {
                 if (!option.emoji) throw new Error(`Add an emoji to **${safeText(option.label)}** before publishing a reaction panel.`);
                 const emojiKey = storedEmojiKey(option.emoji);
                 if (usedEmojiKeys.has(emojiKey)) throw new Error('Every reaction option in a panel needs a unique emoji.');
                 usedEmojiKeys.add(emojiKey);
                 reactionCount++;
+                const fieldName = `${String(group.name || '').slice(0, 70)} • ${option.emoji || '•'} ${String(option.label || '').slice(0, 100)}`.slice(0, 256);
+                const fieldValue = String(option.description || '\u200b').slice(0, 500) || '\u200b';
+                embedCharacterCount += fieldName.length + fieldValue.length;
             }
         }
     }
 
     if (isReactionMode(mode) && reactionCount > MAX_REACTIONS_PER_PANEL) {
         throw new Error(`Reaction panels support at most ${MAX_REACTIONS_PER_PANEL} role options per message.`);
+    }
+    if (isReactionMode(mode) && embedCharacterCount > 6000) {
+        throw new Error('This embed exceeds Discord’s 6,000-character embed limit. Shorten the intro or per-role text and try again.');
     }
 }
 
@@ -449,17 +462,17 @@ async function createPanel(guild, userId, { key, title, description = '' }) {
             guildId: guild.id,
             key: normalizedKey,
             title: cleanTitle,
-            description: String(description || '').trim(),
+            description: String(description || ''),
             createdBy: String(userId),
             updatedBy: String(userId)
         });
     } else {
         Object.assign(panel, {
             title: cleanTitle,
-            description: String(description || '').trim(),
+            description: String(description || ''),
             color: 0x5865F2,
             status: 'draft',
-            mode: 'components',
+            mode: 'reactions',
             channelId: '',
             messageId: '',
             auditChannelId: '',
@@ -510,9 +523,9 @@ async function clonePanel(guild, userId, { sourceKey, key, title }) {
         key: normalizedKey,
         title: String(title || `${source.title} (copy)`).slice(0, 256),
         description: source.description || '',
-        color: source.color || 0x5865F2,
+        color: source.color ?? 0x5865F2,
         status: 'draft',
-        mode: 'components',
+        mode: 'reactions',
         channelId: '',
         messageId: '',
         auditChannelId: '',
@@ -590,9 +603,11 @@ async function addRoleOption(guild, userId, options) {
     if (!group) throw new Error(`Group \`${normalizeKey(options.groupName)}\` was not found in panel \`${panel.key}\`.`);
 
     const role = await validateAssignableRole(guild, options.roleId);
-    const label = String(options.label || role.name).trim().slice(0, 100);
-    const description = String(options.description || '').trim().slice(0, 100);
+    const label = String(options.label || role.name).trim();
+    const description = String(options.description ?? '');
     if (!label) throw new Error('Role option label cannot be empty.');
+    if (label.length > 100) throw new Error('Role option labels are limited to 100 characters.');
+    if (description.length > 500) throw new Error('Role embed text is limited to 500 characters per role.');
     if (panel.groups.some(candidate => candidate.options.some(option => String(option.roleId) === String(role.id)))) {
         throw new Error(`**${safeText(role.name)}** is already an option in this panel.`);
     }
@@ -733,7 +748,7 @@ async function setAuditChannel(guild, userId, { panelKey, channel }) {
         : `✅ Disabled the self-role audit log for \`${panel.key}\`.`;
 }
 
-async function editPanel(guild, userId, { panelKey, title, description }) {
+async function editPanel(guild, userId, { panelKey, title, description, color }) {
     const panel = await requirePanel(guild.id, panelKey);
     if (title !== undefined) {
         const cleanTitle = String(title).trim();
@@ -742,9 +757,14 @@ async function editPanel(guild, userId, { panelKey, title, description }) {
     }
     if (description !== undefined) {
         if (String(description).length > 1500) throw new Error('Description is limited to 1,500 characters.');
-        panel.description = String(description).trim();
+        panel.description = String(description);
     }
-    if (title === undefined && description === undefined) throw new Error('Provide a title or description to edit.');
+    if (color !== undefined) {
+        const colorMatch = String(color).trim().match(/^#?([0-9a-f]{6})$/i);
+        if (!colorMatch) throw new Error('Embed color must be a six-digit hex value, such as `#5865F2`.');
+        panel.color = parseInt(colorMatch[1], 16);
+    }
+    if (title === undefined && description === undefined && color === undefined) throw new Error('Provide a title, embed text, or color to edit.');
     panel.updatedBy = String(userId);
     await panel.save();
     return `✅ Updated panel \`${panel.key}\`. Run publish to refresh its live message.`;
@@ -789,7 +809,7 @@ async function listPanels(guild) {
     const panels = await SelfRolePanel.find({ guildId: guild.id, status: { $ne: 'deleted' } })
         .sort({ key: 1 })
         .lean();
-    if (!panels.length) return 'No self-role panels exist yet. Use `/selfroles create` to start one.';
+    if (!panels.length) return 'No self-role panels exist yet. Use `.selfroles` for guided setup, or `/selfroles create` for advanced setup.';
 
     const rows = panels.slice(0, 30).map(panel => {
         const roleCount = (panel.groups || []).reduce((sum, group) => sum + (group.options?.length || 0), 0);
@@ -799,12 +819,11 @@ async function listPanels(guild) {
     return rows.join('\n');
 }
 
-async function previewPanel(guild, { panelKey, mode }) {
+async function previewPanel(guild, { panelKey }) {
     const panel = await requirePanel(guild.id, panelKey);
-    const previewMode = mode || panel.mode;
-    if (!['components', 'reactions', 'both'].includes(previewMode)) throw new Error('Choose components, reactions, or both.');
+    validatePanelDefinition(panel, 'reactions');
     return {
-        embeds: [makePanelEmbed(panel, previewMode)],
+        embeds: makePanelEmbeds(panel, 'reactions'),
         components: [],
         allowedMentions: { parse: [], users: [], roles: [] }
     };
@@ -818,8 +837,8 @@ async function requirePanel(guildId, panelKey) {
 
 async function publishPanel({ guild, userId, options, client }) {
     const panel = await requirePanel(guild.id, options.panelKey);
-    const mode = options.mode || 'components';
-    if (!['components', 'reactions', 'both'].includes(mode)) throw new Error('Choose components, reactions, or both.');
+    const mode = 'reactions';
+    if (options.mode && options.mode !== 'reactions') throw new Error('Self-role panels use emoji reactions; buttons and dropdowns are disabled.');
     validatePanelDefinition(panel, mode);
     await validatePanelRoles(guild, panel);
 
@@ -903,7 +922,7 @@ async function getMember(guild, userId) {
     return guild.members?.cache?.get(String(userId)) || await guild.members.fetch(String(userId)).catch(() => null);
 }
 
-async function applyGroupSelection({ guild, member, panel, group, visibleRoleIds, selectedRoleIds, client, source = 'components' }) {
+async function applyGroupSelection({ guild, member, panel, group, visibleRoleIds, selectedRoleIds, client, source = 'reaction' }) {
     const lockKey = `${guild.id}:${member.id}:${String(panel._id)}:${group.key}`;
     return withLock(lockKey, async () => {
         const freshMember = await getMember(guild, member.id) || member;
@@ -1210,7 +1229,7 @@ async function handleMessageReaction(reaction, user, adding, client) {
             guildId: guild.id,
             messageId: message.id,
             status: 'published',
-            mode: { $in: ['reactions', 'both'] }
+            mode: 'reactions'
         });
         if (!panel) return false;
 
@@ -1265,22 +1284,22 @@ async function handleMessageReaction(reaction, user, adding, client) {
     } catch (error) {
         console.error('[selfroles] reaction handler failed:', error);
         if (adding && user?.send) {
-            await user.send('I could not apply that self-role reaction. Please use the panel button or contact a moderator.').catch(() => null);
+            await user.send('I could not apply that self-role reaction. Try removing and adding your reaction again, or contact a moderator.').catch(() => null);
         }
         return true;
     }
 }
 
-async function buildRolePrefsPayload(guild, member, userId) {
-    const allPanels = await SelfRolePanel.find({
+async function buildRolePrefsPayload(guild, member) {
+    const panels = await SelfRolePanel.find({
         guildId: guild.id,
-        status: 'published'
+        status: 'published',
+        mode: 'reactions'
     }).sort({ key: 1 }).limit(100).lean();
-    const panels = allPanels.filter(panel => isComponentMode(panel.mode)).slice(0, OPTIONS_PER_PAGE);
 
     const currentRoleIds = getMemberRoleIds(member);
     const held = [];
-    for (const panel of allPanels) {
+    for (const panel of panels) {
         for (const group of panel.groups || []) {
             for (const option of group.options || []) {
                 if (currentRoleIds.has(String(option.roleId))) {
@@ -1290,37 +1309,18 @@ async function buildRolePrefsPayload(guild, member, userId) {
         }
     }
 
-    const heldDescription = held.length
+    const description = held.length
         ? held.slice(0, 20).join('\n').slice(0, 4000)
-        : 'You do not currently hold any roles offered by active self-role panels.';
+        : 'You do not currently hold any roles offered by active reaction-role panels.';
     const embed = new EmbedBuilder()
         .setColor(0x5865F2)
         .setTitle('Your self-role preferences')
-        .setDescription(heldDescription);
+        .setDescription(description);
+    const content = panels.length
+        ? 'To change these roles, react with the matching emoji on the posted panel; remove your reaction to give a role up.'
+        : 'There are no active reaction-role panels in this server.';
 
-    if (!panels.length) {
-        const content = allPanels.length
-            ? 'Active reaction-based panels are available in their posted messages; no button/dropdown panels are available to open here.'
-            : 'There are no active self-role panels in this server.';
-        return { embeds: [embed], content, allowedMentions: { parse: [] } };
-    }
-
-    const menu = new StringSelectMenuBuilder()
-        .setCustomId(`sr:prefs:${userId}`)
-        .setPlaceholder('Open a self-role panel')
-        .setMinValues(1)
-        .setMaxValues(1)
-        .addOptions(panels.map(panel => ({
-            label: safeText(panel.title || panel.key, 100),
-            value: String(panel._id),
-            description: safeText(`${panel.key} • ${panel.groups?.length || 0} group(s)`, 100)
-        })));
-
-    return {
-        embeds: [embed],
-        components: [new ActionRowBuilder().addComponents(menu)],
-        allowedMentions: { parse: [], users: [], roles: [] }
-    };
+    return { embeds: [embed], content, components: [], allowedMentions: { parse: [], users: [], roles: [] } };
 }
 
 async function startExpiryWorker(client, intervalMs = 60_000) {
@@ -1410,7 +1410,9 @@ module.exports = {
     startExpiryWorker,
     expireTimedRoles,
     makePanelEmbed,
+    makePanelEmbeds,
     publicPanelPayload,
+    getEmojiDescriptor,
     makeGroupSelector,
     makeRolePicker,
     applyGroupSelection,

@@ -503,13 +503,6 @@ async function runCommand(command, input, args, isSlash) {
 ========================================
 */
 client.on('interactionCreate', async (interaction) => {
-    /* ── Persistent self-role components ── */
-    if ((interaction.isButton?.() || interaction.isStringSelectMenu?.()) &&
-        String(interaction.customId || '').startsWith('sr:')) {
-        await selfRoleService.handleComponentInteraction(interaction);
-        return;
-    }
-
     /* ── Slash-command autocomplete ── */
     if (interaction.isAutocomplete()) {
         try {
