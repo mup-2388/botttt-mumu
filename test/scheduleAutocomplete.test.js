@@ -217,6 +217,7 @@ test('autocomplete searches fixture numbers and team names', async () => {
 
 test('/schedule preview shows both texts without pinging or changing a schedule', async () => {
     const selectedFixture = fixture(7, 'Falcons', 'Tigers');
+    selectedFixture.scheduledAt = new Date(Date.now() + 60 * 60 * 1000);
     const harness = loadScheduleCommand([selectedFixture], { selectedFixture });
     let response = null;
     let deferred = false;
