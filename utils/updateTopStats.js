@@ -15,7 +15,9 @@ const CATEGORIES = [
     { key: 'saves', label: 'Saves', emoji: '<:saves:1488530642127028358>' },
     { key: 'tackles', label: 'Tackles', emoji: '<:tackles:1488530871668703255>' },
     { key: 'interceptions', label: 'Interceptions', emoji: '🧠' },
-    { key: 'mvps', label: 'MVPs', emoji: '<:mvp:1488530468184920195>' }
+    { key: 'mvps', label: 'MVPs', emoji: '<:mvp:1488530468184920195>' },
+    // Keep this last and full-width so the existing six-stat, three-column grid stays balanced.
+    { key: 'ga', label: 'G+A', emoji: '🔥', inline: false }
 ];
 
 async function updateLiveTopStats(client, guildId) {
@@ -69,31 +71,28 @@ async function updateSingleTopStats(client, guildId, live) {
 
     for (const category of CATEGORIES) {
         const top = players
-            .filter(p => (p.stats?.[category.key] || 0) > 0)
+            .filter(player => getStatValue(player, category.key) > 0)
             .sort((a, b) => {
-                const diff =
-                    (b.stats?.[category.key] || 0) -
-                    (a.stats?.[category.key] || 0);
+                const difference = getStatValue(b, category.key) - getStatValue(a, category.key);
+                if (difference !== 0) return difference;
 
-                if (diff !== 0) return diff;
-
-                return (a.stats?.played || 0) -
-                    (b.stats?.played || 0);
+                return (Number(a.stats?.played) || 0) - (Number(b.stats?.played) || 0);
             })
             .slice(0, 5);
 
         const value = top.length
-            ? top.map((p, i) => {
-                const stat = p.stats?.[category.key] || 0;
+            ? top.map((player, index) => {
+                const stat = getStatValue(player, category.key);
+                const playerName = player.playerNameSnapshot || player.playerId?.name || 'Unknown';
 
-                return `**${i + 1}.** ${p.playerNameSnapshot} — **${stat}**`;
+                return `**${index + 1}.** ${playerName} — **${stat}**`;
             }).join('\n')
             : 'No records yet.';
 
         embed.addFields({
             name: `${category.emoji} ${category.label}`,
             value,
-            inline: true
+            inline: category.inline !== false
         });
     }
 
@@ -103,6 +102,14 @@ async function updateSingleTopStats(client, guildId, live) {
     });
 
     return true;
+}
+
+function getStatValue(player, categoryKey) {
+    if (categoryKey === 'ga') {
+        return (Number(player.stats?.goals) || 0) + (Number(player.stats?.assists) || 0);
+    }
+
+    return Number(player.stats?.[categoryKey]) || 0;
 }
 
 module.exports = {
