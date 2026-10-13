@@ -43,6 +43,7 @@ const PAGE_SIZE = 10;
 const CATEGORIES = {
     goals: { label: 'GOALS', emoji: '⚽' },
     assists: { label: 'ASSISTS', emoji: '🎯' },
+    ga: { label: 'G+A', emoji: '🔥' },
     saves: { label: 'SAVES', emoji: '🧤' },
     tackles: { label: 'TACKLES', emoji: '⚔️' },
     interceptions: { label: 'INTERCEPTIONS', emoji: '🛡️' },
@@ -68,6 +69,7 @@ module.exports = {
                 .addChoices(
                     { name: 'Goals', value: 'goals' },
                     { name: 'Assists', value: 'assists' },
+                    { name: 'G+A', value: 'ga' },
                     { name: 'Saves', value: 'saves' },
                     { name: 'Tackles', value: 'tackles' },
                     { name: 'Interceptions', value: 'interceptions' },
@@ -81,7 +83,7 @@ module.exports = {
 
     async execute(message, args) {
         try {
-            const category = (args[0] || 'goals').toLowerCase();
+            const category = normalizeCategory(args[0] || 'goals');
 
             return await runTopStats({
                 guild: message.guild,
@@ -104,7 +106,7 @@ module.exports = {
         try {
             await interaction.deferReply();
 
-            const category = interaction.options.getString('category') || 'goals';
+            const category = normalizeCategory(interaction.options.getString('category') || 'goals');
 
             return await runTopStats({
                 guild: interaction.guild,
@@ -365,38 +367,35 @@ async function buildTopStatsPayload({
     category,
     page
 }) {
-    let rows = [];
+    const isTournament = competition.type === 'tournament';
+    const Model = isTournament ? TournamentPlayer : EventPlayer;
+    const queryFilter = {
+        guildId,
+        [isTournament ? 'tournamentId' : 'eventId']: competition.doc._id,
+        isActive: true,
+        ...(category === 'ga'
+            ? {
+                $or: [
+                    { 'stats.goals': { $gt: 0 } },
+                    { 'stats.assists': { $gt: 0 } }
+                ]
+            }
+            : { [`stats.${category}`]: { $gt: 0 } })
+    };
 
-    if (competition.type === 'tournament') {
-        rows = await TournamentPlayer.find({
-            guildId,
-            tournamentId: competition.doc._id,
-            isActive: true,
-            [`stats.${category}`]: { $gt: 0 }
-        })
-            .populate('playerId')
-            .populate('teamId')
-            .sort({
-                [`stats.${category}`]: -1,
-                'stats.played': 1,
-                playerNameSnapshot: 1
-            })
-            .lean();
-    } else {
-        rows = await EventPlayer.find({
-            guildId,
-            eventId: competition.doc._id,
-            isActive: true,
-            [`stats.${category}`]: { $gt: 0 }
-        })
-            .populate('playerId')
-            .sort({
-                [`stats.${category}`]: -1,
-                'stats.played': 1,
-                playerNameSnapshot: 1
-            })
-            .lean();
+    let query = Model.find(queryFilter).populate('playerId');
+    if (isTournament) query = query.populate('teamId');
+
+    if (category !== 'ga') {
+        query = query.sort({
+            [`stats.${category}`]: -1,
+            'stats.played': 1,
+            playerNameSnapshot: 1
+        });
     }
+
+    let rows = await query.lean();
+    if (category === 'ga') rows.sort(compareGoalContributions);
 
     const pages = chunk(rows, PAGE_SIZE);
     const totalPages = Math.max(pages.length, 1);
@@ -441,7 +440,7 @@ function buildEmbed({
         ? list.map((entry, index) => {
             const rank = String(page * PAGE_SIZE + index + 1).padStart(2, '0');
             const name = truncate(entry.playerNameSnapshot || entry.playerId?.name || 'Unknown', 16).padEnd(16, ' ');
-            const stat = String(entry.stats?.[category] || 0).padStart(2, '0');
+            const stat = String(getCategoryStat(entry, category)).padStart(2, '0');
 
             return `${rank} | ${name} | ${stat}`;
         }).join('\n')
@@ -565,3 +564,31 @@ function truncate(text, max) {
     const value = String(text || '');
     return value.length > max ? value.slice(0, max - 3) + '...' : value;
 }
+
+function normalizeCategory(category) {
+    const normalized = String(category || 'goals').trim().toLowerCase().replace(/[\s+]/g, '');
+    return normalized === 'goalsassists' ? 'ga' : normalized;
+}
+
+function getCategoryStat(entry, category) {
+    if (category === 'ga') {
+        return (Number(entry.stats?.goals) || 0) + (Number(entry.stats?.assists) || 0);
+    }
+    return Number(entry.stats?.[category]) || 0;
+}
+
+function compareGoalContributions(a, b) {
+    const contributionDifference = getCategoryStat(b, 'ga') - getCategoryStat(a, 'ga');
+    if (contributionDifference) return contributionDifference;
+
+    const playedDifference = (Number(a.stats?.played) || 0) - (Number(b.stats?.played) || 0);
+    if (playedDifference) return playedDifference;
+
+    const aName = String(a.playerNameSnapshot || a.playerId?.name || '');
+    const bName = String(b.playerNameSnapshot || b.playerId?.name || '');
+    return aName.localeCompare(bName);
+}
+
+module.exports.CATEGORIES = CATEGORIES;
+module.exports.buildTopStatsPayload = buildTopStatsPayload;
+module.exports.normalizeCategory = normalizeCategory;

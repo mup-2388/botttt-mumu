@@ -954,6 +954,13 @@ const serverConfigSchema = new mongoose.Schema(
             default: false
         },
 
+        // When false, setcolor is blocked and team-role sync preserves
+        // whatever colors are already set on Discord roles.
+        teamRoleColorsEnabled: {
+            type: Boolean,
+            default: true
+        },
+
         emojis: {
             stats: {
             played: { type: String, default: '<:Stadium:1487010283506630776>' },

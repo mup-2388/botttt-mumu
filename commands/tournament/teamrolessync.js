@@ -36,7 +36,8 @@ const {
 const {
     Team,
     Player,
-    TournamentPlayer
+    TournamentPlayer,
+    ServerConfig
 } = require('../../models/Tournament');
 
 const { OWNER_IDS, isOrganizer } = require('../../utils/isOrganizer');
@@ -150,14 +151,32 @@ module.exports = {
 ==================================================== */
 
 async function runSync({ guild, reply, preview = false, keepExtra = false }) {
+    let teamRoleColorsEnabled = true;
+    let teamRoleColorsSettingRead = true;
+
+    try {
+        const serverConfig = await ServerConfig.findOne({ guildId: guild.id }).lean();
+        teamRoleColorsEnabled = serverConfig?.teamRoleColorsEnabled !== false;
+    } catch (error) {
+        // Fail closed on color writes, but continue the membership sync.
+        console.error('[teamrolessync] could not read team-role color setting:', error);
+        teamRoleColorsEnabled = false;
+        teamRoleColorsSettingRead = false;
+    }
+
+    const colorStatus = teamRoleColorsEnabled
+        ? 'Team-role color syncing is enabled.'
+        : teamRoleColorsSettingRead
+            ? 'Team-role color syncing is disabled; existing Discord role colors will be preserved.'
+            : 'Could not verify the color setting; role colors will be preserved for safety.';
 
     const progressEmbed = new EmbedBuilder()
         .setColor(0xFEE75C)
         .setTitle(preview ? '🔎 TEAM ROLE SYNC (PREVIEW)' : '🔄 TEAM ROLE SYNC')
         .setDescription(
-            preview
+            (preview
                 ? 'Checking every registered team — nothing will be changed.'
-                : 'Going through all registered teams and syncing roles...'
+                : 'Going through all registered teams and syncing roles...') + `\n${colorStatus}`
         )
         .setTimestamp();
 
@@ -276,14 +295,16 @@ async function runSync({ guild, reply, preview = false, keepExtra = false }) {
             let recolored = false;
 
             /* ── Colour sync ── */
-            const teamColor = parseColor(team.color);
+            if (teamRoleColorsEnabled) {
+                const teamColor = parseColor(team.color);
 
-            if (teamColor !== null && role.color !== teamColor) {
-                if (preview) {
-                    recolored = true;
-                } else {
-                    const ok = await role.setColor(teamColor).then(() => true).catch(() => false);
-                    if (ok) recolored = true;
+                if (teamColor !== null && role.color !== teamColor) {
+                    if (preview) {
+                        recolored = true;
+                    } else {
+                        const ok = await role.setColor(teamColor).then(() => true).catch(() => false);
+                        if (ok) recolored = true;
+                    }
                 }
             }
 
@@ -388,6 +409,14 @@ async function runSync({ guild, reply, preview = false, keepExtra = false }) {
                     ? '\n`keep_extra` was used — nobody was stripped of a role.'
                     : '\nUse `.teamrolessync --keep-extra` to only add roles, never remove them.'),
             inline: false
+        }, {
+            name: 'Team-role colors',
+            value: teamRoleColorsEnabled
+                ? 'Enabled — matching team colors may be applied to Discord roles.'
+                : teamRoleColorsSettingRead
+                    ? 'Disabled — existing Discord role colors were left untouched; membership syncing still ran normally.'
+                    : 'Setting unavailable — role colors were left untouched for safety; membership syncing still ran normally.',
+            inline: false
         })
         .setFooter({
             text: preview
@@ -437,3 +466,5 @@ function parseColor(color) {
 
     return parseInt(cleaned, 16);
 }
+
+module.exports.runSync = runSync;
