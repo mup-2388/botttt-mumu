@@ -19,6 +19,7 @@ const {
 } = require('discord.js');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { ServerConfig } = require('../../models/Tournament');
 const { resolveManagedTeamInTournament } = require('../../utils/teamResolver');
 const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
 const { parseTeamTokenInTournament } = require('../../utils/tournamentContext');
@@ -212,6 +213,15 @@ function parseColorInput(input) {
  * Team resolution via resolveManagedTeam (organizer: any, captain: own teams).
  */
 async function runSetColor({ guild, userId, organizer, teamName, colorInput, tournament = null, tournamentKey = null, reply }) {
+    const serverConfig = await ServerConfig.findOne({ guildId: guild.id }).lean();
+    if (serverConfig?.teamRoleColorsEnabled === false) {
+        return reply({
+            content:
+                '🎨 Team-role color changes are disabled in this server. Existing role colors are being preserved. ' +
+                'An organizer can re-enable them with `.teamrolecolors on`.'
+        });
+    }
+
     if (!tournament) {
         const r = await resolveTournament(guild.id, tournamentKey);
         if (!r.tournament) return reply({ content: r.error });
@@ -292,4 +302,4 @@ async function runSetColor({ guild, userId, organizer, teamName, colorInput, tou
     return reply({ embeds: [embed] });
 }
 
-
+module.exports.runSetColor = runSetColor;
