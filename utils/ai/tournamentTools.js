@@ -548,7 +548,11 @@ const TOOLS = {
         const fixtures = await teamFixtures(ctx.guildId, tournament, team);
         const upcoming = fixtures.filter(f => f.status === 'Pending' || f.status === 'Live');
 
-        return { team: team.name, upcoming: upcoming.slice(0, 6).map(f => fixtureLine(f, team)) };
+        return {
+            team: team.name,
+            remainingMatches: upcoming.length,
+            upcoming: upcoming.slice(0, 6).map(f => fixtureLine(f, team))
+        };
     },
 
     async team_results({ ctx, args }) {
@@ -986,7 +990,7 @@ const TOOL_LIST = [
     { name: 'team_form', description: 'A team\'s recent results (W/D/L sequence).', args: { team: 'team name', lastN: 'number, default 5' } },
     { name: 'standings', description: 'Full league/group table; use for standings, top-of-table, leader, and who-is-first questions. Returns every active team, including teams on zero points.', args: { group: 'optional group key' } },
     { name: 'team_position', description: 'A team\'s position, points and gap to the leader.', args: { team: 'team name' } },
-    { name: 'team_schedule', description: 'A team\'s upcoming fixtures, including matches marked reserved/postponed.', args: { team: 'team name' } },
+    { name: 'team_schedule', description: 'A team\'s upcoming fixtures and remaining-match count, including matches marked reserved/postponed.', args: { team: 'team name' } },
     { name: 'team_results', description: 'A team\'s recent results.', args: { team: 'team name' } },
     { name: 'leaders', description: 'Leaderboard for a statistic (golden boot, assists, saves, tackles, interceptions, MVPs).', args: { metric: 'metric', limit: 'number' } },
     { name: 'player_rank', description: 'A player\'s rank in a statistic.', args: { player: 'name (optional, defaults to the asker)', metric: 'metric' } },
