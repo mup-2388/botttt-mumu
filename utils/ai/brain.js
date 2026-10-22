@@ -119,16 +119,23 @@ async function route(question, ctx, teams) {
         /\btop of (?:the )?(?:table|league)\b/i.test(lower)
         || /\b(?:who|which team)\b.{0,40}\b(?:top|first|leader|leads?|leading)\b/i.test(lower)
         || /\b(?:leader|leaders|leading team)\b/i.test(lower);
+    const asksTopNStandings = !metric
+        && /\btop\s*-?\s*(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(lower)
+        && /\b(?:team|tournament|league|table|standings?|qualif|our|we|us|my)\b/i.test(lower);
     const asksFullStandings =
         /\b(?:standings?|league table|points table|full table|whole table)\b/i.test(lower)
         || /\btable\b/i.test(lower)
-        || asksTableLeader;
+        || asksTableLeader
+        || asksTopNStandings;
 
     // Resolve explicit top/table questions before considering team names found in
     // quoted conversation context. A full-table request needs the full standings,
     // not just the asking user's (possibly quoted) team row.
-    if (asksTableLeader) {
+    if (asksTableLeader || asksTopNStandings) {
         calls.push({ tool: 'standings', args: { group: null } });
+        if (asksTopNStandings && !teamName && /\b(?:my|our|we|us)\b/i.test(lower)) {
+            calls.push({ tool: 'my_team', args: {} });
+        }
     } else if (asksPersonalPosition || asksNamedTeamPosition) {
         calls.push(teamName
             ? { tool: 'team_position', args: { team: teamName } }
@@ -258,13 +265,35 @@ async function plan(question, ctx, teams) {
 
 const TOURNAMENT_TOPIC = /(goal|assist|save|tackle|interception|mvp|match|fixture|game|team|squad|player|tournament|league|table|standings|points|captain|scorer|keeper|qualif|knockout|group|form|result|fixture|next|opponent|rank|leader|trophy|award|free agent|season|round|bracket)/i;
 
-async function gatherFacts({ question, guildId, userId, tournamentKey = null, force = false }) {
+function isStandingsRetry(question, contextMessage = '') {
+    const previousAnswer = String(contextMessage).toLowerCase();
+    const currentQuestion = String(question).toLowerCase();
+    const previousWasAboutStandings = /\b(?:standings?|league table|points table|tournament table|table is empty|no active teams|database)\b/i.test(previousAnswer);
+    const asksForAnotherCheck = /\b(?:look|check|verify|recheck|again|database|data|standings?|table|wrong)\b/i.test(currentQuestion)
+        || /^\s*(?:what|huh|really)\s*[?!.]*\s*$/i.test(currentQuestion);
+
+    return previousWasAboutStandings && asksForAnotherCheck;
+}
+
+function asksForTopNChance(question) {
+    return /\btop\s*-?\s*(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(String(question))
+        && /\b(?:chance|possible|possibility|can|could|still|reach|get|make|finish|end up|at least|into)\b/i.test(String(question));
+}
+
+async function gatherFacts({ question, guildId, userId, tournamentKey = null, force = false, contextMessage = '' }) {
     if (!question || !guildId) return null;
 
     const ctx = { guildId, userId, tournamentKey };
     const teams = await guildTeams(guildId);
 
     let calls = await route(question, ctx, teams);
+
+    if (!calls.length && isStandingsRetry(question, contextMessage)) {
+        calls = [
+            { tool: 'standings', args: { group: null } },
+            { tool: 'my_team', args: {} }
+        ];
+    }
 
     if (!calls.length) {
         if (!TOURNAMENT_TOPIC.test(question)) return null;
@@ -297,6 +326,7 @@ async function gatherFacts({ question, guildId, userId, tournamentKey = null, fo
     }
 
     const results = [];
+    let myTeamName = null;
 
     for (const call of calls) {
         const args = { ...(call.args || {}) };
@@ -305,7 +335,16 @@ async function gatherFacts({ question, guildId, userId, tournamentKey = null, fo
         if (typeof args.player === 'string' && /^(me|myself|i)$/i.test(args.player.trim())) delete args.player;
 
         const result = await runTool(call.tool, args, ctx);
+        if (call.tool === 'my_team' && result?.team) myTeamName = result.team;
         results.push({ tool: call.tool, args, result });
+    }
+
+    const explicitlyNamedTeam = asksForTopNChance(question) ? extractTeamName(question, teams) : null;
+    const outlookTeam = myTeamName || explicitlyNamedTeam;
+    if (asksForTopNChance(question) && outlookTeam && results.length < 3 && !calls.some(c => c.tool === 'team_schedule')) {
+        const args = { team: outlookTeam };
+        const result = await runTool('team_schedule', args, ctx);
+        results.push({ tool: 'team_schedule', args, result });
     }
 
     const usable = results.filter(r => r.result && !r.result.error);

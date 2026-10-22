@@ -410,6 +410,26 @@ function isBotTournamentQuestion(question) {
     return keywords.some(kw => lower.includes(kw));
 }
 
+function isLocalTournamentDataQuestion(question, contextMessage = '') {
+    const lower = String(question).toLowerCase();
+    const context = String(contextMessage).toLowerCase();
+    const refersToLocalTournament =
+        /\b(?:my|our)\s+(?:team|tournament|league|competition|table|standings?)\b/i.test(lower)
+        || /\b(?:we|us)\b.{0,40}\b(?:team|tournament|league|competition|table|standings?)\b/i.test(lower)
+        || /\bthis\s+(?:tournament|league|competition)\b/i.test(lower);
+    const followsALocalStandingsAnswer =
+        /\b(?:standings?|league table|points table|tournament table|table is empty|no active teams|database)\b/i.test(context)
+        && (isStandingsCorrectionPrompt(lower));
+
+    return (refersToLocalTournament && isBotTournamentQuestion(question)) || followsALocalStandingsAnswer;
+}
+
+function isStandingsCorrectionPrompt(question) {
+    const lower = String(question).toLowerCase();
+    return /\b(?:look|check|verify|recheck|again|database|data|standings?|table|wrong)\b/i.test(lower)
+        || /^\s*(?:what|huh|really)\s*[?!.]*\s*$/i.test(lower);
+}
+
 function isCommandHelpQuestion(question) {
     const lower = question.toLowerCase();
     if (/^[.+!$](\w+)/.test(lower)) return true;
@@ -463,6 +483,17 @@ async function askFootball(question, options = {}) {
     const userId = options.userId || 'unknown';
     const isCommandQ = isCommandHelpQuestion(cleanQ);
     const isOwner = userId === OWNER_ID;
+    const history = getHistory(channelId, userId);
+    const recentLocalStandingsContext = history.slice(-8).some(message =>
+        (message.role === 'user' && isLocalTournamentDataQuestion(message.content))
+        || (message.role === 'assistant' && /\b(?:standings?|league table|points table|no active teams|empty table)\b/i.test(message.content))
+    );
+    const factsContextMessage = [
+        options.contextMessage || '',
+        recentLocalStandingsContext && isStandingsCorrectionPrompt(cleanQ)
+            ? '[Earlier in this conversation, the user asked about this server\'s tournament standings; re-fetch the live table for this follow-up.]'
+            : ''
+    ].filter(Boolean).join('\n');
 
     /* ── 0. Ping-bait / manipulation guard ──
        Deterministic, runs before any model call: the excuse-based tricks
@@ -506,7 +537,8 @@ async function askFootball(question, options = {}) {
                 question: cleanQ,
                 guildId: options.guildId,
                 userId,
-                tournamentKey: options.tournamentKey || null
+                tournamentKey: options.tournamentKey || null,
+                contextMessage: factsContextMessage
             });
 
             if (facts?.factBlock) {
@@ -539,9 +571,12 @@ async function askFootball(question, options = {}) {
         emojiHint: personalEmojiHint
     });
 
+    const localTournamentDataQuestion = isLocalTournamentDataQuestion(cleanQ, factsContextMessage);
     const factRules = factBlock
-        ? `${factBlock}\n\nRULES FOR THESE FACTS:\n- Use ONLY these numbers for anything about the league. Never invent stats, scores, names or standings.\n- Live facts override anything said in quoted context or an earlier assistant reply. If the facts contain the requested table, answer from them instead of repeating earlier uncertainty.\n- If the facts say positionProvisional is true, explain that no played matches are recorded and the displayed positions are provisional; do not present the first row as a meaningful leader.\n- If the facts do not contain what was asked, say you don't have it.\n- Keep it short; the user wants the number and a bit of banter, not a data dump.`
-        : '';
+        ? `${factBlock}\n\nRULES FOR THESE FACTS:\n- Use ONLY these numbers for anything about the league. Never invent stats, scores, names or standings.\n- Live facts override anything said in quoted context or an earlier assistant reply. If the facts contain the requested table, answer from them instead of repeating earlier uncertainty.\n- If the facts say positionProvisional is true, explain that no played matches are recorded and the displayed positions are provisional; do not present the first row as a meaningful leader.\n- For a requested top-N finish, compare the user's team with the Nth-place row in the live table; do not substitute configured qualification spots, and do not guarantee a future outcome. Use remainingMatches when supplied.\n- If the facts do not contain what was asked, say you don't have it.\n- Keep it short; the user wants the number and a bit of banter, not a data dump.`
+        : localTournamentDataQuestion
+            ? 'This is about a private tournament on this Discord server. Do not use public football data or guess standings. If no LIVE TOURNAMENT FACTS are supplied, say you could not retrieve or verify the server data; do not claim the table is empty or that no teams are registered unless a database result explicitly says so.'
+            : '';
 
     const systemPrompt = buildSystemPrompt({
         tournamentContext,
@@ -552,7 +587,7 @@ async function askFootball(question, options = {}) {
         extraBlock: [personalityBlock, factRules].filter(Boolean).join('\n\n')
     });
 
-    const webContext = await searchWebIfNeeded(cleanQ);
+    const webContext = localTournamentDataQuestion ? '' : await searchWebIfNeeded(cleanQ);
 
     const referencedContext = String(options.contextMessage || '').trim().slice(0, 2000);
     const currentMessage = referencedContext
@@ -570,8 +605,6 @@ ${webContext}`;
     }
 
     // Per-user per-channel history — no cross-contamination
-    const history = getHistory(channelId, userId);
-
     // Build messages — with image if provided
     const messages = buildMessages(systemPrompt, history, userMessage, options.imageData || null);
 
