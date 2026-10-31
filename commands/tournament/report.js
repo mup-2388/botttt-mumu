@@ -42,6 +42,7 @@ const { parseScheduleTime, discordFull, discordRelative } = require('../../utils
 /** Max fixtures shown in the menu */
 const FIXTURE_LIMIT = 15;
 const GROUP_FIXTURE_LIMIT = 25;
+const RESERVED_PAGE_SIZE = 25;
 
 module.exports = {
     name: 'report',
@@ -154,20 +155,55 @@ async function startReportMenu({ client, guild, userId, reply }) {
         return reply({ content: '📭 No active tournaments found.' });
     }
 
-    const tournament = await getDefaultTournament(guild.id);
+    let tournament = await getDefaultTournament(guild.id);
 
     if (!tournament) {
         return reply({ content: '⚠️ No default tournament is set. Set a default tournament, then run `.report` again.' });
     }
 
     let selectedGroup = 'all';
-    let pendingFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
+    let showingReserved = false;
+    let reservedPage = 0;
+    let hasNextReservedPage = false;
+    let pendingFixtures = [];
+    let msg = null;
+
+    async function refreshDisplayedFixtures() {
+        if (showingReserved) {
+            let result = await getReservedFixturePage(guild.id, tournament._id, selectedGroup, reservedPage);
+            if (!result.fixtures.length && reservedPage > 0) {
+                reservedPage--;
+                result = await getReservedFixturePage(guild.id, tournament._id, selectedGroup, reservedPage);
+            }
+            pendingFixtures = result.fixtures;
+            hasNextReservedPage = result.hasNext;
+            return;
+        }
+
+        pendingFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
+        hasNextReservedPage = false;
+    }
+
+    async function buildCurrentMenuPayload() {
+        return {
+            embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup, guild.id, { showingReserved, reservedPage })],
+            components: await buildMenuComponents(tournaments, tournament, pendingFixtures, guild.id, selectedGroup, {
+                showingReserved,
+                reservedPage,
+                hasNextReservedPage
+            })
+        };
+    }
+
+    async function refreshMenuMessage() {
+        await refreshDisplayedFixtures();
+        if (msg?.edit) return msg.edit(await buildCurrentMenuPayload());
+    }
+
+    await refreshDisplayedFixtures();
 
     // ── Send initial menu ──
-    const msg = await reply({
-        embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup, guild.id)],
-        components: await buildMenuComponents(tournaments, tournament, pendingFixtures, guild.id, selectedGroup)
-    });
+    msg = await reply(await buildCurrentMenuPayload());
 
     if (!msg?.createMessageComponentCollector) return;
 
@@ -186,20 +222,36 @@ async function startReportMenu({ client, guild, userId, reply }) {
                 });
             }
 
-            // ── Reserve button → modal for match number / new day / reason ──
-            if (interaction.isButton() && interaction.customId === 'report_reserve') {
-                return handleReserveButton({
-                    interaction,
-                    client,
-                    guild,
-                    tournament,
-                    msg,
-                    selectedGroup,
-                    tournaments,
-                    onFixtureUpdated: (updated) => {
-                        pendingFixtures = updated;
-                    }
-                });
+            if (interaction.isButton()) {
+                if (interaction.customId === 'report_reserve') {
+                    return handleReserveButton({ interaction, client, guild, tournament, refreshMenu: refreshMenuMessage });
+                }
+
+                if (interaction.customId === 'report_reserved_view') {
+                    showingReserved = true;
+                    reservedPage = 0;
+                    await refreshDisplayedFixtures();
+                    return interaction.update(await buildCurrentMenuPayload());
+                }
+
+                if (interaction.customId === 'report_pending_view') {
+                    showingReserved = false;
+                    reservedPage = 0;
+                    await refreshDisplayedFixtures();
+                    return interaction.update(await buildCurrentMenuPayload());
+                }
+
+                if (interaction.customId === 'report_reserved_prev' && showingReserved && reservedPage > 0) {
+                    reservedPage--;
+                    await refreshDisplayedFixtures();
+                    return interaction.update(await buildCurrentMenuPayload());
+                }
+
+                if (interaction.customId === 'report_reserved_next' && showingReserved && hasNextReservedPage) {
+                    reservedPage++;
+                    await refreshDisplayedFixtures();
+                    return interaction.update(await buildCurrentMenuPayload());
+                }
             }
 
             if (!interaction.isStringSelectMenu()) return;
@@ -218,23 +270,20 @@ async function startReportMenu({ client, guild, userId, reply }) {
 
                 tournament = selected;
                 selectedGroup = 'all';
-                pendingFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
+                showingReserved = false;
+                reservedPage = 0;
+                await refreshDisplayedFixtures();
 
-                return interaction.update({
-                    embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup, guild.id)],
-                    components: await buildMenuComponents(tournaments, tournament, pendingFixtures, guild.id, selectedGroup)
-                });
+                return interaction.update(await buildCurrentMenuPayload());
             }
 
             // ── Group filter changed ──
             if (interaction.customId === 'report_group') {
                 selectedGroup = interaction.values[0];
-                pendingFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
+                reservedPage = 0;
+                await refreshDisplayedFixtures();
 
-                return interaction.update({
-                    embeds: [buildMenuEmbed(tournament, pendingFixtures, selectedGroup, guild.id)],
-                    components: await buildMenuComponents(tournaments, tournament, pendingFixtures, guild.id, selectedGroup)
-                });
+                return interaction.update(await buildCurrentMenuPayload());
             }
 
             // ── Fixture selected → open score modal ──
@@ -246,12 +295,7 @@ async function startReportMenu({ client, guild, userId, reply }) {
                     tournament,
                     fixtureId: interaction.values[0],
                     userId,
-                    msg,
-                    onFixtureUpdated: (updated) => {
-                        pendingFixtures = updated;
-                    },
-                    selectedGroup,
-                    tournaments
+                    refreshMenu: refreshMenuMessage
                 });
             }
         } catch (error) {
@@ -278,7 +322,7 @@ async function startReportMenu({ client, guild, userId, reply }) {
 /**
  * Show the score input modal, wait for submission, and process the result.
  */
-async function handleFixtureSelection({ interaction, client, guild, tournament, fixtureId, userId, msg, onFixtureUpdated, selectedGroup, tournaments }) {
+async function handleFixtureSelection({ interaction, client, guild, tournament, fixtureId, userId, refreshMenu }) {
     const fixture = await Fixture.findOne({
         guildId: guild.id,
         tournamentId: tournament._id,
@@ -357,13 +401,8 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
         // ── Confirm to user ──
         await submitted.editReply({ embeds: [result.embed] });
 
-        // ── Refresh the report menu ──
-        const updatedFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
-
-        await msg.edit({
-            embeds: [buildMenuEmbed(tournament, updatedFixtures, selectedGroup, guild.id)],
-            components: await buildMenuComponents(tournaments, tournament, updatedFixtures, guild.id, selectedGroup)
-        }).catch(() => null);
+        // ── Refresh the current pending/reserved view ──
+        await refreshMenu().catch(() => null);
     } catch (error) {
         console.error('[report] processing error:', error);
 
@@ -430,16 +469,7 @@ async function reserveFromReport({ client, guild, args = [], actorId, reply }) {
 }
 
 /** Button opens a modal so organizers can reserve any pending/live fixture. */
-async function handleReserveButton({
-    interaction,
-    client,
-    guild,
-    tournament,
-    msg,
-    selectedGroup,
-    tournaments,
-    onFixtureUpdated
-}) {
+async function handleReserveButton({ interaction, client, guild, tournament, refreshMenu }) {
     const modalId = `report_reserve_${String(tournament._id).slice(-20)}_${Date.now()}`;
 
     const matchInput = new TextInputBuilder()
@@ -522,13 +552,7 @@ async function handleReserveButton({
     await submitted.editReply({ content: buildReservationConfirmation(result, guild.id) });
 
     try {
-        const updatedFixtures = await getPendingFixtures(guild.id, tournament._id, selectedGroup);
-        onFixtureUpdated?.(updatedFixtures);
-
-        await msg.edit({
-            embeds: [buildMenuEmbed(tournament, updatedFixtures, selectedGroup, guild.id)],
-            components: await buildMenuComponents(tournaments, tournament, updatedFixtures, guild.id, selectedGroup)
-        });
+        await refreshMenu();
     } catch (error) {
         console.error('[report] reserve menu refresh failed:', error?.message || error);
     }
@@ -652,7 +676,8 @@ async function getPendingFixtures(guildId, tournamentId, groupKey = null) {
     const query = {
         guildId,
         tournamentId,
-        ...reportableFixtureStatusFilter()
+        ...reportableFixtureStatusFilter(),
+        'reserved.isReserved': { $ne: true }
     };
 
     if (groupKey && groupKey !== 'all') {
@@ -666,32 +691,70 @@ async function getPendingFixtures(guildId, tournamentId, groupKey = null) {
         .lean();
 }
 
+async function getReservedFixturePage(guildId, tournamentId, groupKey = null, page = 0) {
+    const query = {
+        guildId,
+        tournamentId,
+        ...reportableFixtureStatusFilter(),
+        'reserved.isReserved': true
+    };
+
+    if (groupKey && groupKey !== 'all') {
+        query.groupKey = groupKey;
+    }
+
+    const fixtures = await Fixture.find(query)
+        .sort({ matchNumber: 1 })
+        .skip(Math.max(0, page) * RESERVED_PAGE_SIZE)
+        .limit(RESERVED_PAGE_SIZE + 1)
+        .lean();
+
+    return {
+        fixtures: fixtures.slice(0, RESERVED_PAGE_SIZE),
+        hasNext: fixtures.length > RESERVED_PAGE_SIZE
+    };
+}
+
 /* ====================================================
    MENU UI BUILDERS
 ==================================================== */
 
 /**
- * Build the report menu embed showing the tournament info and fixture list.
+ * Build the report menu embed showing either regular pending or reserved fixtures.
  */
-function buildMenuEmbed(tournament, fixtures, selectedGroup = 'all', guildId = tournament.guildId || null) {
+function buildMenuEmbed(
+    tournament,
+    fixtures,
+    selectedGroup = 'all',
+    guildId = tournament.guildId || null,
+    { showingReserved = false, reservedPage = 0 } = {}
+) {
     const fixtureList = fixtures.length
         ? fixtures.map(f => {
             const badge = isReserved(f) ? ` · ${reservedBadge(f, { guildId })}` : '';
 
             return `#${f.matchNumber} — **${vsLine(f.homeTeam, f.awayTeam, guildId)}** (${f.roundLabel || prettyPhase(f.phase)})${badge}`;
         }).join('\n')
-        : 'No unplayed reportable fixtures found.';
+        : showingReserved
+            ? 'No reserved pending fixtures found.'
+            : 'No regular pending fixtures found. Use “Report reserved matches” to view reserved fixtures.';
+
+    const viewName = showingReserved ? `Reserved fixtures · page ${reservedPage + 1}` : 'Regular pending fixtures';
+    const footerText = showingReserved
+        ? `Showing ${fixtures.length} reserved fixtures • use the page buttons to navigate`
+        : `Showing ${fixtures.length} regular pending fixtures • reserved fixtures are in their own view`;
 
     return new EmbedBuilder()
         .setColor(0xFEBE10)
-        .setTitle('📝 REPORT MATCH')
+        .setTitle(showingReserved ? '🛡️ REPORT RESERVED MATCH' : '📝 REPORT MATCH')
         .setDescription(
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n` +
-            `Group Filter: **${selectedGroup === 'all' ? 'All Groups' : selectedGroup}**\n\n` +
+            `Group Filter: **${selectedGroup === 'all' ? 'All Groups' : selectedGroup}**\n` +
+            `View: **${viewName}**\n\n` +
             fixtureList
         )
-        .setFooter({ text: `Showing ${fixtures.length} fixtures • use “Mark match reserved” if it could not be played` })
+        .setFooter({ text: footerText })
         .setTimestamp();
 }
 
@@ -699,7 +762,14 @@ function buildMenuEmbed(tournament, fixtures, selectedGroup = 'all', guildId = t
  * Build the report menu components: tournament selector, group filter, fixture selector.
  * Runs a DB query for available groups.
  */
-async function buildMenuComponents(tournaments, selectedTournament, fixtures, guildId, selectedGroup = 'all') {
+async function buildMenuComponents(
+    tournaments,
+    selectedTournament,
+    fixtures,
+    guildId,
+    selectedGroup = 'all',
+    { showingReserved = false, reservedPage = 0, hasNextReservedPage = false } = {}
+) {
     const rows = [];
 
     // ── Tournament selector ──
@@ -750,16 +820,56 @@ async function buildMenuComponents(tournaments, selectedTournament, fixtures, gu
         );
     }
 
-    // ── Reserve button (for a match that could not be played) ──
-    rows.push(
-        new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId('report_reserve')
-                .setLabel('Mark match reserved')
-                .setEmoji(toDiscordEmoji(slotEmoji('reserve', guildId)) || '🛡️')
-                .setStyle(ButtonStyle.Secondary)
-        )
-    );
+    // Keep reserved fixtures out of the main list; open a separate view to report them.
+    if (showingReserved) {
+        rows.push(
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('report_pending_view')
+                    .setLabel('Back to pending fixtures')
+                    .setEmoji('↩️')
+                    .setStyle(ButtonStyle.Secondary)
+            )
+        );
+    } else {
+        rows.push(
+            new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('report_reserve')
+                    .setLabel('Mark match reserved')
+                    .setEmoji(toDiscordEmoji(slotEmoji('reserve', guildId)) || '🛡️')
+                    .setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder()
+                    .setCustomId('report_reserved_view')
+                    .setLabel('Report reserved matches')
+                    .setEmoji('🧾')
+                    .setStyle(ButtonStyle.Secondary)
+            )
+        );
+    }
+
+    if (showingReserved && (reservedPage > 0 || hasNextReservedPage)) {
+        const pageButtons = [];
+        if (reservedPage > 0) {
+            pageButtons.push(
+                new ButtonBuilder()
+                    .setCustomId('report_reserved_prev')
+                    .setLabel('Previous page')
+                    .setEmoji('◀️')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        }
+        if (hasNextReservedPage) {
+            pageButtons.push(
+                new ButtonBuilder()
+                    .setCustomId('report_reserved_next')
+                    .setLabel('Next page')
+                    .setEmoji('▶️')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        }
+        rows.push(new ActionRowBuilder().addComponents(...pageButtons));
+    }
 
     // ── Fixture selector ──
     if (fixtures.length) {
