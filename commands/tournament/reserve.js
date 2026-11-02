@@ -114,7 +114,7 @@ module.exports = {
                 return message.reply(
                     '🛡️ **Reserved matches** — for a match that could not be played on its day\n' +
                     '`.reserve <match> [at <time>] [reason:"..."]` — e.g. `.reserve 12 at sunday 9pm reason:"rain"`\n' +
-                    '`.reserve list` · `.reserve clear <match>`\n' +
+                    '`.reserve list` · `.reserve clear <match>` · `.postreserves` announces all reserved fixtures\n' +
                     'Reserving unlocks the stadium channel and keeps the match playable whenever you get to it.'
                 );
             }
