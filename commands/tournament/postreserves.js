@@ -352,8 +352,7 @@ function paginateReservedFixtures({ preparedFixtures, tournament, includePings }
 function buildReservedHeader(tournament, page, count) {
     return [
         `# 🛡️ RESERVED MATCHES — ${safeDisplayText(tournament.name)}`,
-        `Page ${page} · ${count} reserved fixture${count === 1 ? '' : 's'}`,
-        'These fixtures were postponed. Agree a new time, schedule it with `.schedule`, then report the score with `.report`.'
+        `Page ${page} · ${count} reserved fixture${count === 1 ? '' : 's'}`
     ].join('\n');
 }
 

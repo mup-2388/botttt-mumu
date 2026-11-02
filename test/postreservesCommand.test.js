@@ -236,6 +236,7 @@ test('postreserves announces all active reserved fixtures in paginated messages 
     assert.match(content, /New time: <t:\d+:F> \(<t:\d+:R>\)/, 'reserve dates should use Discord timestamps');
     assert.ok(content.includes('Matchday 1'), 'the original round label should be shown');
     assert.ok(content.includes('Weather delay for fixture 2'), 'reserve notes should be included');
+    assert.doesNotMatch(content, /Agree a new time|schedule it with|report the score with/i);
     assert.ok(content.includes(`<#${harness.stadiumId}>`), 'home stadium should be shown');
     assert.ok(content.includes(`<@&${harness.fixturesRoleId}>`), 'first page should announce the fixtures role');
 
