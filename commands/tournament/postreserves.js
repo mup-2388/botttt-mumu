@@ -19,8 +19,7 @@ const {
 const { Fixture, Team, ServerConfig } = require('../../models/Tournament');
 const { getDefaultTournament } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { discordFull, discordRelative } = require('../../utils/istTime');
-const { slotEmoji, vsLine } = require('../../utils/ai/emojiSlots');
+const { vsLine } = require('../../utils/ai/emojiSlots');
 const {
     FIXTURES_ROLE_ID,
     UNALDO_USER_ID,
@@ -134,7 +133,7 @@ async function runPostReserves({ guild, reply, testMode = false, targetChannel =
         'reserved.isReserved': true,
         status: { $in: ['Pending', 'Live'] }
     })
-        .select('matchNumber roundLabel homeTeam awayTeam status scheduledAt venueName reserved.isReserved reserved.until reserved.note')
+        .select('matchNumber roundLabel homeTeam awayTeam status venueName reserved.isReserved reserved.note')
         .sort({ matchNumber: 1 })
         .lean();
 
@@ -284,10 +283,6 @@ async function runPostReserves({ guild, reply, testMode = false, targetChannel =
 }
 
 function formatReservedFixture({ fixture, homeMention, awayMention, venue, guildId }) {
-    const newTime = fixture.reserved?.until || fixture.scheduledAt;
-    const timeLine = newTime
-        ? `${slotEmoji('calendar', guildId)} New time: ${discordFull(newTime)} (${discordRelative(newTime)})`
-        : `${slotEmoji('calendar', guildId)} New time: not set — coordinate and schedule it when agreed`;
     const reasonLine = fixture.reserved?.note
         ? `Reason: ${safeDisplayText(fixture.reserved.note).slice(0, 180)}`
         : null;
@@ -298,7 +293,6 @@ function formatReservedFixture({ fixture, homeMention, awayMention, venue, guild
         matchTitle,
         vsLine(homeMention, awayMention, guildId),
         `🏟️ ${venue}`,
-        timeLine,
         reasonLine
     ].filter(Boolean).join('\n');
 }

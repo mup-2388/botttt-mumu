@@ -153,12 +153,7 @@ function makeHarness({ fixtures = null } = {}) {
             getDefaultTournament: async () => ({ _id: 'tournament-1', name: 'Test Cup' })
         },
         '../../utils/isOrganizer': { isOrganizer: async () => true },
-        '../../utils/istTime': {
-            discordFull: value => `<t:${Math.floor(new Date(value).getTime() / 1000)}:F>`,
-            discordRelative: () => '<t:1798732800:R>'
-        },
         '../../utils/ai/emojiSlots': {
-            slotEmoji: () => '📅',
             vsLine: (home, away) => `${home} VS ${away}`
         },
         '../../utils/matchdayAnnouncement': {
@@ -232,8 +227,7 @@ test('postreserves announces all active reserved fixtures in paginated messages 
     }
     assert.ok(!content.includes('__Match #90__'), 'non-reserved fixtures should not be announced');
     assert.ok(!content.includes('__Match #91__'), 'played fixtures should not be announced');
-    assert.ok(content.includes('New time: not set'), 'fixtures without a reserve date should say so');
-    assert.match(content, /New time: <t:\d+:F> \(<t:\d+:R>\)/, 'reserve dates should use Discord timestamps');
+    assert.doesNotMatch(content, /New time:|<t:\d+:[FR]>/, 'reserve dates should not add a new-time field');
     assert.ok(content.includes('Matchday 1'), 'the original round label should be shown');
     assert.ok(content.includes('Weather delay for fixture 2'), 'reserve notes should be included');
     assert.doesNotMatch(content, /Agree a new time|schedule it with|report the score with/i);
