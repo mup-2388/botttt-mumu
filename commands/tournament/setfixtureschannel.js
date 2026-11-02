@@ -1,7 +1,7 @@
 /**
  * setfixtureschannel.js
  *
- * Set the guild-wide destination for .postmatchday announcements.
+ * Set the guild-wide destination for .postmatchday and .postreserves announcements.
  * Run without a channel argument in the destination, or pass a channel mention.
  *
  * Usage:  .setfixtureschannel [#channel]
@@ -21,7 +21,7 @@ const FIXTURES_CHANNEL_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnounce
 
 module.exports = {
     name: 'setfixtureschannel',
-    description: 'Set the default destination for matchday fixture announcements.',
+    description: 'Set the default destination for matchday and reserved-fixture announcements.',
     usage: '.setfixtureschannel [#channel]',
     aliases: ['setfixturechannel'],
     hidden: false,
@@ -30,7 +30,7 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('setfixtureschannel')
-        .setDescription('Set the default destination for matchday fixture announcements')
+        .setDescription('Set the default destination for matchday and reserved-fixture announcements')
         .addChannelOption(option =>
             option.setName('channel')
                 .setDescription('Destination channel (defaults to the current channel)')
@@ -124,8 +124,8 @@ async function runSet({ guild, channel, reply }) {
     );
 
     return reply({
-        content: `✅ Default matchday fixtures channel set to <#${channel.id}>. Use ` +
-            '`.postmatchday <deadline>` to post the next unplayed matchday.'
+        content: `✅ Default fixtures announcement channel set to <#${channel.id}>. Use ` +
+            '`.postmatchday <deadline>` for the next matchday or `.postreserves` for reserved fixtures.'
     });
 }
 
