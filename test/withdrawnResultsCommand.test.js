@@ -106,6 +106,17 @@ function makeHarness() {
             reserved: { isReserved: true, until: new Date('2026-12-20T15:00:00Z') }
         }),
         makeFixture({
+            _id: 'fixture-pending-no-result',
+            matchNumber: 146,
+            roundLabel: 'Matchday 14',
+            homeTeam: 'Falcons',
+            awayTeam: 'Kohli Ki Toli',
+            homeTeamId: 'team-falcons',
+            awayTeamId: 'team-kkt',
+            status: 'Pending',
+            result: null
+        }),
+        makeFixture({
             _id: 'fixture-before-cutoff',
             matchNumber: 139,
             roundLabel: 'Matchday 13',
@@ -162,14 +173,17 @@ function makeHarness() {
     const teamEntries = [
         makeTeamEntry({
             id: 'entry-kkt', teamId: 'team-kkt', name: 'KOHLI KI TOLI',
-            stats: { played: 1, wins: 1, gf: 2, ga: 1, points: 3 }
+            stats: { played: 2, wins: 1, draws: 1, gf: 4, ga: 3, points: 4 }
         }),
         makeTeamEntry({
             id: 'entry-falcons', teamId: 'team-falcons', name: 'Falcons',
             stats: { played: 1, losses: 1, gf: 1, ga: 2 }
         }),
         makeTeamEntry({ id: 'entry-wolves', teamId: 'team-wolves', name: 'Wolves' }),
-        makeTeamEntry({ id: 'entry-mu', teamId: 'team-mu', name: 'Manchester Undivided' }),
+        makeTeamEntry({
+            id: 'entry-mu', teamId: 'team-mu', name: 'Manchester Undivided',
+            stats: { played: 1, draws: 1, gf: 2, ga: 2, points: 1 }
+        }),
         makeTeamEntry({ id: 'entry-eagles', teamId: 'team-eagles', name: 'Eagles' })
     ];
     const findQueries = [];
@@ -217,7 +231,7 @@ function makeHarness() {
     return { command, fixtures, teamEntries, findQueries, liveStandingsRefreshes };
 }
 
-test('withdrawnresults resets Matchday 14+ fixtures case-insensitively and updates standings without announcements', async () => {
+test('withdrawnresults resets every Matchday 14+ fixture to unplayed 0-0 and refreshes standings', async () => {
     const harness = makeHarness();
     const replies = [];
 
@@ -246,32 +260,37 @@ test('withdrawnresults resets Matchday 14+ fixtures case-insensitively and updat
     assert.deepEqual(socketEvents, ['update']);
 
     const oldKktResult = byId.get('fixture-old-kkt');
-    assert.equal(oldKktResult.status, 'Played');
+    assert.equal(oldKktResult.status, 'Pending');
     assert.deepEqual(oldKktResult.result, {
         home: 0,
-        away: 3,
+        away: 0,
         extraTimeHome: null,
         extraTimeAway: null,
         penaltiesHome: null,
         penaltiesAway: null,
-        winner: 'Falcons'
+        winner: ''
     });
     assert.equal(oldKktResult.notes, '', 'previous walkover notes should not remain');
 
     const pendingMuResult = byId.get('fixture-pending-mu');
-    assert.equal(pendingMuResult.status, 'Played');
-    assert.equal(pendingMuResult.result.home, 3);
+    assert.equal(pendingMuResult.status, 'Pending');
+    assert.equal(pendingMuResult.result.home, 0);
     assert.equal(pendingMuResult.result.away, 0);
-    assert.equal(pendingMuResult.result.winner, 'Wolves');
+    assert.equal(pendingMuResult.result.winner, '');
     assert.equal(pendingMuResult.reserved.isReserved, false);
     assert.equal(pendingMuResult.reserved.until, null);
 
+    const pendingNoResult = byId.get('fixture-pending-no-result');
+    assert.deepEqual([pendingNoResult.status, pendingNoResult.result.home, pendingNoResult.result.away], ['Pending', 0, 0]);
+
     const groupResult = byId.get('fixture-group-md16');
-    assert.deepEqual([groupResult.result.home, groupResult.result.away, groupResult.result.winner], [0, 3, 'Falcons']);
+    assert.deepEqual([groupResult.status, groupResult.result.home, groupResult.result.away, groupResult.result.winner], [
+        'Pending', 0, 0, ''
+    ]);
 
     const cancelledResult = byId.get('fixture-cancelled-kkt');
     assert.deepEqual([cancelledResult.status, cancelledResult.result.home, cancelledResult.result.away, cancelledResult.result.winner], [
-        'Played', 3, 0, 'Eagles'
+        'Pending', 0, 0, ''
     ]);
 
     assert.deepEqual(
@@ -280,35 +299,34 @@ test('withdrawnresults resets Matchday 14+ fixtures case-insensitively and updat
         'Matchday 13 must remain untouched'
     );
     assert.deepEqual(
-        [byId.get('fixture-between-withdrawn').result.home, byId.get('fixture-between-withdrawn').result.away],
-        [2, 2],
-        'a match between both withdrawn teams should not award either side a win'
+        [byId.get('fixture-between-withdrawn').status, byId.get('fixture-between-withdrawn').result.home, byId.get('fixture-between-withdrawn').result.away],
+        ['Pending', 0, 0],
+        'fixtures between the two withdrawn teams should be reset too'
     );
     assert.equal(byId.get('fixture-unrelated').status, 'Pending');
 
     const stats = new Map(harness.teamEntries.map(entry => [entry.teamNameSnapshot.toLowerCase(), entry.stats]));
     assert.deepEqual(
-        [stats.get('kohli ki toli').played, stats.get('kohli ki toli').wins, stats.get('kohli ki toli').losses, stats.get('kohli ki toli').gf, stats.get('kohli ki toli').ga, stats.get('kohli ki toli').points],
-        [2, 0, 2, 0, 6, 0]
+        [stats.get('kohli ki toli').played, stats.get('kohli ki toli').wins, stats.get('kohli ki toli').draws, stats.get('kohli ki toli').losses, stats.get('kohli ki toli').gf, stats.get('kohli ki toli').ga, stats.get('kohli ki toli').points],
+        [0, 0, 0, 0, 0, 0, 0]
     );
     assert.deepEqual(
-        [stats.get('falcons').played, stats.get('falcons').wins, stats.get('falcons').losses, stats.get('falcons').gf, stats.get('falcons').ga, stats.get('falcons').points],
-        [2, 2, 0, 6, 0, 6]
+        [stats.get('falcons').played, stats.get('falcons').wins, stats.get('falcons').draws, stats.get('falcons').losses, stats.get('falcons').gf, stats.get('falcons').ga, stats.get('falcons').points],
+        [0, 0, 0, 0, 0, 0, 0]
     );
     assert.deepEqual(
         [stats.get('wolves').played, stats.get('wolves').wins, stats.get('wolves').gf, stats.get('wolves').ga, stats.get('wolves').points],
-        [1, 1, 3, 0, 3]
+        [0, 0, 0, 0, 0]
     );
     assert.deepEqual(
-        [stats.get('manchester undivided').played, stats.get('manchester undivided').losses, stats.get('manchester undivided').gf, stats.get('manchester undivided').ga],
-        [2, 2, 0, 6]
+        [stats.get('manchester undivided').played, stats.get('manchester undivided').wins, stats.get('manchester undivided').draws, stats.get('manchester undivided').losses, stats.get('manchester undivided').gf, stats.get('manchester undivided').ga, stats.get('manchester undivided').points],
+        [0, 0, 0, 0, 0, 0, 0]
     );
     assert.deepEqual(
         [stats.get('eagles').played, stats.get('eagles').wins, stats.get('eagles').gf, stats.get('eagles').points],
-        [1, 1, 3, 3]
+        [0, 0, 0, 0]
     );
-    assert.match(replies.at(-1).content, /Updated 4 fixture results/);
-    assert.match(replies.at(-1).content, /1 fixture between the withdrawn teams left unchanged/);
+    assert.match(replies.at(-1).content, /Reset 6 fixtures to unplayed 0-0/);
 
     const saveCounts = harness.fixtures.map(fixture => fixture.saveCount);
     const teamSaveCounts = harness.teamEntries.map(entry => entry.saveCount);
@@ -355,7 +373,7 @@ test('slash /withdrawnresults applies the same confirmed database update', async
     await harness.command.slashExecute(interaction);
 
     assert.equal(deferred, true);
-    assert.equal(harness.fixtures.filter(fixture => fixture.saveCount > 0).length, 4);
+    assert.equal(harness.fixtures.filter(fixture => fixture.saveCount > 0).length, 6);
     assert.deepEqual(harness.liveStandingsRefreshes, [[interaction.client, 'guild-1']]);
-    assert.match(replies.at(-1).content, /Updated 4 fixture results/);
+    assert.match(replies.at(-1).content, /Reset 6 fixtures to unplayed 0-0/);
 });
