@@ -1,8 +1,8 @@
 /**
  * withdrawnresults.js
  *
- * Replace Matchday 14+ results involving Kohli Ki Toli or Manchester Undivided
- * with a normal 3-0 result for the other team. Database-only: no announcements.
+ * Reset every Matchday 14+ fixture involving Kohli Ki Toli or Manchester
+ * Undivided to an unplayed 0-0. The existing live standings are refreshed.
  *
  * Usage: .withdrawnresults confirm
  * Slash: /withdrawnresults confirm:true
@@ -11,6 +11,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { Fixture, TournamentTeam } = require('../../models/Tournament');
 const { getDefaultTournament } = require('../../utils/getTournament');
+const { updateAllLiveStandings } = require('../../utils/updateStandings');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { matchdayNumber } = require('../../utils/matchdayAnnouncement');
 
@@ -24,7 +25,7 @@ const STAT_FIELDS = ['played', 'wins', 'draws', 'losses', 'gf', 'ga', 'points'];
 
 module.exports = {
     name: 'withdrawnresults',
-    description: 'Set Matchday 14+ results against the two withdrawn teams to 3-0.',
+    description: 'Reset Matchday 14+ fixtures involving the two withdrawn teams to unplayed 0-0.',
     usage: '.withdrawnresults confirm',
     aliases: [],
     hidden: false,
@@ -33,7 +34,7 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('withdrawnresults')
-        .setDescription('Set Matchday 14+ results against the withdrawn teams to 3-0')
+        .setDescription('Reset Matchday 14+ fixtures involving the withdrawn teams to unplayed 0-0')
         .addBooleanOption(option =>
             option.setName('confirm')
                 .setDescription('Confirm the database update')
@@ -53,6 +54,7 @@ module.exports = {
             }
 
             return await runWithdrawnResults({
+                client: message.client,
                 guild: message.guild,
                 reply: payload => message.reply(payload)
             });
@@ -82,6 +84,7 @@ module.exports = {
             await interaction.deferReply({ ephemeral: true });
 
             return await runWithdrawnResults({
+                client: interaction.client,
                 guild: interaction.guild,
                 reply: payload => interaction.editReply(payload)
             });
@@ -100,7 +103,7 @@ module.exports = {
     }
 };
 
-async function runWithdrawnResults({ guild, reply }) {
+async function runWithdrawnResults({ client, guild, reply }) {
     const tournament = await getDefaultTournament(guild.id);
     if (!tournament) {
         return reply({ content: '❌ No default tournament is set.' });
@@ -114,7 +117,6 @@ async function runWithdrawnResults({ guild, reply }) {
         .sort({ matchNumber: 1 });
 
     const matchedFixtures = [];
-    let skippedBetweenWithdrawnTeams = 0;
 
     for (const fixture of fixtures) {
         const day = matchdayNumber(fixture);
@@ -124,19 +126,14 @@ async function runWithdrawnResults({ guild, reply }) {
         const awayIsWithdrawn = WITHDRAWN_TEAM_NAMES.has(normalizeTeamName(fixture.awayTeam));
         if (!homeIsWithdrawn && !awayIsWithdrawn) continue;
 
-        if (homeIsWithdrawn && awayIsWithdrawn) {
-            skippedBetweenWithdrawnTeams++;
-            continue;
-        }
-
-        matchedFixtures.push({ fixture, homeIsWithdrawn });
+        matchedFixtures.push(fixture);
     }
 
     if (!matchedFixtures.length) {
         return reply({ content: '📭 No matching fixtures from Matchday 14 onward were found.' });
     }
 
-    const affectsStandings = matchedFixtures.some(({ fixture }) => STANDING_PHASES.has(String(fixture.phase || '').toLowerCase()));
+    const affectsStandings = matchedFixtures.some(fixture => STANDING_PHASES.has(String(fixture.phase || '').toLowerCase()));
     const entries = affectsStandings
         ? await TournamentTeam.find({ guildId: guild.id, tournamentId: tournament._id })
         : [];
@@ -144,10 +141,7 @@ async function runWithdrawnResults({ guild, reply }) {
     const teamStatDeltas = new Map();
     const updates = [];
 
-    for (const { fixture, homeIsWithdrawn } of matchedFixtures) {
-        const homeScore = homeIsWithdrawn ? 0 : 3;
-        const awayScore = homeIsWithdrawn ? 3 : 0;
-        const winner = homeIsWithdrawn ? fixture.awayTeam : fixture.homeTeam;
+    for (const fixture of matchedFixtures) {
         const oldStatusIsPlayed = String(fixture.status || '').toLowerCase() === 'played';
         const phaseAffectsStandings = STANDING_PHASES.has(String(fixture.phase || '').toLowerCase());
 
@@ -172,16 +166,13 @@ async function runWithdrawnResults({ guild, reply }) {
                 accumulateResultDelta(teamStatDeltas, homeEntry, oldHomeScore, oldAwayScore, tournament, -1);
                 accumulateResultDelta(teamStatDeltas, awayEntry, oldAwayScore, oldHomeScore, tournament, -1);
             }
-
-            accumulateResultDelta(teamStatDeltas, homeEntry, homeScore, awayScore, tournament, 1);
-            accumulateResultDelta(teamStatDeltas, awayEntry, awayScore, homeScore, tournament, 1);
         }
 
         const existingResult = fixture.result || {};
-        const alreadyCorrect = oldStatusIsPlayed &&
-            Number(existingResult.home) === homeScore &&
-            Number(existingResult.away) === awayScore &&
-            String(existingResult.winner || '') === String(winner || '') &&
+        const alreadyReset = String(fixture.status || '').toLowerCase() === 'pending' &&
+            readExistingScore(existingResult.home) === 0 &&
+            readExistingScore(existingResult.away) === 0 &&
+            String(existingResult.winner || '') === '' &&
             existingResult.extraTimeHome == null &&
             existingResult.extraTimeAway == null &&
             existingResult.penaltiesHome == null &&
@@ -189,22 +180,20 @@ async function runWithdrawnResults({ guild, reply }) {
             fixture.reserved?.isReserved !== true &&
             !isWalkoverNote(fixture.notes);
 
-        if (!alreadyCorrect) {
-            updates.push({ fixture, homeScore, awayScore, winner });
-        }
+        if (!alreadyReset) updates.push(fixture);
     }
 
     // All fixtures and their standings entries are validated before any writes.
-    for (const { fixture, homeScore, awayScore, winner } of updates) {
-        fixture.status = 'Played';
+    for (const fixture of updates) {
+        fixture.status = 'Pending';
         fixture.result = {
-            home: homeScore,
-            away: awayScore,
+            home: 0,
+            away: 0,
             extraTimeHome: null,
             extraTimeAway: null,
             penaltiesHome: null,
             penaltiesAway: null,
-            winner
+            winner: ''
         };
 
         if (fixture.reserved) {
@@ -226,11 +215,16 @@ async function runWithdrawnResults({ guild, reply }) {
         await entry.save();
     }
 
-    const skippedText = skippedBetweenWithdrawnTeams
-        ? ` (${skippedBetweenWithdrawnTeams} fixture${skippedBetweenWithdrawnTeams === 1 ? '' : 's'} between the withdrawn teams left unchanged.)`
-        : '';
+    if (matchedFixtures.length && client) {
+        await updateAllLiveStandings(client, guild.id).catch(error => {
+            console.error('[withdrawnresults] live standings refresh failed:', error);
+        });
+
+        if (global.io) global.io.emit('update');
+    }
+
     return reply({
-        content: `✅ Updated ${updates.length} fixture result${updates.length === 1 ? '' : 's'} in **${tournament.name}**.${skippedText}`
+        content: `✅ Reset ${updates.length} fixture${updates.length === 1 ? '' : 's'} to unplayed 0-0 in **${tournament.name}**.`
     });
 }
 
