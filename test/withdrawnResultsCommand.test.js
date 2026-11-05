@@ -173,6 +173,7 @@ function makeHarness() {
         makeTeamEntry({ id: 'entry-eagles', teamId: 'team-eagles', name: 'Eagles' })
     ];
     const findQueries = [];
+    const liveStandingsRefreshes = [];
     const command = requireWithMocks('../commands/tournament/withdrawnresults', {
         'discord.js': {
             SlashCommandBuilder: FakeSlashCommandBuilder,
@@ -201,6 +202,9 @@ function makeHarness() {
                 pointsLoss: 0
             })
         },
+        '../../utils/updateStandings': {
+            updateAllLiveStandings: async (...args) => { liveStandingsRefreshes.push(args); }
+        },
         '../../utils/isOrganizer': { isOrganizer: async () => true },
         '../../utils/matchdayAnnouncement': {
             matchdayNumber: fixture => {
@@ -210,23 +214,36 @@ function makeHarness() {
         }
     });
 
-    return { command, fixtures, teamEntries, findQueries };
+    return { command, fixtures, teamEntries, findQueries, liveStandingsRefreshes };
 }
 
 test('withdrawnresults resets Matchday 14+ fixtures case-insensitively and updates standings without announcements', async () => {
     const harness = makeHarness();
     const replies = [];
 
-    await harness.command.runWithdrawnResults({
-        guild: { id: 'guild-1' },
-        reply: async payload => {
-            replies.push(payload);
-            return payload;
-        }
-    });
+    const client = { name: 'test-client' };
+    const previousIo = global.io;
+    const socketEvents = [];
+    global.io = { emit: event => socketEvents.push(event) };
+
+    try {
+        await harness.command.runWithdrawnResults({
+            client,
+            guild: { id: 'guild-1' },
+            reply: async payload => {
+                replies.push(payload);
+                return payload;
+            }
+        });
+    } finally {
+        if (previousIo === undefined) delete global.io;
+        else global.io = previousIo;
+    }
 
     const byId = new Map(harness.fixtures.map(fixture => [fixture._id, fixture]));
     assert.deepEqual(harness.findQueries[0], { guildId: 'guild-1', tournamentId: 'tournament-1' });
+    assert.deepEqual(harness.liveStandingsRefreshes, [[client, 'guild-1']]);
+    assert.deepEqual(socketEvents, ['update']);
 
     const oldKktResult = byId.get('fixture-old-kkt');
     assert.equal(oldKktResult.status, 'Played');
@@ -296,11 +313,13 @@ test('withdrawnresults resets Matchday 14+ fixtures case-insensitively and updat
     const saveCounts = harness.fixtures.map(fixture => fixture.saveCount);
     const teamSaveCounts = harness.teamEntries.map(entry => entry.saveCount);
     await harness.command.runWithdrawnResults({
+        client,
         guild: { id: 'guild-1' },
         reply: async payload => payload
     });
     assert.deepEqual(harness.fixtures.map(fixture => fixture.saveCount), saveCounts, 'a repeated run should not re-save unchanged results');
     assert.deepEqual(harness.teamEntries.map(entry => entry.saveCount), teamSaveCounts, 'a repeated run should not double-apply standings');
+    assert.equal(harness.liveStandingsRefreshes.length, 2, 'a repeated run should still refresh the live standings');
 });
 
 test('withdrawnresults requires explicit confirmation before writing', async () => {
@@ -322,6 +341,7 @@ test('slash /withdrawnresults applies the same confirmed database update', async
     let deferred = false;
     const replies = [];
     const interaction = {
+        client: { name: 'slash-client' },
         guild: { id: 'guild-1' },
         user: { id: 'organizer-1' },
         options: { getBoolean: () => true },
@@ -336,5 +356,6 @@ test('slash /withdrawnresults applies the same confirmed database update', async
 
     assert.equal(deferred, true);
     assert.equal(harness.fixtures.filter(fixture => fixture.saveCount > 0).length, 4);
+    assert.deepEqual(harness.liveStandingsRefreshes, [[interaction.client, 'guild-1']]);
     assert.match(replies.at(-1).content, /Updated 4 fixture results/);
 });

@@ -2,7 +2,8 @@
  * withdrawnresults.js
  *
  * Replace Matchday 14+ results involving Kohli Ki Toli or Manchester Undivided
- * with a normal 3-0 result for the other team. Database-only: no announcements.
+ * with a normal 3-0 result for the other team. No result announcements; the
+ * existing live standings are refreshed after the database update.
  *
  * Usage: .withdrawnresults confirm
  * Slash: /withdrawnresults confirm:true
@@ -11,6 +12,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const { Fixture, TournamentTeam } = require('../../models/Tournament');
 const { getDefaultTournament } = require('../../utils/getTournament');
+const { updateAllLiveStandings } = require('../../utils/updateStandings');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { matchdayNumber } = require('../../utils/matchdayAnnouncement');
 
@@ -53,6 +55,7 @@ module.exports = {
             }
 
             return await runWithdrawnResults({
+                client: message.client,
                 guild: message.guild,
                 reply: payload => message.reply(payload)
             });
@@ -82,6 +85,7 @@ module.exports = {
             await interaction.deferReply({ ephemeral: true });
 
             return await runWithdrawnResults({
+                client: interaction.client,
                 guild: interaction.guild,
                 reply: payload => interaction.editReply(payload)
             });
@@ -100,7 +104,7 @@ module.exports = {
     }
 };
 
-async function runWithdrawnResults({ guild, reply }) {
+async function runWithdrawnResults({ client, guild, reply }) {
     const tournament = await getDefaultTournament(guild.id);
     if (!tournament) {
         return reply({ content: '❌ No default tournament is set.' });
@@ -224,6 +228,14 @@ async function runWithdrawnResults({ guild, reply }) {
             entry.stats[field] = Math.max(0, numericStat(entry.stats[field]) + delta[field]);
         }
         await entry.save();
+    }
+
+    if (matchedFixtures.length && client) {
+        await updateAllLiveStandings(client, guild.id).catch(error => {
+            console.error('[withdrawnresults] live standings refresh failed:', error);
+        });
+
+        if (global.io) global.io.emit('update');
     }
 
     const skippedText = skippedBetweenWithdrawnTeams
