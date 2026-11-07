@@ -314,8 +314,13 @@ async function buildSquadEntries(guildId, team) {
         const tournamentPlayer = entries.find(entry => entry.playerId?.discordID);
 
         const discordID = globalPlayer?.discordID || tournamentPlayer?.playerId?.discordID || null;
+        const currentTournamentPlayer = defaultTournamentKey
+            ? entries.find(entry =>
+                String(entry.tournamentId?.tournamentKey || '').toLowerCase() === String(defaultTournamentKey).toLowerCase()
+            ) || null
+            : null;
         const role = defaultTournament
-            ? defaultTournamentTeam
+            ? defaultTournamentTeam && currentTournamentPlayer
                 ? getUserLeadershipRole({
                     userId: discordID,
                     team,
@@ -407,6 +412,27 @@ async function buildOverviewEmbed({ guild, team }) {
         teamId: team._id,
         isActive: true
     }).populate('tournamentId').lean();
+    const tournamentIds = tournamentEntries
+        .map(entry => entry.tournamentId?._id || entry.tournamentId)
+        .filter(Boolean);
+    const activeRosterEntries = tournamentIds.length
+        ? await TournamentPlayer.find({
+            guildId: guild.id,
+            tournamentId: { $in: tournamentIds },
+            teamId: team._id,
+            isActive: true
+        }).populate('playerId')
+        : [];
+    const rosteredDiscordIdsByTournament = new Map();
+    for (const rosterEntry of activeRosterEntries) {
+        const tournamentId = String(rosterEntry.tournamentId?._id || rosterEntry.tournamentId);
+        const discordID = rosterEntry.playerId?.discordID;
+        if (!discordID) continue;
+        if (!rosteredDiscordIdsByTournament.has(tournamentId)) {
+            rosteredDiscordIdsByTournament.set(tournamentId, new Set());
+        }
+        rosteredDiscordIdsByTournament.get(tournamentId).add(String(discordID));
+    }
 
     const statsLines = tournamentEntries.length
         ? tournamentEntries.map(entry => {
@@ -431,12 +457,18 @@ async function buildOverviewEmbed({ guild, team }) {
             const label = tournament?.name || tournament?.tournamentKey || 'tournament';
             const captainId = effectiveCaptainId(entry, team);
             const viceCaptainId = effectiveViceCaptainId(entry, team);
+            const tournamentId = String(tournament?._id || entry.tournamentId);
+            const rosteredDiscordIds = rosteredDiscordIdsByTournament.get(tournamentId) || new Set();
+            const captainOnRoster = captainId && rosteredDiscordIds.has(String(captainId));
+            const viceCaptainOnRoster = viceCaptainId && rosteredDiscordIds.has(String(viceCaptainId));
 
             captainLines.push(
-                `👑 **${label} Captain:** ${captainId ? `<@${captainId}>` : 'Not assigned'}`
+                `👑 **${label} Captain:** ${captainOnRoster ? `<@${captainId}>` : captainId ? 'Not assigned (not on roster)' : 'Not assigned'}`
             );
             if (viceCaptainId) {
-                captainLines.push(`🛡️ **${label} Vice-Captain:** <@${viceCaptainId}>`);
+                captainLines.push(
+                    `🛡️ **${label} Vice-Captain:** ${viceCaptainOnRoster ? `<@${viceCaptainId}>` : 'Not assigned (not on roster)'}`
+                );
             }
         }
     } else if (team.captainID) {

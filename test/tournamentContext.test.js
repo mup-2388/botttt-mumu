@@ -38,9 +38,7 @@ function createContext({ userId, tournamentPlayer, captainID = 'current-captain'
         captainID: tournamentCaptainID,
         viceCaptainID: null
     };
-    const player = userId === 'current-captain'
-        ? null
-        : { _id: 'player-1', discordID: userId };
+    const player = { _id: 'player-1', discordID: userId };
 
     const context = requireWithMocks('../utils/tournamentContext', {
         '../models/Tournament': {
@@ -95,8 +93,15 @@ test('stale captain flags on a roster entry do not authorize a different current
     assert.match(result.error, /current tournament role is \*\*player\*\*/);
 });
 
-test('the captain configured for the selected tournament is authorized', async () => {
-    const { context } = createContext({ userId: 'current-captain', tournamentPlayer: null });
+test('the rostered captain configured for the selected tournament is authorized', async () => {
+    const { context } = createContext({
+        userId: 'current-captain',
+        tournamentPlayer: {
+            _id: 'tp-captain',
+            teamId: 'team-retards',
+            isActive: true
+        }
+    });
 
     const result = await context.resolveActorTeam({
         guildId: 'guild-1',
@@ -108,6 +113,25 @@ test('the captain configured for the selected tournament is authorized', async (
     assert.equal(result.error, null);
     assert.equal(result.ctx.team.name, 'Retards United');
     assert.equal(result.ctx.role, 'captain');
+});
+
+test('a configured captain who is absent from the active roster is not authorized', async () => {
+    const { context } = createContext({
+        userId: 'old-captain',
+        captainID: 'old-captain',
+        tournamentCaptainID: 'old-captain',
+        tournamentPlayer: null
+    });
+
+    const result = await context.resolveActorTeam({
+        guildId: 'guild-1',
+        userId: 'old-captain',
+        need: 'manage',
+        noun: 'claim free agents'
+    });
+
+    assert.equal(result.ctx, null);
+    assert.match(result.error, /not on a team in/);
 });
 
 test('a cached TournamentPlayer captain flag cannot authorize when no team leader is assigned', async () => {
