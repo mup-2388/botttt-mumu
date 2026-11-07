@@ -21,6 +21,9 @@ const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTou
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase } = require('../../utils/displayHelpers');
 const { buildRoundRobinFixtures, buildKnockoutFixtures, getNextMatchNumber } = require('../../utils/fixtureBuilder');
+const { sortTeams } = require('../../utils/standingsHelpers');
+
+const GLORY_CUP_QUALIFIER_COUNT = 8;
 
 module.exports = {
     name: 'generatestage',
@@ -328,6 +331,12 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
     /* ── Get qualified teams sorted by standings ── */
     const qualified = await getQualifiedTeams({ tournament, teams });
 
+    if (tournament.formatType === 'glory_cup' && qualified.length !== GLORY_CUP_QUALIFIER_COUNT) {
+        return reply({
+            content: `❌ Glory Cup knockouts require 8 active teams; found **${qualified.length}**.`
+        });
+    }
+
     if (qualified.length < 2 || qualified.length % 2 !== 0) {
         return reply({
             content: `❌ Invalid qualified team count for **${prettyPhase(round)}**: **${qualified.length}**.`
@@ -335,9 +344,19 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
     }
 
     /* ── Pair up teams ── */
-    const pairs = [];
-    for (let i = 0; i < qualified.length; i += 2) {
-        pairs.push([qualified[i], qualified[i + 1]]);
+    const pairs = tournament.formatType === 'glory_cup'
+        ? [
+            [qualified[0], qualified[7]], // 1 v 8
+            [qualified[3], qualified[4]], // 4 v 5
+            [qualified[1], qualified[6]], // 2 v 7
+            [qualified[2], qualified[5]]  // 3 v 6
+        ]
+        : [];
+
+    if (tournament.formatType !== 'glory_cup') {
+        for (let i = 0; i < qualified.length; i += 2) {
+            pairs.push([qualified[i], qualified[i + 1]]);
+        }
     }
 
     const isTwoLegged =
@@ -390,10 +409,12 @@ function resolveNextKnockoutRound(tournament) {
 
 /**
  * Derive the number of qualified teams from tournament settings.
- * For groups_knockout format: groupCount * qualificationSpotsPerGroup
- * Otherwise: teamCount or 4
+ * Glory Cup always qualifies the top 8; groups_knockout uses
+ * groupCount * qualificationSpotsPerGroup; other formats use teamCount or 4.
  */
 function deriveQualifiedCount(tournament) {
+    if (tournament.formatType === 'glory_cup') return GLORY_CUP_QUALIFIER_COUNT;
+
     if (tournament.formatType === 'groups_knockout' && tournament.groupCount > 0) {
         return tournament.groupCount * (tournament.qualificationSpotsPerGroup || 2);
     }
@@ -425,6 +446,16 @@ function deriveKnockoutRounds(qualifiedTeamCount) {
 
 /** Get qualified teams sorted by standings (points → GD → GF), with cross-group seeding. */
 async function getQualifiedTeams({ tournament, teams }) {
+    if (tournament.formatType === 'glory_cup') {
+        return sortTeams(teams)
+            .slice(0, GLORY_CUP_QUALIFIER_COUNT)
+            .map(entry => ({
+                tournamentTeamId: entry._id,
+                teamId: entry.teamId?._id || entry.teamId,
+                name: entry.teamId?.name || entry.teamNameSnapshot
+            }));
+    }
+
     const groupKeys = [...new Set(teams.map(t => t.groupKey).filter(Boolean))].sort();
     const spotsPerGroup = tournament.qualificationSpotsPerGroup || 2;
 

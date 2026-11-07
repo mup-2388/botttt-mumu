@@ -395,7 +395,9 @@ async function generateTextTable({
     if (teams.some((_, i) =>
         getQualificationZone({ position: i + 1, settings: tournament, groupKey }) === 'qualification'
     )) {
-        legendParts.push('\u001b[1;32mGreen\u001b[0m = Qualification');
+        legendParts.push(tournament.formatType === 'glory_cup'
+            ? '\u001b[1;32mGreen\u001b[0m = Top 8 qualify for knockouts'
+            : '\u001b[1;32mGreen\u001b[0m = Qualification');
     }
 
     if (legendParts.length) {

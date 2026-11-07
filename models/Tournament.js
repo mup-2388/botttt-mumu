@@ -33,7 +33,7 @@ const tournamentSettingsSchema = new mongoose.Schema(
 
         formatType: {
             type: String,
-            enum: ['league', 'groups_knockout', 'mega_table_playoffs', 'club_world_cup', 'custom'],
+            enum: ['league', 'groups_knockout', 'mega_table_playoffs', 'glory_cup', 'club_world_cup', 'custom'],
             default: 'league'
         },
 
