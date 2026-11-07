@@ -179,6 +179,7 @@ async function runSync({ guild, tournament, teamName, reactivateWithdrawn, reply
             fields: [
                 { name: 'Added', value: String(result.added), inline: true },
                 { name: 'Already on team', value: String(result.alreadyPresent), inline: true },
+                { name: 'Legacy active flags repaired', value: String(result.legacyActiveFlagsRepaired || 0), inline: true },
                 { name: 'Reactivated', value: String(result.reactivated), inline: true },
                 { name: 'Withdrawn preserved', value: String(result.withdrawnPreserved), inline: true },
                 { name: 'Free agents preserved', value: String(result.freeAgentsPreserved), inline: true },

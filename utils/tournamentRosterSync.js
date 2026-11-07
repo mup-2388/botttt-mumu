@@ -12,6 +12,7 @@ const {
  * Enroll global players into active tournament teams when they have no active
  * tournament assignment. Existing withdrawals and tournament-specific moves
  * are preserved unless the organizer explicitly requests withdrawal reactivation.
+ * Legacy same-team rows with no stored isActive flag are normalized to active.
  */
 async function syncTournamentRosterPlayers(guildId, tournament, {
     teamName = null,
@@ -65,7 +66,7 @@ async function syncTournamentRosterPlayers(guildId, tournament, {
             guildId,
             tournamentId: tournament._id,
             playerId: { $in: playerIds }
-        })
+        }).lean()
         : [];
 
     const existingByPlayerId = new Map(
@@ -186,11 +187,13 @@ async function syncTournamentRosterPlayers(guildId, tournament, {
                     $set: {
                         playerNameSnapshot: player.name,
                         teamNameSnapshot: team.name,
+                        isActive: true,
                         ...leaderFields
                     }
                 }
             );
             result.alreadyPresent++;
+            if (existing.isActive !== true) result.legacyActiveFlagsRepaired++;
         }
     }
 
@@ -202,6 +205,7 @@ function emptyResult() {
         added: 0,
         addedPlayers: [],
         alreadyPresent: 0,
+        legacyActiveFlagsRepaired: 0,
         reactivated: 0,
         reactivatedPlayers: [],
         withdrawnPreserved: 0,

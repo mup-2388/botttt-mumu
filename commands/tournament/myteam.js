@@ -287,10 +287,15 @@ async function buildSquadEntries(guildId, team) {
         })
         : null;
 
+    // Legacy TournamentPlayer documents may not have an isActive property;
+    // the schema defaults those rows to active. Explicit false remains withdrawn.
     const tourEntries = await TournamentPlayer.find({
         guildId,
         teamId: team._id,
-        isActive: true
+        $or: [
+            { isActive: true },
+            { isActive: { $exists: false } }
+        ]
     }).populate('playerId').populate('tournamentId');
 
     const globalById = new Map(globalPlayers.map(player => [String(player._id), player]));
@@ -420,7 +425,10 @@ async function buildOverviewEmbed({ guild, team }) {
             guildId: guild.id,
             tournamentId: { $in: tournamentIds },
             teamId: team._id,
-            isActive: true
+            $or: [
+                { isActive: true },
+                { isActive: { $exists: false } }
+            ]
         }).populate('playerId')
         : [];
     const rosteredDiscordIdsByTournament = new Map();
