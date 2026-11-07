@@ -22,7 +22,7 @@ const { resolveTournament, extractTournamentFromArgs } = require('../../utils/ge
 
 module.exports = {
     name: 'setqualification',
-    description: 'Set qualification spots per group.',
+    description: 'Set qualification spots for a tournament.',
     usage: '.setqualification [tournamentKey] <spots>',
     aliases: ['setq', 'setqualify'],
     hidden: false,
@@ -31,10 +31,10 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('setqualification')
-        .setDescription('Set qualification spots per group')
+        .setDescription('Set tournament qualification spots')
         .addIntegerOption(opt =>
             opt.setName('spots')
-                .setDescription('Qualification spots')
+                .setDescription('Qualification spots; Glory Cup is fixed to 8')
                 .setRequired(true)
         )
         .addStringOption(opt =>
@@ -133,10 +133,18 @@ async function runUpdateQualification({ guildId, tournamentKey, spots, reply }) 
 
     const tournament = resolved.tournament;
 
+    const isGloryCup = tournament.formatType === 'glory_cup';
+    if (isGloryCup && spots !== 8) {
+        return reply({ content: '❌ Glory Cup is fixed to the top 8 playoff places.' });
+    }
+
     tournament.qualificationSpotsPerGroup = spots;
 
     // Recalculate knockout rounds based on new qualification count
-    if (tournament.groupCount > 0) {
+    if (isGloryCup) {
+        tournament.knockoutRounds = deriveKnockoutRounds(8);
+        tournament.hasKnockout = true;
+    } else if (tournament.groupCount > 0) {
         const qualifiedCount = tournament.groupCount * spots;
         tournament.knockoutRounds = deriveKnockoutRounds(qualifiedCount);
         tournament.hasKnockout = true;
@@ -144,7 +152,7 @@ async function runUpdateQualification({ guildId, tournamentKey, spots, reply }) 
 
     await tournament.save();
 
-    const qualifiedCount = tournament.groupCount * spots;
+    const qualifiedCount = isGloryCup ? 8 : tournament.groupCount * spots;
     const roundsStr = tournament.knockoutRounds.length
         ? tournament.knockoutRounds.map(r => r.charAt(0).toUpperCase() + r.slice(1)).join(' → ')
         : 'None';
@@ -154,7 +162,7 @@ async function runUpdateQualification({ guildId, tournamentKey, spots, reply }) 
         .setTitle('✅ QUALIFICATION UPDATED')
         .setDescription(
             `Tournament: **${tournament.name}**\n\n` +
-            `Teams qualifying from each group: **${spots}**\n` +
+            `${isGloryCup ? 'Teams qualifying from the table' : 'Teams qualifying from each group'}: **${spots}**\n` +
             `Total qualified: **${qualifiedCount}**\n` +
             `Knockout rounds: **${roundsStr}**`
         )

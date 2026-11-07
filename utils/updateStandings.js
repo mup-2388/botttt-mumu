@@ -360,7 +360,9 @@ function buildStandingsText({ settings, groupKey, teams = [] }) {
     }
 
     if (shown < sorted.length) lines.push(`…and ${sorted.length - shown} more team(s)`);
-    lines.push('```', updated);
+    lines.push('```');
+    if (settings.formatType === 'glory_cup') lines.push('↑ Top 8 qualify for knockouts.');
+    lines.push(updated);
     return lines.join('\n');
 }
 

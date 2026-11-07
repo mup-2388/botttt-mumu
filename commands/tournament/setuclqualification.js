@@ -131,6 +131,10 @@ async function runUpdateUclQualification({ guildId, tournamentKey, spots, reply 
         return reply({ content: resolved.error });
     }
 
+    if (resolved.tournament.formatType === 'glory_cup' && spots !== 0) {
+        return reply({ content: '❌ Glory Cup does not use UCL spots; its top 8 qualify for the knockouts.' });
+    }
+
     const tournament = await TournamentSettings.findOneAndUpdate(
         { guildId, _id: resolved.tournament._id },
         { $set: { uclQualificationSpots: spots } },

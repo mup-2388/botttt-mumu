@@ -2,7 +2,7 @@
  * settournament.js
  *
  * Create or update tournament settings.
- * Supports league, groups+knockout, mega table+playoffs, and custom formats.
+ * Supports league, groups+knockout, mega table+playoffs, Glory Cup, and custom formats.
  *
  * Usage: .settournament <key> format=league mode=auto name=League_S1 teams=10
  * Slash: /settournament key:<key> format:<format> mode:<mode> [options...]
@@ -41,6 +41,7 @@ module.exports = {
                     { name: 'League', value: 'league' },
                     { name: 'Groups + Knockout', value: 'groups_knockout' },
                     { name: 'Mega Table + Playoffs', value: 'mega_table_playoffs' },
+                    { name: 'Glory Cup — Single Table, Top 8 Playoffs', value: 'glory_cup' },
                     { name: 'Custom', value: 'custom' }
                 )
         )
@@ -243,6 +244,16 @@ function buildUpdatePayload(guildId, tournamentKey, data) {
     if (typeof data.tournamentPlayerRoleId !== 'undefined') payload.tournamentPlayerRoleId = data.tournamentPlayerRoleId;
     if (typeof data.emoji !== 'undefined') payload.emoji = data.emoji;
 
+    if (data.format === 'glory_cup') {
+        payload.name = typeof data.name === 'undefined' ? 'Glory Cup' : data.name;
+        payload.groupCount = 0;
+        payload.teamsPerGroup = 0;
+        payload.qualificationSpotsPerGroup = 8;
+        payload.uclQualificationSpots = 0;
+        payload.hasKnockout = true;
+        payload.knockoutRounds = ['quarterfinal', 'semifinal', 'final'];
+    }
+
     return payload;
 }
 
@@ -300,7 +311,7 @@ function normalizeAliases(data) {
 }
 
 function validateSettings(data) {
-    const formats = ['league', 'groups_knockout', 'mega_table_playoffs', 'custom'];
+    const formats = ['league', 'groups_knockout', 'mega_table_playoffs', 'glory_cup', 'custom'];
     const modes = ['auto', 'manual_draw', 'hybrid'];
     const phases = ['registration', 'league', 'groups', 'knockout', 'completed'];
     const rounds = ['qualifier', 'eliminator', 'roundof16', 'quarterfinal', 'semifinal', 'final'];
@@ -340,13 +351,14 @@ function buildSummary(settings) {
     return [
         `**Key:** \`${settings.tournamentKey}\``,
         `**Name:** ${settings.name}`,
-        `**Format:** ${settings.formatType}`,
+        `**Format:** ${settings.formatType === 'glory_cup' ? 'Glory Cup — Single Table + Top 8 Playoffs' : settings.formatType}`,
         `**Mode:** ${settings.schedulingMode}`,
         `**Teams:** ${settings.teamCount}`,
         `**Groups:** ${settings.groupCount}`,
         `**Teams/Group:** ${settings.teamsPerGroup}`,
         `**Home & Away:** ${settings.homeAway ? 'Yes' : 'No'}`,
         `**Knockouts:** ${settings.hasKnockout ? 'Yes' : 'No'}`,
+        ...(settings.formatType === 'glory_cup' ? ['**Qualification:** Top 8 advance to the quarterfinals'] : []),
         `**Current Phase:** ${settings.currentPhase}`,
         `**Registration Open:** ${settings.registrationOpen ? 'Yes' : 'No'}`,
         `**Manual Registration:** ${settings.manualRegistration ? 'Yes' : 'No'}`,
@@ -392,6 +404,7 @@ function isValidKey(key) {
 function getHelpText() {
     return (
         '**Usage:** `.settournament <key> format=<format> mode=<mode> [options]`\n' +
+        '**Glory Cup:** `.settournament glory-cup format=glory_cup mode=auto teams=10 homeAway=true`\n' +
         '**Example:** `.settournament league-s1 format=league mode=auto name=League_S1 teams=10 homeAway=true`'
     );
 }
