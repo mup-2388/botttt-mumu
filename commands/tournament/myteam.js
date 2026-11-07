@@ -319,10 +319,15 @@ async function buildSquadEntries(guildId, team) {
         const tournamentPlayer = entries.find(entry => entry.playerId?.discordID);
 
         const discordID = globalPlayer?.discordID || tournamentPlayer?.playerId?.discordID || null;
-        const currentTournamentPlayer = defaultTournamentKey
-            ? entries.find(entry =>
-                String(entry.tournamentId?.tournamentKey || '').toLowerCase() === String(defaultTournamentKey).toLowerCase()
-            ) || null
+        const currentTournamentPlayer = defaultTournament
+            ? entries.find(entry => {
+                const tournamentId = entry.tournamentId?._id || entry.tournamentId;
+                const matchesId = defaultTournament._id && tournamentId
+                    && String(tournamentId) === String(defaultTournament._id);
+                const matchesKey = defaultTournamentKey
+                    && String(entry.tournamentId?.tournamentKey || '').toLowerCase() === String(defaultTournamentKey).toLowerCase();
+                return matchesId || matchesKey;
+            }) || null
             : null;
         const role = defaultTournament
             ? defaultTournamentTeam && currentTournamentPlayer
@@ -350,7 +355,12 @@ async function buildSquadEntries(guildId, team) {
             isViceCaptain: role === 'vice',
             // Historical tournament labels remain available in Tournament Stats,
             // not as prefixes/tags beside every player's name.
-            tournaments: new Set(getSquadTournamentNames(entries, defaultTournamentKey))
+            tournaments: new Set(getSquadTournamentNames(
+                entries,
+                defaultTournamentKey,
+                defaultTournament?._id,
+                defaultTournament?.name
+            ))
         });
     }
 

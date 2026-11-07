@@ -35,17 +35,34 @@ function stripHistoricalTournamentPrefix(name, tournamentEntries, defaultKey) {
     return name;
 }
 
-function getSquadTournamentNames(tournamentEntries = [], defaultTournamentKey = '') {
+function getSquadTournamentNames(
+    tournamentEntries = [],
+    defaultTournamentKey = '',
+    defaultTournamentId = null,
+    defaultTournamentName = ''
+) {
     const defaultKey = normalizeKey(defaultTournamentKey);
-    const visibleEntries = defaultKey
-        ? tournamentEntries.filter(entry => normalizeKey(entry.tournamentId?.tournamentKey) === defaultKey)
+    const visibleEntries = defaultKey || defaultTournamentId
+        ? tournamentEntries.filter(entry => {
+            const tournament = entry.tournamentId;
+            const linkedId = tournament?._id || tournament;
+            return (defaultKey && normalizeKey(tournament?.tournamentKey) === defaultKey)
+                || (defaultTournamentId && String(linkedId) === String(defaultTournamentId));
+        })
         : tournamentEntries;
-
-    return [...new Set(
+    const names = [...new Set(
         visibleEntries
             .map(entry => entry.tournamentId?.name)
             .filter(Boolean)
     )];
+
+    // If populate() did not resolve an older tournamentId reference, the
+    // default tournament's ID still proves which label this roster entry has.
+    if (visibleEntries.length && defaultTournamentName && !names.includes(defaultTournamentName)) {
+        names.push(defaultTournamentName);
+    }
+
+    return names;
 }
 
 module.exports = {
