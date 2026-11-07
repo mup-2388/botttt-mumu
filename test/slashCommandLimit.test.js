@@ -19,6 +19,20 @@ test('slash command limit keeps all visible commands and omits hidden overflow o
     assert.deepEqual(result.omitted.map(command => command.name), ['hidden-last']);
 });
 
+test('slash command limit prioritizes settournament over visible overflow', () => {
+    const commands = Array.from({ length: MAX_GLOBAL_CHAT_INPUT_COMMANDS + 1 }, (_, index) => ({
+        name: `visible-${index}`,
+        hidden: false
+    }));
+    commands[commands.length - 1] = { name: 'settournament', hidden: false };
+
+    const result = fitSlashCommandsToLimit(commands);
+
+    assert.equal(result.selected.length, MAX_GLOBAL_CHAT_INPUT_COMMANDS);
+    assert.ok(result.selected.includes(commands.at(-1)));
+    assert.deepEqual(result.omitted, [commands[MAX_GLOBAL_CHAT_INPUT_COMMANDS - 1]]);
+});
+
 test('slash command limit leaves a compliant command list untouched', () => {
     const commands = Array.from({ length: MAX_GLOBAL_CHAT_INPUT_COMMANDS }, (_, index) => ({ name: `cmd-${index}` }));
     const result = fitSlashCommandsToLimit(commands);
