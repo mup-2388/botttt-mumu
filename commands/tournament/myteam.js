@@ -9,8 +9,8 @@
  *   tournament. When you have more than one team, a dropdown lets you
  *   switch between them.
  * - The squad is the union of global players AND active per-tournament
- *   rosters, so players who belong to this team in one tournament but to
- *   another team globally are shown here too (tagged with their tournaments).
+ *   rosters, so tournament-only members are shown too. Player names use the
+ *   global nickname and squad affiliation labels use the current default tournament.
  *
  * Usage:  .myteam [team name]
  * Slash:  /myteam [team]
@@ -40,6 +40,7 @@ const { escapeRegex } = require('../../utils/stringHelpers');
 const { parseColor } = require('../../utils/displayHelpers');
 const { resolveTournament } = require('../../utils/getTournament');
 const { getUserTeamInTournament, getUserTeams } = require('../../utils/tournamentContext');
+const { getSquadDisplayName, getSquadTournamentNames } = require('../../utils/squadDisplay');
 
 const DEFAULT_TROPHY_EMOJI = '<:_Trophy:1507987705311793152>';
 
@@ -265,10 +266,11 @@ async function getTeamTournamentNames(guildId, teams) {
  * Each entry is tagged with the tournaments they play in for this team.
  */
 async function buildSquadEntries(guildId, team) {
-    const globalPlayers = await Player.find({
-        guildId,
-        teamId: team._id
-    });
+    const [globalPlayers, resolvedDefault] = await Promise.all([
+        Player.find({ guildId, teamId: team._id }),
+        resolveTournament(guildId, null)
+    ]);
+    const defaultTournamentKey = resolvedDefault.tournament?.tournamentKey || '';
 
     const tourEntries = await TournamentPlayer.find({
         guildId,
@@ -276,54 +278,60 @@ async function buildSquadEntries(guildId, team) {
         isActive: true
     }).populate('playerId').populate('tournamentId');
 
-    const map = new Map();
+    const globalById = new Map(globalPlayers.map(player => [String(player._id), player]));
+    const tournamentEntriesByPlayer = new Map();
 
-    for (const tp of tourEntries) {
-        const pid = String(tp.playerId?._id || tp.playerId);
-        if (!map.has(pid)) {
-            map.set(pid, {
-                playerId: pid,
-                name: tp.playerNameSnapshot || 'Unknown',
-                discordID: tp.playerId?.discordID || null,
-                isCaptain: false,
-                tournaments: new Set()
-            });
-        }
-        const entry = map.get(pid);
-        if (tp.playerNameSnapshot) entry.name = tp.playerNameSnapshot;
-        if (tp.playerId?.discordID) entry.discordID = tp.playerId.discordID;
-        if (tp.isCaptain) entry.isCaptain = true;
-        if (tp.tournamentId?.name) entry.tournaments.add(tp.tournamentId.name);
+    for (const entry of tourEntries) {
+        const playerId = String(entry.playerId?._id || entry.playerId);
+        if (!tournamentEntriesByPlayer.has(playerId)) tournamentEntriesByPlayer.set(playerId, []);
+        tournamentEntriesByPlayer.get(playerId).push(entry);
     }
 
-    for (const gp of globalPlayers) {
-        const pid = String(gp._id);
-        if (!map.has(pid)) {
-            map.set(pid, {
-                playerId: pid,
-                name: gp.name,
-                discordID: gp.discordID || null,
-                isCaptain: false,
-                tournaments: new Set()
-            });
-        }
-        const entry = map.get(pid);
-        if (!entry.name || entry.name === 'Unknown') entry.name = gp.name;
-        if (gp.discordID && !entry.discordID) entry.discordID = gp.discordID;
-        if (gp.isCaptain) entry.isCaptain = true;
+    const playerIds = new Set([
+        ...globalById.keys(),
+        ...tournamentEntriesByPlayer.keys()
+    ]);
+    const list = [];
+
+    for (const playerId of playerIds) {
+        const globalPlayer = globalById.get(playerId);
+        const entries = tournamentEntriesByPlayer.get(playerId) || [];
+        const tournamentPlayer = entries.find(entry => entry.playerId?.discordID);
+
+        list.push({
+            playerId,
+            // Player.name is the bot-wide nickname; old tournament snapshots
+            // must not override it when we build the current squad.
+            name: getSquadDisplayName({
+                globalName: globalPlayer?.name,
+                tournamentEntries: entries,
+                defaultTournamentKey
+            }),
+            discordID: globalPlayer?.discordID || tournamentPlayer?.playerId?.discordID || null,
+            isCaptain: Boolean(globalPlayer?.isCaptain || entries.some(entry => entry.isCaptain)),
+            isViceCaptain: Boolean(globalPlayer?.isViceCaptain || entries.some(entry => entry.isViceCaptain)),
+            // The squad belongs to the current default tournament. Historical
+            // tournament labels remain available in Tournament Stats, not as
+            // prefixes/tags beside every player's name.
+            tournaments: new Set(getSquadTournamentNames(entries, defaultTournamentKey))
+        });
     }
 
-    const list = [...map.values()];
-    list.sort((a, b) => (b.isCaptain ? 1 : 0) - (a.isCaptain ? 1 : 0) || a.name.localeCompare(b.name));
+    const roleOrder = entry => entry.isCaptain ? 0 : entry.isViceCaptain ? 1 : 2;
+    list.sort((a, b) => roleOrder(a) - roleOrder(b) || a.name.localeCompare(b.name));
     return list;
 }
 
 function squadToLines(squad) {
     return squad.map((entry, index) => {
-        const crown = entry.isCaptain ? ' 👑' : '';
+        const leadership = entry.isCaptain
+            ? ' 👑 Captain'
+            : entry.isViceCaptain
+                ? ' 🛡️ Vice-Captain'
+                : '';
         const linked = entry.discordID ? ` (<@${entry.discordID}>)` : '';
         const tags = entry.tournaments.size ? ` — ${[...entry.tournaments].join(', ')}` : '';
-        return `${index + 1}. **${entry.name}**${crown}${linked}${tags}`;
+        return `${index + 1}. **${entry.name}**${leadership}${linked}${tags}`;
     });
 }
 
