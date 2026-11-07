@@ -88,70 +88,39 @@ async function findTeamInTournamentByName(guildId, tournament, name) {
  * Returns:
  *   {
  *     team, entry,            // Team doc + TournamentTeam doc
- *     player,                 // global Player doc (may be null for a captain without a player doc)
- *     tournamentPlayer,       // TournamentPlayer doc (may be null)
+ *     player,                 // global Player doc
+ *     tournamentPlayer,       // active TournamentPlayer roster entry
  *     role,                   // 'captain' | 'vice' | 'player'
  *     isCaptain, isVice, canManage
  *   }
- * or null when the user is not part of any team in this tournament.
+ * or null when the user is not on an active team roster in this tournament.
  */
 async function getUserTeamInTournament(guildId, tournament, userId) {
     if (!tournament || !userId) return null;
 
-    const all = await getTournamentTeams(guildId, tournament);
-
     const player = await Player.findOne({ guildId, discordID: String(userId) });
+    if (!player) return null;
 
-    // Load current tournament membership; its cached role flags are not an
-    // authorization source (the team leadership IDs below are authoritative).
-    let tournamentPlayer = null;
-
-    if (player) {
-        tournamentPlayer = await TournamentPlayer.findOne({
-            guildId,
-            tournamentId: tournament._id,
-            playerId: player._id,
-            isActive: true,
-            teamId: { $ne: null }
-        });
-    }
-
-    const roleForTeam = x => getUserLeadershipRole({
-        userId,
-        team: x.team,
-        entry: x.entry
+    const tournamentPlayer = await TournamentPlayer.findOne({
+        guildId,
+        tournamentId: tournament._id,
+        playerId: player._id,
+        isActive: true,
+        teamId: { $ne: null }
     });
+    if (!tournamentPlayer) return null;
 
-    // Team / TournamentTeam leader IDs authorize captain-side actions.
-    // TournamentPlayer flags are display metadata only; stale flags must not
-    // grant permissions to a user who is merely rostered on the team.
-    let hit = all.find(x => roleForTeam(x) === 'captain');
-    let role = hit ? 'captain' : null;
-
-    if (!hit) {
-        hit = all.find(x => roleForTeam(x) === 'vice');
-        if (hit) role = 'vice';
-    }
-
-    // 3. Plain roster member in this tournament.
-    if (!hit && tournamentPlayer) {
-        hit = all.find(x => sameId(x.team._id, tournamentPlayer.teamId));
-        if (hit) role = roleForTeam(hit);
-    }
-
+    const all = await getTournamentTeams(guildId, tournament);
+    const hit = all.find(x => sameId(x.team._id, tournamentPlayer.teamId));
     if (!hit) return null;
 
-    if (!tournamentPlayer || !sameId(tournamentPlayer.teamId, hit.team._id)) {
-        tournamentPlayer = player
-            ? await TournamentPlayer.findOne({
-                guildId,
-                tournamentId: tournament._id,
-                playerId: player._id,
-                teamId: hit.team._id,
-                isActive: true
-            })
-            : null;
-    }
+    // Team / TournamentTeam leader IDs are the only permission source.
+    // Cached TournamentPlayer flags never override current leadership records.
+    const role = getUserLeadershipRole({
+        userId,
+        team: hit.team,
+        entry: hit.entry
+    });
 
     return {
         team: hit.team,
@@ -211,12 +180,8 @@ async function getRosterMembership(guildId, tournament, teamId, discordId) {
  * Used by "your team" commands (setlogo, setcolor, setstadium, …).
  */
 async function getManagedTeamsInTournament(guildId, tournament, userId) {
-    const all = await getTournamentTeams(guildId, tournament);
-
-    return all.filter(x =>
-        sameId(effectiveCaptainId(x.entry, x.team), userId) ||
-        sameId(effectiveViceCaptainId(x.entry, x.team), userId)
-    );
+    const ctx = await getUserTeamInTournament(guildId, tournament, userId);
+    return ctx?.canManage ? [{ entry: ctx.entry, team: ctx.team }] : [];
 }
 
 /**
