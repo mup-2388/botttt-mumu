@@ -2,13 +2,13 @@
  * changecaptain.js
  *
  * Change the captain of a team. Current captain or vice captain can initiate.
- * Works for the server's DEFAULT tournament unless `tournament=<key>` is given;
- * the team is the one you lead IN THAT TOURNAMENT.
+ * Organizers can repair/set a team's tournament captain using `team=<name>`.
+ * Works for the server's DEFAULT tournament unless `tournament=<key>` is given.
  * Preserves the vice captain unless the new captain was the VC.
  * Moves the tournament's captain Discord role if configured.
  *
- * Usage: .cc @user [tournament=<key>]
- * Slash: /changecaptain user:<user> [tournament:<key>]
+ * Usage: .cc @user [team=<Team Name>] [tournament=<key>]
+ * Slash: /changecaptain user:<user> [tournament:<key>] [team:<name>]
  *
  * Aliases: cc, captainchange
  */
@@ -27,10 +27,13 @@ const {
 } = require('../../models/Tournament');
 
 const { getUserFromArgs } = require('../../utils/stringHelpers');
-const { extractTournamentFromArgs } = require('../../utils/getTournament');
+const { isOrganizer } = require('../../utils/isOrganizer');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
 const {
     resolveActorTeam,
     getRosterMembership,
+    findTeamInTournamentByName,
+    parseTeamTokenInTournament,
     effectiveCaptainId,
     effectiveViceCaptainId,
     sameId
@@ -38,8 +41,8 @@ const {
 
 module.exports = {
     name: 'changecaptain',
-    description: 'Change captain of your team.',
-    usage: '.cc @user [tournament=<key>]',
+    description: 'Change captain of your team (organizers may specify a team).',
+    usage: '.cc @user [team=<Team Name>] [tournament=<key>]',
     aliases: ['cc', 'captainchange'],
     hidden: true,
     cooldown: 5,
@@ -47,7 +50,7 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('changecaptain')
-        .setDescription('Change captain of your team')
+        .setDescription('Change captain of your team or repair tournament captaincy')
         .addUserOption(opt =>
             opt.setName('user')
                 .setDescription('New captain')
@@ -56,6 +59,11 @@ module.exports = {
         .addStringOption(opt =>
             opt.setName('tournament')
                 .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('team')
+                .setDescription('Team name (organizers only, to repair/set tournament captaincy)')
                 .setRequired(false)
         ),
 
@@ -72,17 +80,27 @@ module.exports = {
                 return message.reply(parsedKey.error);
             }
 
-            const target = message.mentions.users.first() || await getUserFromArgs(message, parsedKey.rest);
+            const tournamentKey = parsedKey.explicit ? parsedKey.tournament.tournamentKey : null;
+            const resolved = await resolveTournament(message.guild.id, tournamentKey);
+            if (!resolved.tournament) return message.reply(resolved.error);
+
+            const token = await parseTeamTokenInTournament(
+                message.guild.id,
+                resolved.tournament,
+                parsedKey.rest
+            );
+            const target = message.mentions.users.first() || await getUserFromArgs(message, token.rest);
 
             if (!target) {
-                return message.reply('❌ Usage: `.cc @user [tournament=<key>]`');
+                return message.reply('❌ Usage: `.cc @user [team=<Team Name>] [tournament=<key>]`');
             }
 
             return await runChangeCaptain({
                 guild: message.guild,
                 actorId: message.author.id,
                 targetUser: target,
-                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
+                tournamentKey,
+                teamName: token.teamName,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -106,6 +124,7 @@ module.exports = {
                 actorId: interaction.user.id,
                 targetUser: target,
                 tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
+                teamName: interaction.options.getString('team'),
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -126,30 +145,50 @@ module.exports = {
 
 /**
  * Change the captain of a team IN A TOURNAMENT.
- * Validates: actor is captain/VC in that tournament, target is on the same team there.
+ * Validates: actor is captain/VC there, or organizer explicitly names a team;
+ * target must be on that team in the selected tournament.
  * Preserves the vice captain unless the new captain was the VC (promoted).
  *
- * Writes:
- *  - TournamentPlayer flags + TournamentTeam.viceCaptainID (this tournament)
- *  - the team's captain: global Team/Player records when the team uses its
- *    global captain here, otherwise the per-tournament TournamentTeam.captainID
+ * Writes the tournament roster flags and per-tournament captain ID for an
+ * organizer override; ordinary captain changes retain the existing global-vs-
+ * tournament-specific behavior.
  */
-async function runChangeCaptain({ guild, actorId, targetUser, tournamentKey = null, reply }) {
+async function runChangeCaptain({ guild, actorId, targetUser, tournamentKey = null, teamName = null, reply }) {
+    const organizerOverride = Boolean(teamName) && await isOrganizer(guild, actorId);
+
+    if (teamName && !organizerOverride) {
+        return reply({ content: '❌ Only an organizer can set captaincy for a named team.' });
+    }
+
     // ── Self-change check ──
-    if (actorId === targetUser.id) {
+    if (actorId === targetUser.id && !organizerOverride) {
         return reply({ content: '❌ You cannot make yourself captain — you already are.' });
     }
 
-    // ── Find actor's team in the tournament ──
-    const { tournament, ctx, error } = await resolveActorTeam({
-        guildId: guild.id,
-        userId: actorId,
-        tournamentKey,
-        need: 'manage',
-        noun: 'use `.cc`'
-    });
+    let tournament;
+    let ctx;
 
-    if (error) return reply({ content: error });
+    if (organizerOverride) {
+        const resolved = await resolveTournament(guild.id, tournamentKey);
+        if (!resolved.tournament) return reply({ content: resolved.error });
+        tournament = resolved.tournament;
+        ctx = await findTeamInTournamentByName(guild.id, tournament, teamName);
+
+        if (!ctx) {
+            return reply({ content: `❌ Team **${teamName}** is not active in **${tournament.name}**.` });
+        }
+    } else {
+        const resolved = await resolveActorTeam({
+            guildId: guild.id,
+            userId: actorId,
+            tournamentKey,
+            need: 'manage',
+            noun: 'use `.cc`'
+        });
+
+        if (resolved.error) return reply({ content: resolved.error });
+        ({ tournament, ctx } = resolved);
+    }
 
     const { team, entry } = ctx;
 
@@ -169,9 +208,11 @@ async function runChangeCaptain({ guild, actorId, targetUser, tournamentKey = nu
         });
     }
 
-    const oldCaptainId = effectiveCaptainId(entry, team) || actorId;
+    const oldCaptainId = effectiveCaptainId(entry, team) || (organizerOverride ? null : actorId);
     const oldViceId = effectiveViceCaptainId(entry, team);
-    const usesGlobalCaptain = !entry.captainID;
+    // The organizer override creates a tournament-specific captain assignment
+    // so it cannot overwrite leadership for the team's other tournaments.
+    const usesGlobalCaptain = !organizerOverride && !entry.captainID;
 
     if (sameId(oldCaptainId, targetUser.id)) {
         return reply({ content: `❌ ${targetUser} is already the captain of **${team.name}**.` });
@@ -252,7 +293,7 @@ async function runChangeCaptain({ guild, actorId, targetUser, tournamentKey = nu
         .setDescription(
             `Tournament: **${tournament.name}**\n` +
             `Team: **${team.name}**\n\n` +
-            `Old Captain: <@${oldCaptainId}>\n` +
+            `Old Captain: ${oldCaptainId ? `<@${oldCaptainId}>` : 'Not assigned'}\n` +
             `New Captain: ${targetUser}`
         )
         .setTimestamp();
@@ -273,7 +314,9 @@ async function moveCaptainRole({ guild, roleId, oldCaptainId, newCaptainId }) {
     const role = guild.roles.cache.get(roleId);
     if (!role) return;
 
-    const oldMember = await guild.members.fetch(oldCaptainId).catch(() => null);
+    const oldMember = oldCaptainId
+        ? await guild.members.fetch(oldCaptainId).catch(() => null)
+        : null;
     const newMember = await guild.members.fetch(newCaptainId).catch(() => null);
 
     if (oldMember?.roles.cache.has(roleId)) {
