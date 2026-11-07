@@ -29,26 +29,12 @@ const {
 
 const { resolveTournament, getDefaultTournament } = require('./getTournament');
 const { escapeRegex } = require('./stringHelpers');
-
-function sameId(a, b) {
-    return a != null && b != null && String(a) === String(b);
-}
-
-/** Effective captain of a team in a tournament (per-tournament override > global). */
-function effectiveCaptainId(entry, team) {
-    return entry?.captainID || team?.captainID || null;
-}
-
-/**
- * Effective vice captain of a team in a tournament.
- * If the entry has its OWN captain (per-tournament captaincy) the global vice
- * captain is not inherited — only the entry's own vice captain counts.
- */
-function effectiveViceCaptainId(entry, team) {
-    if (entry?.viceCaptainID) return entry.viceCaptainID;
-    if (entry?.captainID) return null;
-    return team?.viceCaptainID || null;
-}
+const {
+    sameId,
+    effectiveCaptainId,
+    effectiveViceCaptainId,
+    getUserLeadershipRole
+} = require('./tournamentLeadership');
 
 /** Active team entries of a tournament, joined with their Team docs. */
 async function getTournamentTeams(guildId, tournament) {
@@ -116,17 +102,8 @@ async function getUserTeamInTournament(guildId, tournament, userId) {
 
     const player = await Player.findOne({ guildId, discordID: String(userId) });
 
-    // 1. Captain
-    let hit = all.find(x => sameId(effectiveCaptainId(x.entry, x.team), userId));
-    let role = hit ? 'captain' : null;
-
-    // 2. Vice captain
-    if (!hit) {
-        hit = all.find(x => sameId(effectiveViceCaptainId(x.entry, x.team), userId));
-        if (hit) role = 'vice';
-    }
-
-    // 3. Plain roster member (TournamentPlayer of this tournament)
+    // Load current tournament membership; its cached role flags are not an
+    // authorization source (the team leadership IDs below are authoritative).
     let tournamentPlayer = null;
 
     if (player) {
@@ -139,13 +116,27 @@ async function getUserTeamInTournament(guildId, tournament, userId) {
         });
     }
 
+    const roleForTeam = x => getUserLeadershipRole({
+        userId,
+        team: x.team,
+        entry: x.entry
+    });
+
+    // Team / TournamentTeam leader IDs authorize captain-side actions.
+    // TournamentPlayer flags are display metadata only; stale flags must not
+    // grant permissions to a user who is merely rostered on the team.
+    let hit = all.find(x => roleForTeam(x) === 'captain');
+    let role = hit ? 'captain' : null;
+
+    if (!hit) {
+        hit = all.find(x => roleForTeam(x) === 'vice');
+        if (hit) role = 'vice';
+    }
+
+    // 3. Plain roster member in this tournament.
     if (!hit && tournamentPlayer) {
         hit = all.find(x => sameId(x.team._id, tournamentPlayer.teamId));
-        if (hit) {
-            role = tournamentPlayer.isCaptain
-                ? 'captain'
-                : tournamentPlayer.isViceCaptain ? 'vice' : 'player';
-        }
+        if (hit) role = roleForTeam(hit);
     }
 
     if (!hit) return null;
@@ -271,7 +262,10 @@ async function resolveActorTeam({
         return {
             tournament,
             ctx,
-            error: `❌ Only the team captain can ${noun} (**${ctx.team.name}** in **${tournament.name}**).`
+            error:
+                `❌ Only the team captain can ${noun} (**${ctx.team.name}** in **${tournament.name}**).\n` +
+                `Your current tournament role is **${ctx.role}**. An organizer can correct captaincy with ` +
+                `\`/changecaptain user:<player> team:${ctx.team.name} tournament:${tournament.tournamentKey}\`.`
         };
     }
 
@@ -279,7 +273,10 @@ async function resolveActorTeam({
         return {
             tournament,
             ctx,
-            error: `❌ Only the team captain or vice captain can ${noun} (**${ctx.team.name}** in **${tournament.name}**).`
+            error:
+                `❌ Only the team captain or vice captain can ${noun} (**${ctx.team.name}** in **${tournament.name}**).\n` +
+                `Your current tournament role is **${ctx.role}**. An organizer can correct captaincy with ` +
+                `\`/changecaptain user:<player> team:${ctx.team.name} tournament:${tournament.tournamentKey}\`.`
         };
     }
 

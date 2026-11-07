@@ -39,7 +39,13 @@ const {
 const { escapeRegex } = require('../../utils/stringHelpers');
 const { parseColor } = require('../../utils/displayHelpers');
 const { resolveTournament } = require('../../utils/getTournament');
-const { getUserTeamInTournament, getUserTeams } = require('../../utils/tournamentContext');
+const {
+    getUserTeamInTournament,
+    getUserTeams,
+    effectiveCaptainId,
+    effectiveViceCaptainId
+} = require('../../utils/tournamentContext');
+const { getUserLeadershipRole } = require('../../utils/tournamentLeadership');
 const { getSquadDisplayName, getSquadTournamentNames } = require('../../utils/squadDisplay');
 
 const DEFAULT_TROPHY_EMOJI = '<:_Trophy:1507987705311793152>';
@@ -270,7 +276,16 @@ async function buildSquadEntries(guildId, team) {
         Player.find({ guildId, teamId: team._id }),
         resolveTournament(guildId, null)
     ]);
-    const defaultTournamentKey = resolvedDefault.tournament?.tournamentKey || '';
+    const defaultTournament = resolvedDefault.tournament || null;
+    const defaultTournamentKey = defaultTournament?.tournamentKey || '';
+    const defaultTournamentTeam = defaultTournament
+        ? await TournamentTeam.findOne({
+            guildId,
+            tournamentId: defaultTournament._id,
+            teamId: team._id,
+            isActive: true
+        })
+        : null;
 
     const tourEntries = await TournamentPlayer.find({
         guildId,
@@ -298,6 +313,17 @@ async function buildSquadEntries(guildId, team) {
         const entries = tournamentEntriesByPlayer.get(playerId) || [];
         const tournamentPlayer = entries.find(entry => entry.playerId?.discordID);
 
+        const discordID = globalPlayer?.discordID || tournamentPlayer?.playerId?.discordID || null;
+        const role = defaultTournament
+            ? defaultTournamentTeam
+                ? getUserLeadershipRole({
+                    userId: discordID,
+                    team,
+                    entry: defaultTournamentTeam
+                })
+                : 'player'
+            : getUserLeadershipRole({ userId: discordID, team });
+
         list.push({
             playerId,
             // Player.name is the bot-wide nickname; old tournament snapshots
@@ -307,12 +333,13 @@ async function buildSquadEntries(guildId, team) {
                 tournamentEntries: entries,
                 defaultTournamentKey
             }),
-            discordID: globalPlayer?.discordID || tournamentPlayer?.playerId?.discordID || null,
-            isCaptain: Boolean(globalPlayer?.isCaptain || entries.some(entry => entry.isCaptain)),
-            isViceCaptain: Boolean(globalPlayer?.isViceCaptain || entries.some(entry => entry.isViceCaptain)),
-            // The squad belongs to the current default tournament. Historical
-            // tournament labels remain available in Tournament Stats, not as
-            // prefixes/tags beside every player's name.
+            discordID,
+            // Match the current tournament's authorization rules. Never use a
+            // global or historical tournament badge as the active role.
+            isCaptain: role === 'captain',
+            isViceCaptain: role === 'vice',
+            // Historical tournament labels remain available in Tournament Stats,
+            // not as prefixes/tags beside every player's name.
             tournaments: new Set(getSquadTournamentNames(entries, defaultTournamentKey))
         });
     }
@@ -396,16 +423,24 @@ async function buildOverviewEmbed({ guild, team }) {
         }).join('\n\n')
         : 'This team is not active in any tournament yet.';
 
-    /* ── Captain: global + per-tournament ── */
+    /* ── Show effective leadership per active tournament ── */
     const captainLines = [];
-    if (team.captainID) {
+    if (tournamentEntries.length) {
+        for (const entry of tournamentEntries) {
+            const tournament = entry.tournamentId;
+            const label = tournament?.name || tournament?.tournamentKey || 'tournament';
+            const captainId = effectiveCaptainId(entry, team);
+            const viceCaptainId = effectiveViceCaptainId(entry, team);
+
+            captainLines.push(
+                `👑 **${label} Captain:** ${captainId ? `<@${captainId}>` : 'Not assigned'}`
+            );
+            if (viceCaptainId) {
+                captainLines.push(`🛡️ **${label} Vice-Captain:** <@${viceCaptainId}>`);
+            }
+        }
+    } else if (team.captainID) {
         captainLines.push(`👑 Captain: <@${team.captainID}>`);
-    }
-    for (const entry of tournamentEntries) {
-        const tournament = entry.tournamentId;
-        if (!entry.captainID) continue;
-        if (String(entry.captainID) === String(team.captainID || '')) continue;
-        captainLines.push(`👑 In **${tournament?.name || 'tournament'}**: <@${entry.captainID}>`);
     }
     const captainValue = captainLines.length
         ? captainLines.join('\n')
