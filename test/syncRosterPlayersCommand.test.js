@@ -79,6 +79,7 @@ test('roster sync command targets the selected team and only reactivates when re
             added: 3,
             addedPlayers: [{ playerName: 'Player One', discordID: '123456789012345678' }],
             alreadyPresent: 2,
+            legacyActiveFlagsRepaired: 2,
             reactivated: 1,
             reactivatedPlayers: [],
             withdrawnPreserved: 0,
@@ -101,6 +102,7 @@ test('roster sync command targets the selected team and only reactivates when re
     const report = JSON.stringify(replies[0].embeds[0]);
     assert.match(report, /Added/);
     assert.match(report, /Reactivated/);
+    assert.match(report, /Legacy active flags repaired/);
     assert.match(report, /<@123456789012345678>/);
     assert.deepEqual(replies[0].allowedMentions, { parse: [] });
 });

@@ -30,7 +30,7 @@ function makeHarness({ teamEntries, teams, players, existingEntries }) {
             Player: { find: async () => players },
             TournamentTeam: { find: async () => teamEntries },
             TournamentPlayer: {
-                find: async () => existingEntries,
+                find: () => ({ lean: async () => existingEntries }),
                 findOneAndUpdate: async (...args) => calls.inserts.push(args),
                 updateOne: async (...args) => calls.updates.push(args)
             }
@@ -108,6 +108,35 @@ test('roster sync preserves withdrawn players unless reactivation is explicitly 
             }
         }
     ]);
+});
+
+test('roster sync repairs legacy same-team entries that lack an explicit active flag', async () => {
+    const player = { _id: 'p-legacy', discordID: 'legacy-1', name: 'Legacy Member', teamId: team._id };
+    const legacyEntry = { _id: 'tp-legacy', playerId: player._id, teamId: team._id };
+    const { service, calls } = makeHarness({
+        teamEntries: [teamEntry],
+        teams: [team],
+        players: [player],
+        existingEntries: [legacyEntry]
+    });
+
+    const result = await service.syncTournamentRosterPlayers('guild-1', tournament);
+
+    assert.equal(result.added, 0);
+    assert.equal(result.alreadyPresent, 1);
+    assert.equal(result.legacyActiveFlagsRepaired, 1);
+    assert.deepEqual(calls.updates, [[
+        { _id: legacyEntry._id },
+        {
+            $set: {
+                playerNameSnapshot: player.name,
+                teamNameSnapshot: team.name,
+                isActive: true,
+                isCaptain: false,
+                isViceCaptain: false
+            }
+        }
+    ]]);
 });
 
 test('roster sync does not steal active free agents or tournament transfers', async () => {
