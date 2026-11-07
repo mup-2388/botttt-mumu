@@ -38,13 +38,23 @@ module.exports = {
         try {
             if (!message.guild) return;
             if (!(await isOrganizer(message.guild, message.author.id))) {
-                return message.reply('🚫 Only an organizer can sync roster captains.');
+                return message.reply(embedNotice(
+                    'Organizer only',
+                    'Only an organizer can sync roster captains.',
+                    0xED4245
+                ));
             }
 
             const parsed = await extractTournamentFromArgs(message.guild.id, args);
-            if (parsed.error) return message.reply(parsed.error);
+            if (parsed.error) {
+                return message.reply(embedNotice('Roster captain sync', parsed.error, 0xED4245));
+            }
             if (parsed.rest.length) {
-                return message.reply('❌ Unknown tournament key. Use `.syncrostercaptains tournament=<key>`.');
+                return message.reply(embedNotice(
+                    'Roster captain sync',
+                    'Unknown tournament key. Use `tournament=<key>`.',
+                    0xED4245
+                ));
             }
 
             return await runSync({
@@ -54,7 +64,11 @@ module.exports = {
             });
         } catch (error) {
             console.error('[syncrostercaptains] prefix error:', error);
-            return message.reply('❌ Failed to sync tournament captains.');
+            return message.reply(embedNotice(
+                'Roster captain sync failed',
+                'Failed to sync tournament captains.',
+                0xED4245
+            ));
         }
     },
 
@@ -62,7 +76,7 @@ module.exports = {
         try {
             if (!(await isOrganizer(interaction.guild, interaction.user.id))) {
                 return interaction.reply({
-                    content: '🚫 Only an organizer can sync roster captains.',
+                    ...embedNotice('Organizer only', 'Only an organizer can sync roster captains.', 0xED4245),
                     ephemeral: true
                 });
             }
@@ -75,35 +89,64 @@ module.exports = {
             });
         } catch (error) {
             console.error('[syncrostercaptains] slash error:', error);
+            const failure = embedNotice(
+                'Roster captain sync failed',
+                'Failed to sync tournament captains.',
+                0xED4245
+            );
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ Failed to sync tournament captains.');
+                return interaction.editReply(failure);
             }
-            return interaction.reply({
-                content: '❌ Failed to sync tournament captains.',
-                ephemeral: true
-            });
+            return interaction.reply({ ...failure, ephemeral: true });
         }
     }
 };
 
 async function runSync({ guild, tournamentKey, reply }) {
     const resolved = await resolveTournament(guild.id, tournamentKey);
-    if (!resolved.tournament) return reply(resolved.error);
+    if (!resolved.tournament) {
+        return reply(embedNotice('Roster captain sync', resolved.error, 0xED4245));
+    }
 
     const result = await syncCaptainsToTournamentRoster(guild.id, resolved.tournament);
-    const skippedLines = result.skipped.slice(0, 12).map(item =>
-        `• **${item.teamName}** — ${item.reason}`
+    const skippedLines = result.skipped.slice(0, 10).map(item =>
+        `• **${shortText(item.teamName, 70)}** — ${shortText(item.reason, 130)}`
     );
     const moreSkipped = result.skipped.length > skippedLines.length
         ? `\n…and ${result.skipped.length - skippedLines.length} more skipped team(s).`
         : '';
+    const description =
+        `Completed for **${shortText(resolved.tournament.name, 120)}**.` +
+        (skippedLines.length
+            ? `\n\n**Needs manual review**\n${skippedLines.join('\n')}${moreSkipped}`
+            : '');
 
     return reply({
-        content:
-            `✅ **Roster captain sync completed for ${resolved.tournament.name}.**\n` +
-            `Updated: **${result.updated}** • Already correct: **${result.alreadyCorrect}** • ` +
-            `Needs manual review: **${result.skipped.length}**\n\n` +
-            (skippedLines.length ? `${skippedLines.join('\n')}${moreSkipped}\n\n` : '') +
-            'Only this tournament’s captain assignments and roster captain flags were changed; global team leadership was left untouched.'
+        embeds: [{
+            color: 0x5865F2,
+            title: 'Roster Captain Sync',
+            description,
+            fields: [
+                { name: 'Updated', value: String(result.updated), inline: true },
+                { name: 'Already correct', value: String(result.alreadyCorrect), inline: true },
+                { name: 'Needs manual review', value: String(result.skipped.length), inline: true }
+            ],
+            footer: {
+                text: 'Tournament captain data only was changed. Mentions are display-only; no notification pings were sent.'
+            }
+        }],
+        allowedMentions: { parse: [] }
     });
+}
+
+function embedNotice(title, description, color = 0x5865F2) {
+    return {
+        embeds: [{ title, description: shortText(description, 4000), color }],
+        allowedMentions: { parse: [] }
+    };
+}
+
+function shortText(value, maxLength) {
+    const text = String(value || 'Unknown').replace(/[\r\n]+/g, ' ');
+    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }

@@ -75,17 +75,51 @@ test('organizer command reports roster captain sync results and skipped teams', 
         syncResult: {
             updated: 2,
             alreadyCorrect: 4,
-            skipped: [{ teamName: 'No Leader', reason: 'configured captain is not on this active tournament roster' }]
+            skipped: [{ teamName: 'No Leader', reason: 'configured captain <@captain-1> is not on this active tournament roster' }]
         }
     });
 
     await command.execute(message, ['tournament=glory-cup-s4']);
 
     assert.equal(calls.sync, 1);
-    assert.match(replies[0].content, /Updated: \*\*2\*\*/);
-    assert.match(replies[0].content, /Already correct: \*\*4\*\*/);
-    assert.match(replies[0].content, /No Leader/);
-    assert.match(replies[0].content, /global team leadership was left untouched/);
+    assert.equal(replies[0].content, undefined);
+    assert.equal(replies[0].embeds.length, 1);
+    const report = JSON.stringify(replies[0].embeds[0]);
+    assert.match(report, /Updated/);
+    assert.match(report, /Already correct/);
+    assert.match(report, /No Leader/);
+    assert.match(report, /<@captain-1>/);
+    assert.deepEqual(replies[0].allowedMentions, { parse: [] });
+});
+
+test('slash captain sync also returns an embed without a plain-text content body', async () => {
+    const { command, calls } = makeHarness({
+        organizer: true,
+        syncResult: {
+            updated: 1,
+            alreadyCorrect: 2,
+            skipped: [{ teamName: 'Review Team', reason: 'captain <@captain-2> needs review' }]
+        }
+    });
+    const replies = [];
+    const interaction = {
+        guild: { id: 'guild-1' },
+        user: { id: 'organizer-1' },
+        deferred: false,
+        replied: false,
+        options: { getString: () => null },
+        deferReply: async () => { interaction.deferred = true; },
+        editReply: async payload => { replies.push(payload); return payload; },
+        reply: async payload => { replies.push(payload); return payload; }
+    };
+
+    await command.slashExecute(interaction);
+
+    assert.equal(calls.sync, 1);
+    assert.equal(replies[0].content, undefined);
+    assert.equal(replies[0].embeds.length, 1);
+    assert.match(JSON.stringify(replies[0].embeds[0]), /<@captain-2>/);
+    assert.deepEqual(replies[0].allowedMentions, { parse: [] });
 });
 
 test('non-organizers cannot run the bulk captain reconciliation', async () => {
@@ -97,5 +131,7 @@ test('non-organizers cannot run the bulk captain reconciliation', async () => {
     await command.execute(message, ['tournament=glory-cup-s4']);
 
     assert.equal(calls.sync, 0);
-    assert.match(replies[0], /Only an organizer/);
+    assert.equal(replies[0].content, undefined);
+    assert.match(replies[0].embeds[0].description, /Only an organizer/);
+    assert.deepEqual(replies[0].allowedMentions, { parse: [] });
 });

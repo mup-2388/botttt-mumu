@@ -57,6 +57,7 @@ test('roster sync adds missing global players and applies current captain flags'
     const result = await service.syncTournamentRosterPlayers('guild-1', tournament);
 
     assert.equal(result.added, 2);
+    assert.equal(result.addedPlayers.length, 2);
     assert.equal(calls.inserts.length, 2);
     const captainInsert = calls.inserts.find(call => call[0].playerId === captain._id);
     assert.equal(captainInsert[1].$setOnInsert.isCaptain, true);
@@ -90,6 +91,7 @@ test('roster sync preserves withdrawn players unless reactivation is explicitly 
         reactivateWithdrawn: true
     });
     assert.equal(explicitResult.reactivated, 1);
+    assert.deepEqual(explicitResult.reactivatedPlayers, [{ playerName: player.name, discordID: player.discordID }]);
     assert.deepEqual(harness.calls.updates.at(-1), [
         { _id: withdrawn._id },
         {

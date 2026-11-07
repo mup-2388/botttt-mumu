@@ -77,8 +77,10 @@ test('roster sync command targets the selected team and only reactivates when re
         organizer: true,
         result: {
             added: 3,
+            addedPlayers: [{ playerName: 'Player One', discordID: '123456789012345678' }],
             alreadyPresent: 2,
             reactivated: 1,
+            reactivatedPlayers: [],
             withdrawnPreserved: 0,
             freeAgentsPreserved: 0,
             otherTeamsPreserved: 0,
@@ -94,8 +96,13 @@ test('roster sync command targets the selected team and only reactivates when re
         tournament,
         { teamName: 'Retards United', reactivateWithdrawn: true }
     ]);
-    assert.match(replies[0].content, /Added: \*\*3\*\*/);
-    assert.match(replies[0].content, /Reactivated: \*\*1\*\*/);
+    assert.equal(replies[0].content, undefined);
+    assert.equal(replies[0].embeds.length, 1);
+    const report = JSON.stringify(replies[0].embeds[0]);
+    assert.match(report, /Added/);
+    assert.match(report, /Reactivated/);
+    assert.match(report, /<@123456789012345678>/);
+    assert.deepEqual(replies[0].allowedMentions, { parse: [] });
 });
 
 test('prefix sync keeps withdrawals inactive by default', async () => {
@@ -148,7 +155,10 @@ test('slash sync uses its team and explicit reactivation option', async () => {
         tournament,
         { teamName: 'Retards United', reactivateWithdrawn: true }
     ]);
-    assert.match(replies[0].content, /Added: \*\*1\*\*/);
+    assert.equal(replies[0].content, undefined);
+    assert.equal(replies[0].embeds.length, 1);
+    assert.match(JSON.stringify(replies[0].embeds[0]), /Added/);
+    assert.deepEqual(replies[0].allowedMentions, { parse: [] });
 });
 
 test('non-organizers cannot sync tournament players', async () => {
@@ -164,5 +174,7 @@ test('non-organizers cannot sync tournament players', async () => {
     await command.execute(message, []);
 
     assert.equal(calls.length, 0);
-    assert.match(replies[0], /Only an organizer/);
+    assert.equal(replies[0].content, undefined);
+    assert.match(replies[0].embeds[0].description, /Only an organizer/);
+    assert.deepEqual(replies[0].allowedMentions, { parse: [] });
 });

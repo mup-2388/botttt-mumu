@@ -49,19 +49,27 @@ module.exports = {
         try {
             if (!message.guild) return;
             if (!(await isOrganizer(message.guild, message.author.id))) {
-                return message.reply('🚫 Only an organizer can sync tournament rosters.');
+                return message.reply(embedNotice(
+                    'Organizer only',
+                    'Only an organizer can sync tournament rosters.',
+                    0xED4245
+                ));
             }
 
             const parsedTournament = await extractTournamentFromArgs(message.guild.id, args);
-            if (parsedTournament.error) return message.reply(parsedTournament.error);
+            if (parsedTournament.error) {
+                return message.reply(embedNotice('Tournament roster sync', parsedTournament.error, 0xED4245));
+            }
 
             const { reactivateWithdrawn, rest, error } = parseReactivateToken(parsedTournament.rest);
-            if (error) return message.reply(error);
+            if (error) return message.reply(embedNotice('Tournament roster sync', error, 0xED4245));
 
             const resolved = parsedTournament.tournament
                 ? { tournament: parsedTournament.tournament, error: null }
                 : await resolveTournament(message.guild.id, null);
-            if (!resolved.tournament) return message.reply(resolved.error);
+            if (!resolved.tournament) {
+                return message.reply(embedNotice('Tournament roster sync', resolved.error, 0xED4245));
+            }
 
             const parsedTeam = await parseTeamTokenInTournament(
                 message.guild.id,
@@ -69,9 +77,11 @@ module.exports = {
                 rest
             );
             if (parsedTeam.rest.length) {
-                return message.reply(
-                    '❌ Unknown arguments. Use `team=<Team Name>`, `tournament=<key>`, and/or `reactivate=true`.'
-                );
+                return message.reply(embedNotice(
+                    'Tournament roster sync',
+                    'Unknown arguments. Use `team=<Team Name>`, `tournament=<key>`, and/or `reactivate=true`.',
+                    0xED4245
+                ));
             }
 
             return await runSync({
@@ -83,7 +93,11 @@ module.exports = {
             });
         } catch (error) {
             console.error('[syncrosterplayers] prefix error:', error);
-            return message.reply('❌ Failed to sync tournament rosters.');
+            return message.reply(embedNotice(
+                'Tournament roster sync failed',
+                'Failed to sync tournament rosters.',
+                0xED4245
+            ));
         }
     },
 
@@ -91,7 +105,7 @@ module.exports = {
         try {
             if (!(await isOrganizer(interaction.guild, interaction.user.id))) {
                 return interaction.reply({
-                    content: '🚫 Only an organizer can sync tournament rosters.',
+                    ...embedNotice('Organizer only', 'Only an organizer can sync tournament rosters.', 0xED4245),
                     ephemeral: true
                 });
             }
@@ -101,7 +115,9 @@ module.exports = {
                 interaction.guild.id,
                 interaction.options.getString('tournament')?.toLowerCase() || null
             );
-            if (!resolved.tournament) return interaction.editReply(resolved.error);
+            if (!resolved.tournament) {
+                return interaction.editReply(embedNotice('Tournament roster sync', resolved.error, 0xED4245));
+            }
 
             return await runSync({
                 guild: interaction.guild,
@@ -112,13 +128,15 @@ module.exports = {
             });
         } catch (error) {
             console.error('[syncrosterplayers] slash error:', error);
+            const failure = embedNotice(
+                'Tournament roster sync failed',
+                'Failed to sync tournament rosters.',
+                0xED4245
+            );
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ Failed to sync tournament rosters.');
+                return interaction.editReply(failure);
             }
-            return interaction.reply({
-                content: '❌ Failed to sync tournament rosters.',
-                ephemeral: true
-            });
+            return interaction.reply({ ...failure, ephemeral: true });
         }
     }
 };
@@ -128,31 +146,73 @@ async function runSync({ guild, tournament, teamName, reactivateWithdrawn, reply
         teamName,
         reactivateWithdrawn
     });
-    const examples = result.examples.slice(0, 6).map(item =>
+    const addedLines = formatPlayerLines(result.addedPlayers || []);
+    const reactivatedLines = formatPlayerLines(result.reactivatedPlayers || []);
+    const preservedLines = result.examples.slice(0, 6).map(item =>
         `• **${shortText(item.playerName, 60)}** (${shortText(item.teamName, 60)}) — ${shortText(item.reason, 100)}`
     );
-    const skippedTeams = result.skippedTeams.slice(0, 6).map(item =>
+    const skippedLines = result.skippedTeams.slice(0, 6).map(item =>
         `• **${shortText(item.teamName || teamName || 'Tournament', 60)}** — ${shortText(item.reason, 100)}`
     );
-    const omittedExamples = result.examples.length > examples.length
-        ? `\n…and ${result.examples.length - examples.length} more preserved player(s).`
-        : '';
-    const omittedTeams = result.skippedTeams.length > skippedTeams.length
-        ? `\n…and ${result.skippedTeams.length - skippedTeams.length} more team(s) skipped.`
-        : '';
+    if (result.examples.length > preservedLines.length) {
+        preservedLines.push(`…and ${result.examples.length - preservedLines.length} more preserved player(s).`);
+    }
+    if (result.skippedTeams.length > skippedLines.length) {
+        skippedLines.push(`…and ${result.skippedTeams.length - skippedLines.length} more team(s) skipped.`);
+    }
+
+    const details = [
+        addedLines.length ? `**Added players**\n${addedLines.join('\n')}` : '',
+        reactivatedLines.length ? `**Reactivated players**\n${reactivatedLines.join('\n')}` : '',
+        preservedLines.length ? `**Preserved entries**\n${preservedLines.join('\n')}` : '',
+        skippedLines.length ? `**Skipped teams**\n${skippedLines.join('\n')}` : ''
+    ].filter(Boolean).join('\n\n');
 
     return reply({
-        content:
-            `✅ **Roster sync completed for ${shortText(tournament.name, 120)}${teamName ? ` — ${shortText(teamName, 80)}` : ''}.**\n` +
-            `Added: **${result.added}** • Already on team: **${result.alreadyPresent}** • ` +
-            `Reactivated: **${result.reactivated}**\n` +
-            `Withdrawn preserved: **${result.withdrawnPreserved}** • Free agents preserved: **${result.freeAgentsPreserved}** • ` +
-            `Players assigned to another tournament team preserved: **${result.otherTeamsPreserved}**` +
-            (examples.length ? `\n\n${examples.join('\n')}${omittedExamples}` : '') +
-            (skippedTeams.length ? `\n\n${skippedTeams.join('\n')}${omittedTeams}` : '') +
-            `\n\n${reactivateWithdrawn ? 'Withdrawn entries were explicitly reactivated where they matched a global team.' : 'Withdrawn entries were not reactivated; add `reactivate=true` only if you intend to restore them.'}`,
+        embeds: [{
+            color: 0x5865F2,
+            title: 'Tournament Roster Sync',
+            description:
+                `Completed for **${shortText(tournament.name, 120)}**` +
+                `${teamName ? ` — **${shortText(teamName, 80)}**` : ''}.` +
+                (details ? `\n\n${details}` : ''),
+            fields: [
+                { name: 'Added', value: String(result.added), inline: true },
+                { name: 'Already on team', value: String(result.alreadyPresent), inline: true },
+                { name: 'Reactivated', value: String(result.reactivated), inline: true },
+                { name: 'Withdrawn preserved', value: String(result.withdrawnPreserved), inline: true },
+                { name: 'Free agents preserved', value: String(result.freeAgentsPreserved), inline: true },
+                { name: 'Assigned elsewhere preserved', value: String(result.otherTeamsPreserved), inline: true }
+            ],
+            footer: {
+                text: `${reactivateWithdrawn
+                    ? 'Withdrawn entries were explicitly reactivated where they matched a global team.'
+                    : 'Withdrawn entries remain inactive by default.'} Mentions shown in the embed are display-only; no notification pings were sent.`
+            }
+        }],
         allowedMentions: { parse: [] }
     });
+}
+
+function formatPlayerLines(players) {
+    const lines = players.slice(0, 6).map(player => {
+        const discordID = String(player.discordID || '');
+        const label = /^\d{15,22}$/.test(discordID)
+            ? `<@${discordID}>`
+            : `**${shortText(player.playerName, 60)}**`;
+        return `• ${label}`;
+    });
+    if (players.length > lines.length) {
+        lines.push(`…and ${players.length - lines.length} more player(s).`);
+    }
+    return lines;
+}
+
+function embedNotice(title, description, color = 0x5865F2) {
+    return {
+        embeds: [{ title, description: shortText(description, 4000), color }],
+        allowedMentions: { parse: [] }
+    };
 }
 
 function shortText(value, maxLength) {
