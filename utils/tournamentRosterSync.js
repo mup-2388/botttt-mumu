@@ -130,6 +130,10 @@ async function syncTournamentRosterPlayers(guildId, tournament, {
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
                 result.added++;
+                result.addedPlayers.push({
+                    playerName: player.name,
+                    discordID: player.discordID || null
+                });
                 continue;
             }
 
@@ -149,6 +153,10 @@ async function syncTournamentRosterPlayers(guildId, tournament, {
                     { $set: { ...baseFields, ...leaderFields, isActive: true } }
                 );
                 result.reactivated++;
+                result.reactivatedPlayers.push({
+                    playerName: player.name,
+                    discordID: player.discordID || null
+                });
                 continue;
             }
 
@@ -192,8 +200,10 @@ async function syncTournamentRosterPlayers(guildId, tournament, {
 function emptyResult() {
     return {
         added: 0,
+        addedPlayers: [],
         alreadyPresent: 0,
         reactivated: 0,
+        reactivatedPlayers: [],
         withdrawnPreserved: 0,
         freeAgentsPreserved: 0,
         otherTeamsPreserved: 0,
