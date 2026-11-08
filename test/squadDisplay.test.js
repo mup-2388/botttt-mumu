@@ -47,3 +47,29 @@ test('squad tags show the current default tournament instead of historical tourn
 test('squad tags retain all tournament names only when no default tournament can be resolved', () => {
     assert.deepEqual(getSquadTournamentNames(entries), ['Old League', 'Glory Cup']);
 });
+
+test('squad tags match the default tournament by ID when populate does not resolve it', () => {
+    const unpopulatedEntry = { tournamentId: 'tournament-default-id' };
+    assert.deepEqual(getSquadTournamentNames(
+        [unpopulatedEntry],
+        'glory-cup-s4',
+        'tournament-default-id',
+        'Glory Cup S4'
+    ), ['Glory Cup S4']);
+});
+
+test('squad tags use the active tournament when a global team member has no tournament row', () => {
+    assert.deepEqual(getSquadTournamentNames(
+        [],
+        'glory-cup-s4',
+        'tournament-default-id',
+        'Glory Cup S4',
+        true
+    ), ['Glory Cup S4']);
+    assert.deepEqual(getSquadTournamentNames(
+        [],
+        'glory-cup-s4',
+        'tournament-default-id',
+        'Glory Cup S4'
+    ), []);
+});

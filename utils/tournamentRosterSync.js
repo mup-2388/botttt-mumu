@@ -13,6 +13,8 @@ const {
  * tournament assignment. Existing withdrawals and tournament-specific moves
  * are preserved unless the organizer explicitly requests withdrawal reactivation.
  * Legacy same-team rows with no stored isActive flag are normalized to active.
+ * Unmarked teamless rows are repaired when the global roster proves the team;
+ * explicit FREE AGENT entries and withdrawn rows remain untouched.
  */
 async function syncTournamentRosterPlayers(guildId, tournament, {
     teamName = null,
@@ -162,11 +164,32 @@ async function syncTournamentRosterPlayers(guildId, tournament, {
             }
 
             if (!existing.teamId) {
+                const explicitlyFreeAgent = normalize(existing.teamNameSnapshot) === 'free agent';
+                const globalTeamMatches = idOf(player.teamId) === teamId;
+
+                // A teamless TournamentPlayer row without an explicit FREE AGENT
+                // marker is stale if the global roster still assigns the player
+                // to this active tournament team. Repair it instead of preserving
+                // a false free-agent state. Explicit releases remain untouched.
+                if (globalTeamMatches && !explicitlyFreeAgent) {
+                    await TournamentPlayer.updateOne(
+                        { _id: existing._id },
+                        { $set: { ...baseFields, ...leaderFields, isActive: true } }
+                    );
+                    result.globalTeamAssignmentsRepaired++;
+                    result.globalTeamAssignmentsRepairedPlayers.push({
+                        playerName: player.name,
+                        discordID: player.discordID || null
+                    });
+                    if (existing.isActive !== true) result.legacyActiveFlagsRepaired++;
+                    continue;
+                }
+
                 result.freeAgentsPreserved++;
                 result.examples.push({
                     playerName: player.name,
                     teamName: team.name,
-                    reason: 'active tournament free agent left unattached'
+                    reason: 'explicit tournament free-agent entry left unattached'
                 });
                 continue;
             }
@@ -206,6 +229,8 @@ function emptyResult() {
         addedPlayers: [],
         alreadyPresent: 0,
         legacyActiveFlagsRepaired: 0,
+        globalTeamAssignmentsRepaired: 0,
+        globalTeamAssignmentsRepairedPlayers: [],
         reactivated: 0,
         reactivatedPlayers: [],
         withdrawnPreserved: 0,
