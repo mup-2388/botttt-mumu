@@ -8,9 +8,9 @@
  *   the per-tournament captain/VC, and teams you joined in a specific
  *   tournament. When you have more than one team, a dropdown lets you
  *   switch between them.
- * - The squad is the union of global players AND active per-tournament
- *   rosters, so tournament-only members are shown too. Player names use the
- *   global nickname and squad affiliation labels use the current default tournament.
+ * - In tournament mode, the squad shows only players rostered on the selected
+ *   team in the server's default tournament. Without a tournament, it uses the
+ *   team's global roster. Names use the global nickname when available.
  *
  * Usage:  .myteam [team name]
  * Slash:  /myteam [team]
@@ -263,54 +263,60 @@ async function getTeamTournamentNames(guildId, teams) {
 }
 
 /* ====================================================
-   SQUAD — union of global players + per-tournament rosters
+   SQUAD — default tournament roster (global fallback only without a tournament)
 ==================================================== */
 
 /**
- * Build the full squad list: every player who is on this team either
- * globally (Player.teamId) or in any active tournament (TournamentPlayer).
- * Each entry is tagged with the tournaments they play in for this team.
+ * In tournament mode, build the squad only from active TournamentPlayer rows
+ * assigned to this team in the default tournament. Global Player.teamId is used
+ * only when no tournament is configured, so transferred players cannot appear
+ * on both their global team and their current tournament team.
  */
 async function buildSquadEntries(guildId, team) {
-    const [globalPlayers, resolvedDefault] = await Promise.all([
-        Player.find({ guildId, teamId: team._id }),
-        resolveTournament(guildId, null)
-    ]);
+    const resolvedDefault = await resolveTournament(guildId, null);
     const defaultTournament = resolvedDefault.tournament || null;
     const defaultTournamentKey = defaultTournament?.tournamentKey || '';
-    const defaultTournamentTeam = defaultTournament
-        ? await TournamentTeam.findOne({
+    let defaultTournamentTeam = null;
+    let tourEntries = [];
+    let squadPlayers = [];
+
+    if (defaultTournament) {
+        defaultTournamentTeam = await TournamentTeam.findOne({
             guildId,
             tournamentId: defaultTournament._id,
             teamId: team._id,
             isActive: true
-        })
-        : null;
+        });
 
-    // Legacy TournamentPlayer documents may not have an isActive property;
-    // the schema defaults those rows to active. Explicit false remains withdrawn.
-    const tourEntries = await TournamentPlayer.find({
-        guildId,
-        teamId: team._id,
-        $or: [
-            { isActive: true },
-            { isActive: { $exists: false } }
-        ]
-    }).populate('playerId').populate('tournamentId');
-    // Keep explicit tournament assignments authoritative; only infer membership
-    // from the global team when no tournament state conflicts with it.
-    const defaultTournamentRosterStates = defaultTournament && globalPlayers.length
-        ? await TournamentPlayer.find({
-            guildId,
-            tournamentId: defaultTournament._id,
-            playerId: { $in: globalPlayers.map(player => player._id) }
-        }).select('playerId teamId teamNameSnapshot isActive').lean()
-        : [];
+        // In tournament mode, the tournament roster is the source of truth.
+        // Do not union in global team members: that makes transfers appear on
+        // both their old global team and their current tournament team.
+        if (defaultTournamentTeam) {
+            tourEntries = await TournamentPlayer.find({
+                guildId,
+                tournamentId: defaultTournament._id,
+                teamId: team._id,
+                $or: [
+                    { isActive: true },
+                    { isActive: { $exists: false } }
+                ]
+            });
 
-    const defaultTournamentRosterStateByPlayer = new Map(
-        defaultTournamentRosterStates.map(entry => [String(entry.playerId?._id || entry.playerId), entry])
-    );
-    const globalById = new Map(globalPlayers.map(player => [String(player._id), player]));
+            const playerIds = [...new Set(
+                tourEntries
+                    .map(entry => String(entry.playerId?._id || entry.playerId))
+                    .filter(Boolean)
+            )];
+            squadPlayers = playerIds.length
+                ? await Player.find({ guildId, _id: { $in: playerIds } })
+                : [];
+        }
+    } else {
+        // Servers without a tournament retain their legacy global roster view.
+        squadPlayers = await Player.find({ guildId, teamId: team._id });
+    }
+
+    const globalById = new Map(squadPlayers.map(player => [String(player._id), player]));
     const tournamentEntriesByPlayer = new Map();
 
     for (const entry of tourEntries) {
@@ -319,51 +325,18 @@ async function buildSquadEntries(guildId, team) {
         tournamentEntriesByPlayer.get(playerId).push(entry);
     }
 
-    const playerIds = new Set([
-        ...globalById.keys(),
-        ...tournamentEntriesByPlayer.keys()
-    ]);
+    const playerIds = defaultTournament
+        ? new Set(tournamentEntriesByPlayer.keys())
+        : new Set(globalById.keys());
     const list = [];
 
     for (const playerId of playerIds) {
         const globalPlayer = globalById.get(playerId);
         const entries = tournamentEntriesByPlayer.get(playerId) || [];
-        const tournamentPlayer = entries.find(entry => entry.playerId?.discordID);
-
-        const discordID = globalPlayer?.discordID || tournamentPlayer?.playerId?.discordID || null;
-        const currentTournamentPlayer = defaultTournament
-            ? entries.find(entry => {
-                const tournamentId = entry.tournamentId?._id || entry.tournamentId;
-                const matchesId = defaultTournament._id && tournamentId
-                    && String(tournamentId) === String(defaultTournament._id);
-                const matchesKey = defaultTournamentKey
-                    && String(entry.tournamentId?.tournamentKey || '').toLowerCase() === String(defaultTournamentKey).toLowerCase();
-                return matchesId || matchesKey;
-            }) || null
-            : null;
-        const defaultRosterState = defaultTournamentRosterStateByPlayer.get(playerId);
-        const defaultStateTeamId = defaultRosterState?.teamId?._id || defaultRosterState?.teamId;
-        const normalizedSnapshotTeamName = String(defaultRosterState?.teamNameSnapshot || '').trim().toLowerCase();
-        const matchesLegacyTeamAssignment = Boolean(
-            defaultTournamentTeam
-            && defaultRosterState
-            && defaultRosterState.isActive !== false
-            && !defaultStateTeamId
-            && (
-                !normalizedSnapshotTeamName
-                || normalizedSnapshotTeamName === String(team.name || '').trim().toLowerCase()
-            )
-        );
-        const inferredFromGlobalTeam = Boolean(
-            defaultTournamentTeam
-            && globalPlayer
-            && !defaultRosterState
-        );
-        const hasDefaultTournamentMembership = Boolean(
-            currentTournamentPlayer || matchesLegacyTeamAssignment || inferredFromGlobalTeam
-        );
+        const discordID = globalPlayer?.discordID || null;
+        const currentTournamentPlayer = defaultTournament ? entries[0] || null : null;
         const role = defaultTournament
-            ? defaultTournamentTeam && hasDefaultTournamentMembership
+            ? defaultTournamentTeam && currentTournamentPlayer
                 ? getUserLeadershipRole({
                     userId: discordID,
                     team,
@@ -374,26 +347,21 @@ async function buildSquadEntries(guildId, team) {
 
         list.push({
             playerId,
-            // Player.name is the bot-wide nickname; old tournament snapshots
-            // must not override it when we build the current squad.
+            // Prefer the global nickname, but only for players rostered on this
+            // team in the selected tournament.
             name: getSquadDisplayName({
                 globalName: globalPlayer?.name,
                 tournamentEntries: entries,
                 defaultTournamentKey
             }),
             discordID,
-            // Match the current tournament's authorization rules. Never use a
-            // global or historical tournament badge as the active role.
             isCaptain: role === 'captain',
             isViceCaptain: role === 'vice',
-            // Historical tournament labels remain available in Tournament Stats,
-            // not as prefixes/tags beside every player's name.
             tournaments: new Set(getSquadTournamentNames(
                 entries,
                 defaultTournamentKey,
                 defaultTournament?._id,
-                defaultTournament?.name,
-                hasDefaultTournamentMembership
+                defaultTournament?.name
             ))
         });
     }
@@ -766,3 +734,6 @@ function buildComponents({ teams, currentTeamId, view, teamTournamentNames }) {
 
     return rows;
 }
+
+// Exposed for focused regression tests; the command loader ignores this helper.
+module.exports._buildSquadEntries = buildSquadEntries;

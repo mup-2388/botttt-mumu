@@ -39,8 +39,7 @@ function getSquadTournamentNames(
     tournamentEntries = [],
     defaultTournamentKey = '',
     defaultTournamentId = null,
-    defaultTournamentName = '',
-    hasDefaultTournamentMembership = false
+    defaultTournamentName = ''
 ) {
     const defaultKey = normalizeKey(defaultTournamentKey);
     const visibleEntries = defaultKey || defaultTournamentId
@@ -57,11 +56,9 @@ function getSquadTournamentNames(
             .filter(Boolean)
     )];
 
-    // A populated tournament name is ideal, but an ID match or a verified
-    // global-team membership may be the only available evidence for legacy rows.
-    if ((visibleEntries.length || hasDefaultTournamentMembership)
-        && defaultTournamentName
-        && !names.includes(defaultTournamentName)) {
+    // If populate() did not resolve the tournament reference, the matching
+    // roster entry still proves the default tournament label belongs here.
+    if (visibleEntries.length && defaultTournamentName && !names.includes(defaultTournamentName)) {
         names.push(defaultTournamentName);
     }
 
