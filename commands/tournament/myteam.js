@@ -297,7 +297,19 @@ async function buildSquadEntries(guildId, team) {
             { isActive: { $exists: false } }
         ]
     }).populate('playerId').populate('tournamentId');
+    // Keep explicit tournament assignments authoritative; only infer membership
+    // from the global team when no tournament state conflicts with it.
+    const defaultTournamentRosterStates = defaultTournament && globalPlayers.length
+        ? await TournamentPlayer.find({
+            guildId,
+            tournamentId: defaultTournament._id,
+            playerId: { $in: globalPlayers.map(player => player._id) }
+        }).select('playerId teamId teamNameSnapshot isActive').lean()
+        : [];
 
+    const defaultTournamentRosterStateByPlayer = new Map(
+        defaultTournamentRosterStates.map(entry => [String(entry.playerId?._id || entry.playerId), entry])
+    );
     const globalById = new Map(globalPlayers.map(player => [String(player._id), player]));
     const tournamentEntriesByPlayer = new Map();
 
@@ -329,8 +341,29 @@ async function buildSquadEntries(guildId, team) {
                 return matchesId || matchesKey;
             }) || null
             : null;
+        const defaultRosterState = defaultTournamentRosterStateByPlayer.get(playerId);
+        const defaultStateTeamId = defaultRosterState?.teamId?._id || defaultRosterState?.teamId;
+        const normalizedSnapshotTeamName = String(defaultRosterState?.teamNameSnapshot || '').trim().toLowerCase();
+        const matchesLegacyTeamAssignment = Boolean(
+            defaultTournamentTeam
+            && defaultRosterState
+            && defaultRosterState.isActive !== false
+            && !defaultStateTeamId
+            && (
+                !normalizedSnapshotTeamName
+                || normalizedSnapshotTeamName === String(team.name || '').trim().toLowerCase()
+            )
+        );
+        const inferredFromGlobalTeam = Boolean(
+            defaultTournamentTeam
+            && globalPlayer
+            && !defaultRosterState
+        );
+        const hasDefaultTournamentMembership = Boolean(
+            currentTournamentPlayer || matchesLegacyTeamAssignment || inferredFromGlobalTeam
+        );
         const role = defaultTournament
-            ? defaultTournamentTeam && currentTournamentPlayer
+            ? defaultTournamentTeam && hasDefaultTournamentMembership
                 ? getUserLeadershipRole({
                     userId: discordID,
                     team,
@@ -359,7 +392,8 @@ async function buildSquadEntries(guildId, team) {
                 entries,
                 defaultTournamentKey,
                 defaultTournament?._id,
-                defaultTournament?.name
+                defaultTournament?.name,
+                hasDefaultTournamentMembership
             ))
         });
     }

@@ -97,18 +97,41 @@ async function runFreeAgents({ guild, tournamentKey = null, reply }) {
 
     const tournament = resolved.tournament;
 
-    // Everyone who IS on a team in this tournament
-    const [rostered, teams] = await Promise.all([
+    // A missing isActive flag is a legacy active entry (the schema default).
+    // Read all current assignments so explicit tournament free agents can be
+    // distinguished from global team members who have not been synced yet.
+    const [tournamentPlayers, teams] = await Promise.all([
         TournamentPlayer.find({
             guildId: guild.id,
             tournamentId: tournament._id,
-            isActive: true,
-            teamId: { $ne: null }
-        }).select('playerId').lean(),
+            $or: [
+                { isActive: true },
+                { isActive: { $exists: false } }
+            ]
+        }).select('playerId teamId teamNameSnapshot').lean(),
         getTournamentTeams(guild.id, tournament)
     ]);
 
-    const rosteredIds = new Set(rostered.map(r => String(r.playerId)));
+    const tournamentTeamIds = new Set(teams.map(({ team }) => idOf(team?._id)).filter(Boolean));
+    const tournamentTeamNames = new Set(teams.map(({ team }) => normalize(team?.name)).filter(Boolean));
+    const rosteredIds = new Set();
+    const explicitFreeAgentIds = new Set();
+
+    for (const entry of tournamentPlayers) {
+        const playerId = idOf(entry.playerId);
+        if (!playerId) continue;
+
+        const snapshotTeamName = normalize(entry.teamNameSnapshot);
+        const hasAssignedTeam = entry.teamId != null
+            || (snapshotTeamName && tournamentTeamNames.has(snapshotTeamName));
+
+        if (hasAssignedTeam) {
+            rosteredIds.add(playerId);
+        } else if (snapshotTeamName === 'free agent') {
+            explicitFreeAgentIds.add(playerId);
+        }
+    }
+
     const leaderDiscordIds = new Set();
     for (const { entry, team } of teams) {
         const c = effectiveCaptainId(entry, team);
@@ -119,10 +142,18 @@ async function runFreeAgents({ guild, tournamentKey = null, reply }) {
 
     const all = await Player.find({ guildId: guild.id }).sort({ name: 1 }).lean();
 
-    const players = all.filter(p =>
-        !rosteredIds.has(String(p._id)) &&
-        !(p.discordID && leaderDiscordIds.has(String(p.discordID)))
-    );
+    const players = all.filter(player => {
+        const playerId = idOf(player._id);
+        if (rosteredIds.has(playerId)) return false;
+        if (player.discordID && leaderDiscordIds.has(String(player.discordID))) return false;
+
+        // An explicitly marked tournament free-agent entry overrides global
+        // affiliation. Otherwise, membership in a team active here is enough to
+        // keep a global player from being mislabeled as a free agent.
+        if (explicitFreeAgentIds.has(playerId)) return true;
+        const globalTeamId = idOf(player.teamId);
+        return !globalTeamId || !tournamentTeamIds.has(globalTeamId);
+    });
 
     const lines = players.map((player, index) => {
         const mention = player.discordID
@@ -144,4 +175,13 @@ async function runFreeAgents({ guild, tournamentKey = null, reply }) {
         .setTimestamp();
 
     return reply({ embeds: [embed] });
+}
+
+function idOf(value) {
+    if (value == null) return null;
+    return String(value._id || value);
+}
+
+function normalize(value) {
+    return String(value || '').trim().toLowerCase();
 }

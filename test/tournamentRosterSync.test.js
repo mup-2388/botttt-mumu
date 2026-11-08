@@ -139,11 +139,11 @@ test('roster sync repairs legacy same-team entries that lack an explicit active 
     ]]);
 });
 
-test('roster sync does not steal active free agents or tournament transfers', async () => {
+test('roster sync preserves explicitly released free agents and tournament transfers', async () => {
     const freeAgent = { _id: 'p-free', discordID: 'free-1', name: 'Free Agent', teamId: team._id };
     const movedPlayer = { _id: 'p-moved', discordID: 'moved-1', name: 'Moved', teamId: team._id };
     const existingEntries = [
-        { _id: 'tp-free', playerId: freeAgent._id, teamId: null, isActive: true },
+        { _id: 'tp-free', playerId: freeAgent._id, teamId: null, teamNameSnapshot: 'FREE AGENT', isActive: true },
         { _id: 'tp-moved', playerId: movedPlayer._id, teamId: 'team-2', teamNameSnapshot: 'Other Team', isActive: true }
     ];
     const { service, calls } = makeHarness({
@@ -159,6 +159,36 @@ test('roster sync does not steal active free agents or tournament transfers', as
     assert.equal(result.otherTeamsPreserved, 1);
     assert.equal(calls.inserts.length, 0);
     assert.equal(calls.updates.length, 0);
+});
+
+test('roster sync repairs an unmarked teamless entry when the global roster confirms its team', async () => {
+    const player = { _id: 'p-unassigned', discordID: 'unassigned-1', name: 'Unassigned', teamId: team._id };
+    const legacyEntry = {
+        _id: 'tp-unassigned',
+        playerId: player._id,
+        teamId: null,
+        teamNameSnapshot: ''
+    };
+    const { service, calls } = makeHarness({
+        teamEntries: [teamEntry],
+        teams: [team],
+        players: [player],
+        existingEntries: [legacyEntry]
+    });
+
+    const result = await service.syncTournamentRosterPlayers('guild-1', tournament);
+
+    assert.equal(result.globalTeamAssignmentsRepaired, 1);
+    assert.deepEqual(result.globalTeamAssignmentsRepairedPlayers, [
+        { playerName: player.name, discordID: player.discordID }
+    ]);
+    assert.equal(result.legacyActiveFlagsRepaired, 1);
+    assert.equal(result.freeAgentsPreserved, 0);
+    assert.equal(calls.updates.length, 1);
+    assert.deepEqual(calls.updates[0][0], { _id: legacyEntry._id });
+    assert.equal(calls.updates[0][1].$set.teamId, team._id);
+    assert.equal(calls.updates[0][1].$set.teamNameSnapshot, team.name);
+    assert.equal(calls.updates[0][1].$set.isActive, true);
 });
 
 test('roster sync compares team names case-insensitively and reports a missing team record', async () => {

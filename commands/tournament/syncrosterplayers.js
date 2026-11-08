@@ -147,6 +147,7 @@ async function runSync({ guild, tournament, teamName, reactivateWithdrawn, reply
         reactivateWithdrawn
     });
     const addedLines = formatPlayerLines(result.addedPlayers || []);
+    const repairedLines = formatPlayerLines(result.globalTeamAssignmentsRepairedPlayers || []);
     const reactivatedLines = formatPlayerLines(result.reactivatedPlayers || []);
     const preservedLines = result.examples.slice(0, 6).map(item =>
         `• **${shortText(item.playerName, 60)}** (${shortText(item.teamName, 60)}) — ${shortText(item.reason, 100)}`
@@ -163,6 +164,7 @@ async function runSync({ guild, tournament, teamName, reactivateWithdrawn, reply
 
     const details = [
         addedLines.length ? `**Added players**\n${addedLines.join('\n')}` : '',
+        repairedLines.length ? `**Global team assignments repaired**\n${repairedLines.join('\n')}` : '',
         reactivatedLines.length ? `**Reactivated players**\n${reactivatedLines.join('\n')}` : '',
         preservedLines.length ? `**Preserved entries**\n${preservedLines.join('\n')}` : '',
         skippedLines.length ? `**Skipped teams**\n${skippedLines.join('\n')}` : ''
@@ -179,6 +181,7 @@ async function runSync({ guild, tournament, teamName, reactivateWithdrawn, reply
             fields: [
                 { name: 'Added', value: String(result.added), inline: true },
                 { name: 'Already on team', value: String(result.alreadyPresent), inline: true },
+                { name: 'Global team assignments repaired', value: String(result.globalTeamAssignmentsRepaired || 0), inline: true },
                 { name: 'Legacy active flags repaired', value: String(result.legacyActiveFlagsRepaired || 0), inline: true },
                 { name: 'Reactivated', value: String(result.reactivated), inline: true },
                 { name: 'Withdrawn preserved', value: String(result.withdrawnPreserved), inline: true },

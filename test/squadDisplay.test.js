@@ -57,3 +57,19 @@ test('squad tags match the default tournament by ID when populate does not resol
         'Glory Cup S4'
     ), ['Glory Cup S4']);
 });
+
+test('squad tags use the active tournament when a global team member has no tournament row', () => {
+    assert.deepEqual(getSquadTournamentNames(
+        [],
+        'glory-cup-s4',
+        'tournament-default-id',
+        'Glory Cup S4',
+        true
+    ), ['Glory Cup S4']);
+    assert.deepEqual(getSquadTournamentNames(
+        [],
+        'glory-cup-s4',
+        'tournament-default-id',
+        'Glory Cup S4'
+    ), []);
+});
