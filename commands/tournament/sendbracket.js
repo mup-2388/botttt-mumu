@@ -168,8 +168,8 @@ module.exports = {
  */
 async function generateBracketEmbed(guildId, tournamentKey = null) {
     const tournament = tournamentKey
-        ? await getTournamentByKey(guildId, tournamentKey)
-        : await getDefaultTournament(guildId);
+        ? await getTournamentByKey(guildId, tournamentKey, { includeCompleted: true })
+        : await getDefaultTournament(guildId, { includeCompleted: true });
 
     if (!tournament) {
         return new EmbedBuilder()
@@ -272,7 +272,20 @@ function groupFixturesByPhase(fixtures) {
         grouped[fixture.phase].push(fixture);
     }
 
+    for (const phaseFixtures of Object.values(grouped)) {
+        phaseFixtures.sort(compareBracketSlots);
+    }
     return grouped;
+}
+
+function compareBracketSlots(a, b) {
+    const aSlot = Number(a.bracket?.slot);
+    const bSlot = Number(b.bracket?.slot);
+    if (Number.isInteger(aSlot) && aSlot > 0 && Number.isInteger(bSlot) && bSlot > 0 && aSlot !== bSlot) {
+        return aSlot - bSlot;
+    }
+    return Number(a.matchNumber || 0) - Number(b.matchNumber || 0) ||
+        Number(a.leg || 1) - Number(b.leg || 1);
 }
 
 /** Group fixtures into ties (by aggregateTieKey, roundLabel, or unique key). */
@@ -280,10 +293,11 @@ function groupFixturesByTie(fixtures) {
     const map = new Map();
 
     for (const fixture of fixtures) {
-        const key =
-            fixture.aggregateTieKey ||
-            fixture.roundLabel ||
-            `${fixture.phase}_${fixture.matchNumber}`;
+        const roundLabel = String(fixture.roundLabel || '').trim();
+        const hasTieLabel = Number(fixture.leg || 1) > 1 || /\b\d+\b/.test(roundLabel);
+        const key = fixture.aggregateTieKey || (hasTieLabel
+            ? `${fixture.phase}:${roundLabel}`
+            : `${fixture.phase}:${fixture.matchNumber}`);
 
         if (!map.has(key)) map.set(key, []);
         map.get(key).push(fixture);

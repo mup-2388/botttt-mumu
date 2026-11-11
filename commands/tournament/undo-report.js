@@ -32,6 +32,8 @@ const { updateAllLiveStandings } = require('../../utils/updateStandings');
 const { updateLiveTopStats } = require('../../utils/updateTopStats');
 const { refreshLiveMasterSchedules } = require('./master-schedule');
 const { refreshLiveBracket } = require('./sendbracket');
+const { refreshLiveBracketImage } = require('./bracketimage');
+const { rollbackStraightKnockoutAfterUndo } = require('../../utils/straightKnockoutProgression');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { vsLine, slotEmoji } = require('../../utils/ai/emojiSlots');
 
@@ -200,6 +202,15 @@ async function runUndo({
         });
     }
 
+    const rollback = await rollbackStraightKnockoutAfterUndo({
+        guildId: guild.id,
+        tournament,
+        phase: fixture.phase
+    });
+    if (!rollback.ok) {
+        return reply({ content: `❌ ${rollback.error}` });
+    }
+
     const homeGoals = safeNumber(fixture.result?.home);
     const awayGoals = safeNumber(fixture.result?.away);
 
@@ -291,6 +302,13 @@ async function runUndo({
         client,
         guild.id,
         tournament.tournamentKey
+    ).catch(console.error);
+
+    await refreshLiveBracketImage(
+        client,
+        guild.id,
+        tournament.tournamentKey,
+        tournament
     ).catch(console.error);
 
     if (global.io) {

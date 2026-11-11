@@ -99,7 +99,7 @@ function buildBracketRounds(fixtures) {
     let matchCount = firstMatchCount;
     return BRACKET_PHASES.slice(firstIndex).map(phase => {
         const phaseTies = groupFixturesIntoTies(byPhase.get(phase) || []);
-        const matches = Array.from({ length: matchCount }, (_, index) => phaseTies[index] || null);
+        const matches = placeTiesInBracketSlots(phaseTies, matchCount);
         matchCount = Math.max(1, matchCount / 2);
         return { phase, matches };
     });
@@ -120,6 +120,30 @@ function groupFixturesIntoTies(fixtures) {
     return Array.from(ties.values())
         .map(fixturesInTie => summarizeTie(fixturesInTie.sort((a, b) => (a.leg || 1) - (b.leg || 1))))
         .sort((a, b) => compareFixtures(a.firstFixture, b.firstFixture));
+}
+
+function placeTiesInBracketSlots(ties, matchCount) {
+    const matches = Array.from({ length: matchCount }, () => null);
+    const unpositioned = [];
+
+    for (const tie of ties) {
+        const rawSlot = Number(tie.firstFixture?.bracket?.slot);
+        const index = rawSlot - 1;
+        if (Number.isInteger(rawSlot) && index >= 0 && index < matchCount && matches[index] === null) {
+            matches[index] = tie;
+        } else {
+            unpositioned.push(tie);
+        }
+    }
+
+    let nextFree = 0;
+    for (const tie of unpositioned) {
+        while (nextFree < matchCount && matches[nextFree] !== null) nextFree++;
+        if (nextFree >= matchCount) break;
+        matches[nextFree++] = tie;
+    }
+
+    return matches;
 }
 
 function summarizeTie(fixtures) {
@@ -149,6 +173,24 @@ function summarizeTie(fixtures) {
     }
 
     const scores = hasScore ? { home: homeScore, away: awayScore } : null;
+    const finalFixture = fixtures[fixtures.length - 1];
+    const finalResult = finalFixture?.result || {};
+    const fixturePenaltiesHome = toScore(finalResult.penaltiesHome);
+    const fixturePenaltiesAway = toScore(finalResult.penaltiesAway);
+    let homePenalties = null;
+    let awayPenalties = null;
+
+    if (fixturePenaltiesHome !== null && fixturePenaltiesAway !== null) {
+        const finalHomeId = teamIdentity(finalFixture, 'home');
+        if (finalHomeId === homeId) {
+            homePenalties = fixturePenaltiesHome;
+            awayPenalties = fixturePenaltiesAway;
+        } else if (finalHomeId === awayId) {
+            homePenalties = fixturePenaltiesAway;
+            awayPenalties = fixturePenaltiesHome;
+        }
+    }
+
     const winner = resolveTieWinner(fixtures, {
         homeTeam,
         awayTeam,
@@ -164,19 +206,13 @@ function summarizeTie(fixtures) {
         awayTeam,
         homeScore: scores?.home ?? null,
         awayScore: scores?.away ?? null,
+        homePenalties,
+        awayPenalties,
         winner
     };
 }
 
 function resolveTieWinner(fixtures, { homeTeam, awayTeam, homeId, awayId, scores }) {
-    const explicitWinner = [...fixtures].reverse()
-        .map(fixture => fixture.result?.winner)
-        .find(Boolean);
-
-    if (fixtures.length === 1 && explicitWinner && [homeTeam, awayTeam].includes(String(explicitWinner))) {
-        return String(explicitWinner);
-    }
-
     if (scores && scores.home !== scores.away) {
         return scores.home > scores.away ? homeTeam : awayTeam;
     }
@@ -186,17 +222,23 @@ function resolveTieWinner(fixtures, { homeTeam, awayTeam, homeId, awayId, scores
     const penaltiesHome = toScore(result.penaltiesHome);
     const penaltiesAway = toScore(result.penaltiesAway);
 
-    if (penaltiesHome === null || penaltiesAway === null || penaltiesHome === penaltiesAway) {
-        return null;
+    if (penaltiesHome !== null && penaltiesAway !== null && penaltiesHome !== penaltiesAway) {
+        const winnerIdentity = penaltiesHome > penaltiesAway
+            ? teamIdentity(finalFixture, 'home')
+            : teamIdentity(finalFixture, 'away');
+
+        if (winnerIdentity === homeId) return homeTeam;
+        if (winnerIdentity === awayId) return awayTeam;
+        return penaltiesHome > penaltiesAway ? finalFixture.homeTeam : finalFixture.awayTeam;
     }
 
-    const winnerIdentity = penaltiesHome > penaltiesAway
-        ? teamIdentity(finalFixture, 'home')
-        : teamIdentity(finalFixture, 'away');
-
-    if (winnerIdentity === homeId) return homeTeam;
-    if (winnerIdentity === awayId) return awayTeam;
-    return penaltiesHome > penaltiesAway ? finalFixture.homeTeam : finalFixture.awayTeam;
+    const explicitWinner = [...fixtures].reverse()
+        .map(fixture => fixture.result?.winner)
+        .find(Boolean);
+    if (explicitWinner && [homeTeam, awayTeam].includes(String(explicitWinner))) {
+        return String(explicitWinner);
+    }
+    return null;
 }
 
 function buildBracketLayout(rounds) {
@@ -445,29 +487,38 @@ function drawMatchCard(ctx, slot, phase) {
     ctx.fillText(matchLabel, x + 12, y + 11);
 
     const rowTop = y + 22;
-    drawTeamRow(ctx, slot.homeTeam || 'TBD', slot.homeScore, slot.winner, x, rowTop, 'home');
-    drawTeamRow(ctx, slot.awayTeam || 'TBD', slot.awayScore, slot.winner, x, rowTop + 29, 'away');
+    drawTeamRow(ctx, slot.homeTeam || 'TBD', slot.homeScore, slot.homePenalties, slot.winner, x, rowTop, 'home');
+    drawTeamRow(ctx, slot.awayTeam || 'TBD', slot.awayScore, slot.awayPenalties, slot.winner, x, rowTop + 29, 'away');
 }
 
-function drawTeamRow(ctx, name, score, winner, x, y, side) {
+function drawTeamRow(ctx, name, score, penalties, winner, x, y, side) {
     const isWinner = Boolean(winner) && name === winner;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = isWinner ? THEME.winner : name === 'TBD' ? THEME.muted : THEME.team;
     ctx.font = isWinner ? 'bold 16px Arial, sans-serif' : '15px Arial, sans-serif';
-    ctx.fillText(fitText(ctx, name, 218), x + 12, y + 14);
+    ctx.fillText(fitText(ctx, name, 185), x + 12, y + 14);
 
+    const scoreText = formatBracketScore(score, penalties);
     ctx.textAlign = 'right';
-    ctx.fillStyle = score === null || typeof score === 'undefined'
+    ctx.fillStyle = scoreText === '—'
         ? THEME.muted
         : isWinner ? THEME.winner : THEME.score;
     ctx.font = 'bold 16px Arial, sans-serif';
-    ctx.fillText(score === null || typeof score === 'undefined' ? '—' : String(score), x + CARD_WIDTH - 12, y + 14);
+    ctx.fillText(scoreText, x + CARD_WIDTH - 12, y + 14);
 
     if (side === 'home') {
         ctx.fillStyle = 'rgba(145, 162, 191, 0.16)';
         ctx.fillRect(x + 12, y + 28, CARD_WIDTH - 24, 1);
     }
+}
+
+function formatBracketScore(score, penalties = null) {
+    if (score === null || typeof score === 'undefined') return '—';
+    const shootout = penalties === null || typeof penalties === 'undefined'
+        ? ''
+        : ` (${penalties})`;
+    return `- ${score}${shootout}`;
 }
 
 function drawFooter(ctx, layout) {
@@ -514,6 +565,11 @@ function toScore(value) {
 }
 
 function compareFixtures(a, b) {
+    const aSlot = Number(a.bracket?.slot);
+    const bSlot = Number(b.bracket?.slot);
+    if (Number.isInteger(aSlot) && aSlot > 0 && Number.isInteger(bSlot) && bSlot > 0 && aSlot !== bSlot) {
+        return aSlot - bSlot;
+    }
     return Number(a.matchNumber || 0) - Number(b.matchNumber || 0) ||
         Number(a.leg || 1) - Number(b.leg || 1);
 }
@@ -523,5 +579,7 @@ module.exports = {
     buildBracketRounds,
     buildBracketLayout,
     groupFixturesIntoTies,
-    summarizeTie
+    summarizeTie,
+    resolveTieWinner,
+    formatBracketScore
 };

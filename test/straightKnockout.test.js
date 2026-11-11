@@ -477,6 +477,12 @@ test('bracket renderer returns a PNG attachment and filters fixtures to knockout
 test('standings uses the bracket image for straight knockout and for groups only after knockout begins', async () => {
     async function render(tournament) {
         const calls = { bracket: 0, standings: 0, payloads: [] };
+        const liveSettings = new Map();
+        const standingsMessage = {
+            id: 'standings-message',
+            channel: { id: 'standings-channel' },
+            createMessageComponentCollector: () => ({ on() { return this; } })
+        };
         const command = requireWithMocks('../commands/tournament/standings-hf', {
             'discord.js': fakeDiscord,
             '../../models/Tournament': { TournamentTeam: { find: () => ({ populate() { return this; }, lean: async () => [] }) } },
@@ -508,10 +514,12 @@ test('standings uses the bracket image for straight knockout and for groups only
         await command.slashExecute({
             guild: { id: 'guild-1' },
             user: { id: 'user-1' },
+            client: { liveSettings },
             options: { getString: () => null },
-            reply: async payload => { calls.payloads.push(payload); }
+            reply: async payload => { calls.payloads.push(payload); },
+            fetchReply: async () => standingsMessage
         });
-        return calls;
+        return { ...calls, liveSettings };
     }
 
     const straight = await render({
@@ -520,6 +528,11 @@ test('standings uses the bracket image for straight knockout and for groups only
     assert.equal(straight.bracket, 1);
     assert.equal(straight.standings, 0);
     assert.equal(straight.payloads[0].files[0].name, 'knockout-bracket.png');
+    assert.deepEqual(straight.liveSettings.get('live_bracket_image:guild-1:cup'), {
+        channelId: 'standings-channel',
+        messageId: 'standings-message',
+        tournamentKey: 'cup'
+    });
 
     const beforeKnockout = await render({
         _id: 'groups', tournamentKey: 'groups-cup', name: 'Groups Cup', formatType: 'groups_knockout', currentPhase: 'groups', groupCount: 2
@@ -527,6 +540,7 @@ test('standings uses the bracket image for straight knockout and for groups only
     assert.equal(beforeKnockout.bracket, 0);
     assert.equal(beforeKnockout.standings, 1);
     assert.equal(beforeKnockout.payloads[0].files[0].name, 'standings.png');
+    assert.equal(beforeKnockout.liveSettings.size, 0);
 
     const duringKnockout = await render({
         _id: 'groups', tournamentKey: 'groups-cup', name: 'Groups Cup', formatType: 'groups_knockout', currentPhase: 'quarterfinal', groupCount: 2
@@ -534,4 +548,21 @@ test('standings uses the bracket image for straight knockout and for groups only
     assert.equal(duringKnockout.bracket, 1);
     assert.equal(duringKnockout.standings, 0);
     assert.equal(duringKnockout.payloads[0].files[0].name, 'knockout-bracket.png');
+    assert.deepEqual(duringKnockout.liveSettings.get('live_bracket_image:guild-1:groups-cup'), {
+        channelId: 'standings-channel',
+        messageId: 'standings-message',
+        tournamentKey: 'groups-cup'
+    });
+
+    const genericKnockoutPhase = await render({
+        _id: 'groups', tournamentKey: 'groups-cup', name: 'Groups Cup', formatType: 'groups_knockout', currentPhase: 'knockout', groupCount: 2
+    });
+    assert.equal(genericKnockoutPhase.bracket, 1);
+    assert.equal(genericKnockoutPhase.standings, 0);
+
+    const completedKnockout = await render({
+        _id: 'groups', tournamentKey: 'groups-cup', name: 'Groups Cup', formatType: 'groups_knockout', currentPhase: 'completed', groupCount: 2
+    });
+    assert.equal(completedKnockout.bracket, 1);
+    assert.equal(completedKnockout.standings, 0);
 });
