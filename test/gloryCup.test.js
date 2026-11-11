@@ -101,7 +101,7 @@ test('Glory Cup rejects separate UCL places so the top-eight playoff zone stays 
     assert.equal(databaseUpdated, false);
 });
 
-test('settournament configures Glory Cup as a single table with an eight-team playoff', async () => {
+test('settournament configures Glory Cup as a one-match-per-team qualifier with an eight-team playoff', async () => {
     let updateCall;
     let syncedTournament;
     let replied;
@@ -160,7 +160,7 @@ test('settournament configures Glory Cup as a single table with an eight-team pl
     };
     const integers = { teams: 12, groups: 4, teamspergroup: 3 };
     const booleans = {
-        homeaway: false,
+        homeaway: true,
         hasknockout: false,
         finalneutralvenue: true,
         registrationopen: true,
@@ -186,6 +186,7 @@ test('settournament configures Glory Cup as a single table with an eight-team pl
     assert.equal(updateCall.update.$set.formatType, 'glory_cup');
     assert.equal(updateCall.update.$set.groupCount, 0);
     assert.equal(updateCall.update.$set.teamsPerGroup, 0);
+    assert.equal(updateCall.update.$set.homeAway, false);
     assert.equal(updateCall.update.$set.teamCount, 12);
     assert.equal(updateCall.update.$set.qualificationSpotsPerGroup, 8);
     assert.equal(updateCall.update.$set.uclQualificationSpots, 0);
@@ -193,11 +194,16 @@ test('settournament configures Glory Cup as a single table with an eight-team pl
     assert.deepEqual(updateCall.update.$set.knockoutRounds, ['quarterfinal', 'semifinal', 'final']);
     assert.equal(updateCall.update.$set.manualRegistration, false);
     assert.equal(syncedTournament, settings);
-    assert.match(replied.content, /Glory Cup — Single Table \+ Top 8 Playoffs/);
+    assert.match(replied.content, /Glory Cup — One-Match Qualifier \+ Top 8 Playoffs/);
+    assert.match(replied.content, /One match per team/);
     assert.match(replied.content, /Top 8 advance to the quarterfinals/);
 });
 
-function loadGenerateStageHarness({ teamCount = 10 } = {}) {
+function loadGenerateStageHarness({
+    teamCount = 10,
+    qualifierFixtureCount = Math.floor(teamCount / 2),
+    playedQualifierCount = Math.floor(teamCount / 2)
+} = {}) {
     const tournament = {
         _id: 'glory-cup-id',
         guildId: 'guild-1',
@@ -238,7 +244,11 @@ function loadGenerateStageHarness({ teamCount = 10 } = {}) {
         'discord.js': fakeDiscord,
         '../../models/Tournament': {
             Fixture: {
-                countDocuments: async () => 0,
+                countDocuments: async query => {
+                    if (query.phase === 'league' && query.status === 'Played') return playedQualifierCount;
+                    if (query.phase === 'league') return qualifierFixtureCount;
+                    return 0;
+                },
                 insertMany: async fixtures => { insertedFixtures = fixtures; }
             },
             TournamentTeam: {
@@ -306,6 +316,15 @@ test('Glory Cup takes the standings top eight and creates seeded quarterfinals',
     assert.equal(harness.tournament.currentPhase, 'knockout');
     assert.equal(harness.tournament.saved, true);
     assert.equal(harness.replies.length, 1);
+});
+
+test('Glory Cup refuses to create knockouts until every qualifier fixture has been played', async () => {
+    const harness = loadGenerateStageHarness({ playedQualifierCount: 4 });
+    await harness.command.slashExecute(harness.interaction);
+
+    assert.equal(harness.insertedFixtures, null);
+    assert.match(harness.replies.at(-1).content, /until every active team has played its single qualifier match/);
+    assert.equal(harness.tournament.currentPhase, 'league');
 });
 
 test('Glory Cup refuses to create playoffs unless eight active teams qualify', async () => {

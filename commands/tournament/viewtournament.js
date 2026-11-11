@@ -179,7 +179,7 @@ async function buildPayload(guild, tournament, tournaments) {
         .setDescription(
             `**${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
-            `Format: **${tournament.formatType === 'glory_cup' ? 'Glory Cup — Single Table + Top 8 Playoffs' : tournament.formatType}**\n` +
+            `Format: **${tournament.formatType === 'glory_cup' ? 'Glory Cup — One-Match Qualifier + Top 8 Playoffs' : tournament.formatType}**\n` +
             `Mode: **${tournament.schedulingMode}**\n` +
             `Current Phase: **${tournament.currentPhase}**\n` +
             `Registration Open: **${tournament.registrationOpen ? 'Yes' : 'No'}**`
