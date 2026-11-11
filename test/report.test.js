@@ -120,6 +120,9 @@ function makeHarness(fixtures) {
         '../../utils/displayHelpers': { prettyPhase: () => 'League' },
         './master-schedule': { refreshLiveMasterSchedules: async () => {} },
         './sendbracket': { refreshLiveBracket: async () => {} },
+        './bracketimage': { refreshLiveBracketImage: async () => {} },
+        '../../utils/straightKnockoutProgression': { autoAdvanceStraightKnockout: async () => ({ skipped: true }) },
+        '../../utils/knockoutResults': require('../utils/knockoutResults'),
         '../../utils/ai/emojiSlots': {
             slotEmoji: () => '⚽',
             vsLine: (home, away) => `${home} vs ${away}`

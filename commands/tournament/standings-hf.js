@@ -31,6 +31,8 @@ const {
     getSelectableTournaments,
     getTournamentByKey
 } = require('../../utils/getTournament');
+const { syncLiveBracketImageReference } = require('../../utils/liveBracketImage');
+const { shouldShowKnockoutBracket } = require('../../utils/knockoutBracket');
 
 let generateStandingsImage = null;
 let imageRendererLoadError = null;
@@ -81,6 +83,7 @@ module.exports = {
             const requestedGroup = args[0] ? args[0].toUpperCase() : null;
 
             return await runStandings({
+                client: message.client,
                 guild: message.guild,
                 requestedGroup,
                 userId: message.author.id,
@@ -97,10 +100,14 @@ module.exports = {
             const requestedGroup = interaction.options.getString('group')?.toUpperCase() || null;
 
             return await runStandings({
+                client: interaction.client,
                 guild: interaction.guild,
                 requestedGroup,
                 userId: interaction.user.id,
-                reply: payload => interaction.reply(payload)
+                reply: async payload => {
+                    await interaction.reply(payload);
+                    return interaction.fetchReply?.();
+                }
             });
         } catch (error) {
             console.error('[standings-hf] slash error:', error);
@@ -122,6 +129,7 @@ module.exports = {
 ==================================================== */
 
 async function runStandings({
+    client,
     guild,
     requestedGroup,
     userId,
@@ -151,6 +159,13 @@ async function runStandings({
     });
 
     const sent = await reply(payload);
+    syncLiveBracketImageReference({
+        client,
+        guildId: guild.id,
+        tournamentKey: tournament.tournamentKey,
+        message: sent,
+        isBracketImage: shouldShowKnockoutBracket(tournament) && Boolean(payload.files?.length)
+    });
 
     if (!sent?.createMessageComponentCollector) return;
 
@@ -193,6 +208,13 @@ async function runStandings({
             });
 
             await interaction.update(updatedPayload);
+            syncLiveBracketImageReference({
+                client,
+                guildId: guild.id,
+                tournamentKey: tournament.tournamentKey,
+                message: interaction.message || sent,
+                isBracketImage: shouldShowKnockoutBracket(tournament) && Boolean(updatedPayload.files?.length)
+            });
         } catch (error) {
             console.error('[standings-hf] collector error:', error);
 
@@ -315,12 +337,6 @@ async function buildStandingsPayload({
         content: table,
         components
     };
-}
-
-function shouldShowKnockoutBracket(tournament) {
-    const knockoutPhases = ['knockout', 'qualifier', 'eliminator', 'roundof16', 'quarterfinal', 'semifinal', 'final'];
-    return tournament?.formatType === 'knockout' ||
-        (tournament?.formatType === 'groups_knockout' && knockoutPhases.includes(tournament.currentPhase));
 }
 
 function buildBracketCaption(tournament) {

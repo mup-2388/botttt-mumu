@@ -35,6 +35,13 @@ const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase } = require('../../utils/displayHelpers');
 const { refreshLiveMasterSchedules } = require('./master-schedule');
 const { refreshLiveBracket } = require('./sendbracket');
+const { refreshLiveBracketImage } = require('./bracketimage');
+const { autoAdvanceStraightKnockout } = require('../../utils/straightKnockoutProgression');
+const {
+    isKnockoutPhase,
+    validateReportedScore,
+    getFixtureWinnerSide
+} = require('../../utils/knockoutResults');
 const { slotEmoji, vsLine } = require('../../utils/ai/emojiSlots');
 const { markReserved, reservedBadge, isReserved } = require('../../utils/reservedMatches');
 const { parseScheduleTime, discordFull, discordRelative } = require('../../utils/istTime');
@@ -339,28 +346,7 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
 
     // ── Build modal ──
     const modalId = `report_score_${fixture._id}_${Date.now()}`;
-
-    const homeInput = new TextInputBuilder()
-        .setCustomId('home_score')
-        .setLabel(`${truncate(fixture.homeTeam, 35)} goals`)
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder('Example: 3');
-
-    const awayInput = new TextInputBuilder()
-        .setCustomId('away_score')
-        .setLabel(`${truncate(fixture.awayTeam, 35)} goals`)
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder('Example: 1');
-
-    const modal = new ModalBuilder()
-        .setCustomId(modalId)
-        .setTitle(`Report #${fixture.matchNumber}`)
-        .addComponents(
-            new ActionRowBuilder().addComponents(homeInput),
-            new ActionRowBuilder().addComponents(awayInput)
-        );
+    const modal = buildScoreModal(fixture, modalId);
 
     await interaction.showModal(modal);
 
@@ -377,12 +363,33 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
     // ── Validate scores ──
     const homeScore = parseScore(submitted.fields.getTextInputValue('home_score'));
     const awayScore = parseScore(submitted.fields.getTextInputValue('away_score'));
+    const homePenaltiesText = isKnockoutPhase(fixture.phase)
+        ? submitted.fields.getTextInputValue('home_penalties').trim()
+        : '';
+    const awayPenaltiesText = isKnockoutPhase(fixture.phase)
+        ? submitted.fields.getTextInputValue('away_penalties').trim()
+        : '';
+    const penaltiesHome = parseOptionalScore(homePenaltiesText);
+    const penaltiesAway = parseOptionalScore(awayPenaltiesText);
 
-    if (homeScore === null || awayScore === null) {
+    if (homeScore === null || awayScore === null ||
+        (homePenaltiesText && penaltiesHome === null) ||
+        (awayPenaltiesText && penaltiesAway === null)) {
         return submitted.reply({
-            content: '❌ Scores must be valid non-negative numbers.',
+            content: '❌ Scores must be valid non-negative whole numbers.',
             ephemeral: true
         });
+    }
+
+    const scoreError = validateReportedScore({
+        phase: fixture.phase,
+        homeScore,
+        awayScore,
+        penaltiesHome,
+        penaltiesAway
+    });
+    if (scoreError) {
+        return submitted.reply({ content: `❌ ${scoreError}`, ephemeral: true });
     }
 
     // ── Defer immediately before heavy processing ──
@@ -395,7 +402,9 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
             tournament,
             fixtureId,
             homeScore,
-            awayScore
+            awayScore,
+            penaltiesHome,
+            penaltiesAway
         });
 
         // ── Confirm to user ──
@@ -411,6 +420,55 @@ async function handleFixtureSelection({ interaction, client, guild, tournament, 
             ephemeral: true
         }).catch(() => null);
     }
+}
+
+function buildScoreModal(fixture, modalId) {
+    const homeInput = new TextInputBuilder()
+        .setCustomId('home_score')
+        .setLabel(`${truncate(fixture.homeTeam, 35)} goals`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder('Example: 3');
+
+    const awayInput = new TextInputBuilder()
+        .setCustomId('away_score')
+        .setLabel(`${truncate(fixture.awayTeam, 35)} goals`)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder('Example: 1');
+
+    const scoreInputs = [
+        new ActionRowBuilder().addComponents(homeInput),
+        new ActionRowBuilder().addComponents(awayInput)
+    ];
+
+    if (isKnockoutPhase(fixture.phase)) {
+        const homePenaltiesInput = new TextInputBuilder()
+            .setCustomId('home_penalties')
+            .setLabel('Home penalties (if full-time is tied)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setMaxLength(3)
+            .setPlaceholder('Example: 5');
+
+        const awayPenaltiesInput = new TextInputBuilder()
+            .setCustomId('away_penalties')
+            .setLabel('Away penalties (if full-time is tied)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setMaxLength(3)
+            .setPlaceholder('Example: 3');
+
+        scoreInputs.push(
+            new ActionRowBuilder().addComponents(homePenaltiesInput),
+            new ActionRowBuilder().addComponents(awayPenaltiesInput)
+        );
+    }
+
+    return new ModalBuilder()
+        .setCustomId(modalId)
+        .setTitle(`Report #${fixture.matchNumber}`)
+        .addComponents(...scoreInputs);
 }
 
 /* ====================================================
@@ -899,12 +957,21 @@ async function buildMenuComponents(
 
 /**
  * Process a reported fixture result:
- * 1. Save fixture result
- * 2. Update TournamentTeam stats (if league/group stage)
- * 3. Refresh live standings, top stats, schedules, bracket
- * 4. Emit socket update
+ * 1. Save full-time and optional shootout scores
+ * 2. Advance completed straight-knockout bracket slots automatically
+ * 3. Update TournamentTeam stats (if league/group stage)
+ * 4. Refresh live standings, schedules, and bracket views
  */
-async function processFixtureReport({ client, guild, tournament, fixtureId, homeScore, awayScore }) {
+async function processFixtureReport({
+    client,
+    guild,
+    tournament,
+    fixtureId,
+    homeScore,
+    awayScore,
+    penaltiesHome = null,
+    penaltiesAway = null
+}) {
     const fixture = await Fixture.findOne({
         guildId: guild.id,
         tournamentId: tournament._id,
@@ -917,12 +984,21 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
     }
 
     const affectsStandings = ['league', 'group'].includes(fixture.phase);
+    const scoreError = validateReportedScore({
+        phase: fixture.phase,
+        homeScore,
+        awayScore,
+        penaltiesHome,
+        penaltiesAway
+    });
+    if (scoreError) throw new Error(scoreError);
 
-    // ── Determine winner ──
-    const winner =
-        homeScore > awayScore ? fixture.homeTeam
-            : awayScore > homeScore ? fixture.awayTeam
-                : '';
+    const winnerSide = getFixtureWinnerSide({
+        homeTeam: fixture.homeTeam,
+        awayTeam: fixture.awayTeam,
+        result: { home: homeScore, away: awayScore, penaltiesHome, penaltiesAway }
+    });
+    const winner = winnerSide ? fixture[`${winnerSide}Team`] : '';
 
     // ── Save fixture result ──
     fixture.status = 'Played';
@@ -931,8 +1007,8 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
         away: awayScore,
         extraTimeHome: null,
         extraTimeAway: null,
-        penaltiesHome: null,
-        penaltiesAway: null,
+        penaltiesHome,
+        penaltiesAway,
         winner
     };
     if (fixture.reserved?.isReserved) {
@@ -942,6 +1018,20 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
     fixture.reportedAt = new Date();
 
     await fixture.save();
+
+    let advancement = null;
+    if (tournament.formatType === 'knockout' && isKnockoutPhase(fixture.phase)) {
+        try {
+            advancement = await autoAdvanceStraightKnockout({
+                guildId: guild.id,
+                tournament,
+                phase: fixture.phase
+            });
+        } catch (error) {
+            console.error('[report] automatic knockout progression failed:', error);
+            advancement = { failed: true, error: error.message || 'Unknown error' };
+        }
+    }
 
     // ── Update team stats ──
     if (affectsStandings) {
@@ -953,6 +1043,7 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
     await updateLiveTopStats(client, guild.id).catch(console.error);
     await refreshLiveMasterSchedules(client, guild.id, tournament.tournamentKey).catch(console.error);
     await refreshLiveBracket(client, guild.id, tournament.tournamentKey).catch(console.error);
+    await refreshLiveBracketImage(client, guild.id, tournament.tournamentKey, tournament).catch(console.error);
 
     if (global.io) {
         global.io.emit('update');
@@ -965,16 +1056,51 @@ async function processFixtureReport({ client, guild, tournament, fixtureId, home
         .setDescription(
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
-            `**${fixture.homeTeam} ${slotEmoji('goals', guild.id)} ${homeScore} - ${awayScore} ${slotEmoji('goals', guild.id)} ${fixture.awayTeam}**\n\n` +
-            `🆔 Match: **#${fixture.matchNumber}**\n` +
+            `**${fixture.homeTeam} ${slotEmoji('goals', guild.id)} ${homeScore} - ${awayScore} ${slotEmoji('goals', guild.id)} ${fixture.awayTeam}**\n` +
+            `${penaltiesHome !== null && penaltiesAway !== null ? `🎯 Penalties: **${penaltiesHome}-${penaltiesAway}**\n` : ''}` +
+            `\n🆔 Match: **#${fixture.matchNumber}**\n` +
             `🏷️ Round: **${fixture.roundLabel || prettyPhase(fixture.phase)}**\n` +
             `${fixture.groupKey ? `📦 Group: **${fixture.groupKey}**\n` : ''}` +
             `${winner ? `🥇 Winner: **${winner}**\n` : ''}` +
-            `\n${affectsStandings ? '✅ Standings updated.' : 'ℹ️ Knockout result saved.'}`
+            `${formatAdvancementStatus(advancement)}\n` +
+            `${affectsStandings ? '✅ Standings updated.' : 'ℹ️ Knockout result saved.'}`
         )
         .setTimestamp();
 
     return { fixture, embed };
+}
+
+function parseOptionalScore(value) {
+    const clean = String(value || '').trim();
+    return clean ? parseScore(clean) : null;
+}
+
+function formatAdvancementStatus(advancement) {
+    if (!advancement || advancement.skipped) return '';
+    if (advancement.failed) {
+        return `⚠️ The result was saved, but automatic bracket progression failed: ${advancement.error || 'Unknown error'}.\n`;
+    }
+    if (advancement.blocked) {
+        return `⚠️ Automatic bracket progression is blocked: ${advancement.reason || 'check the completed round results'}.\n`;
+    }
+    if (advancement.progressed) {
+        const createdCount = advancement.fixtures?.length || 1;
+        const fixtureLabel = createdCount === 1 ? 'fixture' : 'fixtures';
+        const remaining = advancement.pendingFixtures
+            ? ` ${advancement.pendingFixtures} **${prettyPhase(advancement.fromPhase)}** match(es) remain in the round.`
+            : '';
+        return `🔁 Automatically advanced winners into **${prettyPhase(advancement.nextPhase)}** (${createdCount} ${fixtureLabel} created).${remaining}\n`;
+    }
+    if (advancement.alreadyAdvanced) {
+        return `🔁 **${prettyPhase(advancement.nextPhase)}** fixtures are already in place.\n`;
+    }
+    if (advancement.completed) {
+        return '🏁 The straight-knockout tournament is complete.\n';
+    }
+    if (advancement.waiting) {
+        return `⏳ ${advancement.pendingFixtures} fixture(s) remain in **${prettyPhase(advancement.phase)}**; later-round fixtures appear automatically as each bracket pair is decided.\n`;
+    }
+    return '';
 }
 
 /**
@@ -1101,3 +1227,8 @@ function truncate(text, max) {
     const value = String(text || '');
     return value.length > max ? value.slice(0, max - 3) + '...' : value;
 }
+
+module.exports.processFixtureReport = processFixtureReport;
+module.exports.buildScoreModal = buildScoreModal;
+module.exports.parseOptionalScore = parseOptionalScore;
+module.exports.formatAdvancementStatus = formatAdvancementStatus;
