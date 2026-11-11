@@ -34,12 +34,21 @@ const {
 
 let generateStandingsImage = null;
 let imageRendererLoadError = null;
+let generateKnockoutBracketImage = null;
+let bracketRendererLoadError = null;
 
 try {
     ({ generateStandingsImage } = require('../../utils/generateStandingsImage'));
 } catch (error) {
     imageRendererLoadError = error;
     console.warn('[standings-hf] Image renderer unavailable; text fallback enabled:', error.message);
+}
+
+try {
+    ({ generateKnockoutBracketImage } = require('../../utils/generateKnockoutBracketImage'));
+} catch (error) {
+    bracketRendererLoadError = error;
+    console.warn('[standings-hf] Bracket image renderer unavailable; text fallback enabled:', error.message);
 }
 
 const {
@@ -217,7 +226,51 @@ async function buildStandingsPayload({
     tournaments,
     selectedGroup
 }) {
-    // ── TRY IMAGE ──
+    const components = [
+        buildTournamentDropdown(tournaments, tournament.tournamentKey)
+    ];
+
+    if (shouldShowKnockoutBracket(tournament)) {
+        let bracketResult = null;
+        let bracketError = null;
+
+        try {
+            if (!generateKnockoutBracketImage) {
+                throw bracketRendererLoadError || new Error('Knockout bracket image renderer is unavailable.');
+            }
+
+            bracketResult = await generateKnockoutBracketImage({ settings: tournament, guildId });
+        } catch (imgError) {
+            bracketError = imgError;
+            console.error('[standings-hf] Bracket image generation failed:', imgError.message);
+        }
+
+        if (bracketResult) {
+            const attachment = new AttachmentBuilder(bracketResult.buffer, {
+                name: bracketResult.fileName || 'knockout-bracket.png'
+            });
+
+            return {
+                content: buildBracketCaption(tournament),
+                files: [attachment],
+                components
+            };
+        }
+
+        return {
+            content:
+                `${buildBracketCaption(tournament)}\n` +
+                (bracketError
+                    ? 'The bracket image could not be rendered right now.'
+                    : 'No knockout fixtures are available yet. Generate the knockout stage to populate the bracket.'),
+            components
+        };
+    }
+
+    const groupButtons = buildGroupButtons(tournament, selectedGroup);
+    if (groupButtons) components.push(groupButtons);
+
+    // ── TRY STANDINGS IMAGE ──
     let imageResult = null;
 
     try {
@@ -235,16 +288,6 @@ async function buildStandingsPayload({
             '[standings-hf] Image generation failed, using text fallback:',
             imgError.message
         );
-    }
-
-    const components = [
-        buildTournamentDropdown(tournaments, tournament.tournamentKey)
-    ];
-
-    const groupButtons = buildGroupButtons(tournament, selectedGroup);
-
-    if (groupButtons) {
-        components.push(groupButtons);
     }
 
     if (imageResult) {
@@ -272,6 +315,18 @@ async function buildStandingsPayload({
         content: table,
         components
     };
+}
+
+function shouldShowKnockoutBracket(tournament) {
+    const knockoutPhases = ['knockout', 'qualifier', 'eliminator', 'roundof16', 'quarterfinal', 'semifinal', 'final'];
+    return tournament?.formatType === 'knockout' ||
+        (tournament?.formatType === 'groups_knockout' && knockoutPhases.includes(tournament.currentPhase));
+}
+
+function buildBracketCaption(tournament) {
+    const emoji = tournament.emoji || '🏆';
+    const name = (tournament.name || 'Tournament').toUpperCase();
+    return `${emoji} **${name} KNOCKOUT BRACKET**\nKey: \`${tournament.tournamentKey}\``;
 }
 
 /**
