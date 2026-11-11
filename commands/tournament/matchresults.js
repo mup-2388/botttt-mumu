@@ -28,6 +28,7 @@ const {
 } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase, truncate } = require('../../utils/displayHelpers');
+const { slotEmoji } = require('../../utils/ai/emojiSlots');
 
 const PAGE_SIZE = 10;
 
@@ -222,7 +223,7 @@ function buildEmbed(state) {
     embed.addFields({
         name: 'Results',
         value: current.length
-            ? current.map(formatResultLine).join('\n\n')
+            ? current.map(f => formatResultLine(f, state.guild.id)).join('\n\n')
             : phase
                 ? `📭 No played results found for **${prettyPhase(phase)}**.`
                 : '📭 No played match results found yet.',
@@ -273,12 +274,14 @@ function buildComponents(state, disabled = false) {
    FORMATTING
 ==================================================== */
 
-function formatResultLine(fixture) {
+function formatResultLine(fixture, guildId) {
     const home = fixture?.result?.home ?? 0;
     const away = fixture?.result?.away ?? 0;
 
+    const goal = slotEmoji('goals', guildId);
+
     let line =
-        `**#${fixture.matchNumber || '-'} • ${fixture.homeTeam} ${home}-${away} ${fixture.awayTeam}**\n` +
+        `**#${fixture.matchNumber || '-'} • ${fixture.homeTeam} ${goal} ${home}-${away} ${goal} ${fixture.awayTeam}**\n` +
         `${prettyPhase(fixture.phase)}${fixture.groupKey ? ` • Group ${fixture.groupKey}` : ''}`;
 
     const etHome = fixture?.result?.extraTimeHome;

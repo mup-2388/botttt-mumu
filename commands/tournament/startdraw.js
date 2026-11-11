@@ -33,6 +33,7 @@ const {
 
 const { prettyPhase } = require('../../utils/displayHelpers');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine, slotEmoji } = require('../../utils/ai/emojiSlots');
 
 module.exports = {
     name: 'startdraw',
@@ -628,12 +629,12 @@ function buildGroupDrawEmbed(session, lastDrawn = null, lastGroup = null) {
 function buildKnockoutDrawEmbed(session, lastDrawn = null) {
     const pairText = session.knockoutPairs.length
         ? session.knockoutPairs.map((pair, index) =>
-            `**Tie ${index + 1}:** ${pair.home.name} vs ${pair.away.name}`
+            `**Tie ${index + 1}:** ${vsLine(pair.home.name, pair.away.name, session.guildId)}`
         ).join('\n')
         : '*No completed pairings yet.*';
 
     const currentPairText = session.currentPair?.length
-        ? session.currentPair.map(team => team.name).join(' vs ')
+        ? session.currentPair.map(team => team.name).join(` ${slotEmoji('vs', session.guildId)} `)
         : '*Waiting...*';
 
     const description = [

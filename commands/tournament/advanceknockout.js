@@ -20,11 +20,13 @@ const {
 const { Fixture, TournamentTeam } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine } = require('../../utils/ai/emojiSlots');
 
 /** Human-readable phase labels */
 const PHASE_LABELS = {
     qualifier: 'Qualifier',
     eliminator: 'Eliminator',
+    roundof16: 'Round of 16',
     quarterfinal: 'Quarter Final',
     semifinal: 'Semi Final',
     final: 'Final'
@@ -313,7 +315,7 @@ async function runAdvance({ guild, key, currentPhase, nextPhase, reply }) {
             {
                 name: 'New Fixtures Created',
                 value: createdFixtures.length
-                    ? createdFixtures.map(f => `#${f.matchNumber} • ${f.homeTeam} vs ${f.awayTeam}`).join('\n')
+                    ? createdFixtures.map(f => `#${f.matchNumber} • ${vsLine(f.homeTeam, f.awayTeam, guild.id)}`).join('\n')
                     : 'None',
                 inline: false
             }

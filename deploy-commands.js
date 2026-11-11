@@ -2,9 +2,9 @@ const { REST, Routes } = require('discord.js');
 const { token, clientId, guildId } = require('./config.json');
 const fs = require('node:fs');
 const path = require('node:path');
+const { fitSlashCommandsToLimit } = require('./utils/slashCommandLimit');
 
-const commands = [];
-const commandDebugList = [];
+const commandEntries = [];
 
 const foldersPath = path.join(__dirname, 'commands');
 const commandFolders = fs.readdirSync(foldersPath);
@@ -35,19 +35,25 @@ for (const folder of commandFolders) {
 
             fixRequiredOptionOrder(json);
 
-            commands.push(json);
-
-            commandDebugList.push({
-                index: commands.length - 1,
+            commandEntries.push({
+                hidden: command.hidden === true,
                 name: json.name,
                 folder,
-                file
+                file,
+                json
             });
         } catch (error) {
             console.error(`❌ Failed loading command ${folder}/${file}`);
             console.error(error);
         }
     }
+}
+
+const { selected: selectedCommandEntries, omitted: omittedCommandEntries } = fitSlashCommandsToLimit(commandEntries);
+const commands = selectedCommandEntries.map(entry => entry.json);
+const commandDebugList = selectedCommandEntries.map((entry, index) => ({ ...entry, index }));
+if (omittedCommandEntries.length) {
+    console.warn(`⚠️ Discord allows at most 100 global chat-input commands. Visible commands are prioritized; omitted commands remain prefix-accessible where supported: ${omittedCommandEntries.map(command => command.name).join(', ')}`);
 }
 
 console.log('\n📦 Commands prepared:');

@@ -39,6 +39,7 @@ const {
 } = require('../../models/Tournament');
 const { syncPlayerToOpenTournaments } = require('../../utils/tournamentSync');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { getDefaultTournament } = require('../../utils/getTournament');
 
 /** Soft cap for prefix bulk adds (slash is capped by Discord at 1+10). */
 const MAX_BULK_PREFIX = 30;
@@ -205,6 +206,18 @@ async function runAddPlayer({
             : runTournamentAddBulk({ guild, captainUserId, targetUsers, tournamentKey, reply });
     }
 
+    /*
+     * No key given → the server's DEFAULT tournament (manual or auto).
+     * Falls back to the legacy global add only when no tournament exists.
+     */
+    const defaultTournament = await getDefaultTournament(guild.id);
+
+    if (defaultTournament) {
+        return targetUsers.length === 1
+            ? runTournamentAddSingle({ guild, captainUserId, targetUser: targetUsers[0], customName, tournamentKey: defaultTournament.tournamentKey, reply })
+            : runTournamentAddBulk({ guild, captainUserId, targetUsers, tournamentKey: defaultTournament.tournamentKey, reply });
+    }
+
     return targetUsers.length === 1
         ? runGlobalAddSingle({ guild, captainUserId, targetUser: targetUsers[0], customName, reply })
         : runGlobalAddBulk({ guild, captainUserId, targetUsers, reply });
@@ -263,7 +276,9 @@ async function attemptGlobalAdd({ guild, captainUserId, team, targetUser, custom
 
     const sync = await syncPlayerToOpenTournaments(guild.id, player);
 
-    const newestSettings = await TournamentSettings.findOne({
+    const defaultForRoles = await getDefaultTournament(guild.id);
+
+    const newestSettings = defaultForRoles || await TournamentSettings.findOne({
         guildId: guild.id,
         registrationOpen: true,
         currentPhase: 'registration'

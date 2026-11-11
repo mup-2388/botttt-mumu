@@ -2,12 +2,13 @@
  * changecaptain.js
  *
  * Change the captain of a team. Current captain or vice captain can initiate.
- * Updates global Team, Player, and all TournamentPlayer records.
+ * Organizers can repair/set a team's tournament captain using `team=<name>`.
+ * Works for the server's DEFAULT tournament unless `tournament=<key>` is given.
  * Preserves the vice captain unless the new captain was the VC.
- * Moves the captain Discord role if configured.
+ * Moves the tournament's captain Discord role if configured.
  *
- * Usage: .cc @user
- * Slash: /changecaptain user:<user>
+ * Usage: .cc @user [team=<Team Name>] [tournament=<key>]
+ * Slash: /changecaptain user:<user> [tournament:<key>] [team:<name>]
  *
  * Aliases: cc, captainchange
  */
@@ -21,16 +22,27 @@ const {
 const {
     Team,
     Player,
-    TournamentPlayer,
-    TournamentSettings
+    TournamentTeam,
+    TournamentPlayer
 } = require('../../models/Tournament');
 
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { isOrganizer } = require('../../utils/isOrganizer');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const {
+    resolveActorTeam,
+    getRosterMembership,
+    findTeamInTournamentByName,
+    parseTeamTokenInTournament,
+    effectiveCaptainId,
+    effectiveViceCaptainId,
+    sameId
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'changecaptain',
-    description: 'Change captain of your team.',
-    usage: '.cc @user',
+    description: 'Change captain of your team (organizers may specify a team).',
+    usage: '.cc @user [team=<Team Name>] [tournament=<key>]',
     aliases: ['cc', 'captainchange'],
     hidden: true,
     cooldown: 5,
@@ -38,31 +50,57 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('changecaptain')
-        .setDescription('Change captain of your team')
+        .setDescription('Change captain of your team or repair tournament captaincy')
         .addUserOption(opt =>
             opt.setName('user')
                 .setDescription('New captain')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('team')
+                .setDescription('Team name (organizers only, to repair/set tournament captaincy)')
+                .setRequired(false)
         ),
 
     /* ================================================
        PREFIX
     ================================================ */
 
-    async execute(message) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
 
-            const target = message.mentions.users.first() || await getUserFromArgs(message);
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const tournamentKey = parsedKey.explicit ? parsedKey.tournament.tournamentKey : null;
+            const resolved = await resolveTournament(message.guild.id, tournamentKey);
+            if (!resolved.tournament) return message.reply(resolved.error);
+
+            const token = await parseTeamTokenInTournament(
+                message.guild.id,
+                resolved.tournament,
+                parsedKey.rest
+            );
+            const target = message.mentions.users.first() || await getUserFromArgs(message, token.rest);
 
             if (!target) {
-                return message.reply('❌ Usage: `.cc @user`');
+                return message.reply('❌ Usage: `.cc @user [team=<Team Name>] [tournament=<key>]`');
             }
 
             return await runChangeCaptain({
                 guild: message.guild,
                 actorId: message.author.id,
                 targetUser: target,
+                tournamentKey,
+                teamName: token.teamName,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -85,6 +123,8 @@ module.exports = {
                 guild: interaction.guild,
                 actorId: interaction.user.id,
                 targetUser: target,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
+                teamName: interaction.options.getString('team'),
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -104,128 +144,145 @@ module.exports = {
 ==================================================== */
 
 /**
- * Change the captain of a team.
- * Validates: actor is captain/VC, target is in the same team.
+ * Change the captain of a team IN A TOURNAMENT.
+ * Validates: actor is captain/VC there, or organizer explicitly names a team;
+ * target must be on that team in the selected tournament.
  * Preserves the vice captain unless the new captain was the VC (promoted).
+ *
+ * Writes the tournament roster flags and per-tournament captain ID for an
+ * organizer override; ordinary captain changes retain the existing global-vs-
+ * tournament-specific behavior.
  */
-async function runChangeCaptain({ guild, actorId, targetUser, reply }) {
+async function runChangeCaptain({ guild, actorId, targetUser, tournamentKey = null, teamName = null, reply }) {
+    const organizerOverride = Boolean(teamName) && await isOrganizer(guild, actorId);
+
+    if (teamName && !organizerOverride) {
+        return reply({ content: '❌ Only an organizer can set captaincy for a named team.' });
+    }
+
     // ── Self-change check ──
-    if (actorId === targetUser.id) {
+    if (actorId === targetUser.id && !organizerOverride) {
         return reply({ content: '❌ You cannot make yourself captain — you already are.' });
     }
 
-    // ── Find actor's player + team ──
-    const actorPlayer = await Player.findOne({
-        guildId: guild.id,
-        discordID: actorId
-    }).populate('teamId');
+    let tournament;
+    let ctx;
 
-    if (!actorPlayer?.teamId) {
-        return reply({ content: '❌ You are not linked to any team.' });
+    if (organizerOverride) {
+        const resolved = await resolveTournament(guild.id, tournamentKey);
+        if (!resolved.tournament) return reply({ content: resolved.error });
+        tournament = resolved.tournament;
+        ctx = await findTeamInTournamentByName(guild.id, tournament, teamName);
+
+        if (!ctx) {
+            return reply({ content: `❌ Team **${teamName}** is not active in **${tournament.name}**.` });
+        }
+    } else {
+        const resolved = await resolveActorTeam({
+            guildId: guild.id,
+            userId: actorId,
+            tournamentKey,
+            need: 'manage',
+            noun: 'use `.cc`'
+        });
+
+        if (resolved.error) return reply({ content: resolved.error });
+        ({ tournament, ctx } = resolved);
     }
 
-    const team = actorPlayer.teamId;
+    const { team, entry } = ctx;
 
-    const isCaptain =
-        String(team.captainID) === String(actorId) ||
-        actorPlayer.isCaptain;
-
-    const isViceCaptain =
-        String(team.viceCaptainID) === String(actorId) ||
-        actorPlayer.isViceCaptain;
-
-    if (!isCaptain && !isViceCaptain) {
-        return reply({ content: '❌ Only the team captain or vice captain can use `.cc`.' });
-    }
-
-    // ── Find target player ──
-    const targetPlayer = await Player.findOne({
-        guildId: guild.id,
-        discordID: targetUser.id
-    });
+    // ── Target must be on the same team IN THIS TOURNAMENT ──
+    const { player: targetPlayer, tournamentPlayer: targetEntry } =
+        await getRosterMembership(guild.id, tournament, team._id, targetUser.id);
 
     if (!targetPlayer) {
         return reply({ content: `❌ ${targetUser} is not registered as a player.` });
     }
 
-    if (!targetPlayer.teamId || String(targetPlayer.teamId) !== String(team._id)) {
+    if (!targetEntry) {
         return reply({
             content:
-                `❌ ${targetUser} is not in **${team.name}**.\n` +
+                `❌ ${targetUser} is not in **${team.name}** (${tournament.name}).\n` +
                 'Captaincy can only be given to a player from the same team.'
         });
     }
 
-    // ── Determine if VC should be preserved ──
-    // If the new captain was the VC, clear VC (they got promoted).
-    // Otherwise, keep the existing VC.
-    const targetWasVC =
-        String(team.viceCaptainID) === String(targetUser.id) ||
-        targetPlayer.isViceCaptain;
+    const oldCaptainId = effectiveCaptainId(entry, team) || (organizerOverride ? null : actorId);
+    const oldViceId = effectiveViceCaptainId(entry, team);
+    // The organizer override creates a tournament-specific captain assignment
+    // so it cannot overwrite leadership for the team's other tournaments.
+    const usesGlobalCaptain = !organizerOverride && !entry.captainID;
 
-    const newViceCaptainID = targetWasVC ? null : team.viceCaptainID;
-
-    // ── Update Team document ──
-    await Team.updateOne(
-        { _id: team._id },
-        {
-            $set: {
-                captainID: targetUser.id,
-                viceCaptainID: newViceCaptainID
-            }
-        }
-    );
-
-    // ── Reset all captain/VC flags in team's global players ──
-    await Player.updateMany(
-        { guildId: guild.id, teamId: team._id },
-        { $set: { isCaptain: false, isViceCaptain: false } }
-    );
-
-    // ── Set new captain flags ──
-    await Player.updateOne(
-        { guildId: guild.id, discordID: targetUser.id },
-        { $set: { isCaptain: true, isViceCaptain: false } }
-    );
-
-    // ── If there's a remaining VC, restore their flag ──
-    if (newViceCaptainID) {
-        await Player.updateOne(
-            { guildId: guild.id, discordID: newViceCaptainID },
-            { $set: { isViceCaptain: true } }
-        );
+    if (sameId(oldCaptainId, targetUser.id)) {
+        return reply({ content: `❌ ${targetUser} is already the captain of **${team.name}**.` });
     }
 
-    // ── Update all TournamentPlayer records ──
+    // ── VC: if the new captain was the VC they got promoted → clear VC ──
+    const targetWasVC = sameId(oldViceId, targetUser.id) || targetEntry.isViceCaptain;
+    const newViceCaptainID = targetWasVC ? null : oldViceId;
+
+    // ── This tournament's records ──
     await TournamentPlayer.updateMany(
-        { guildId: guild.id, teamId: team._id },
+        { guildId: guild.id, tournamentId: tournament._id, teamId: team._id },
         { $set: { isCaptain: false, isViceCaptain: false } }
     );
 
-    await TournamentPlayer.updateMany(
-        { guildId: guild.id, playerId: targetPlayer._id },
+    await TournamentPlayer.updateOne(
+        { _id: targetEntry._id },
         { $set: { isCaptain: true, isViceCaptain: false } }
     );
 
-    // ── Restore remaining VC in tournament records ──
     if (newViceCaptainID) {
-        const vcGlobalPlayer = await Player.findOne({
-            guildId: guild.id,
-            discordID: newViceCaptainID
-        });
-
-        if (vcGlobalPlayer) {
+        const vcPlayer = await Player.findOne({ guildId: guild.id, discordID: String(newViceCaptainID) });
+        if (vcPlayer) {
             await TournamentPlayer.updateMany(
-                { guildId: guild.id, playerId: vcGlobalPlayer._id },
+                { guildId: guild.id, tournamentId: tournament._id, teamId: team._id, playerId: vcPlayer._id },
                 { $set: { isViceCaptain: true } }
             );
         }
     }
 
-    // ── Move captain Discord role ──
+    if (usesGlobalCaptain) {
+        // Team uses its global captain here → keep the global records in sync
+        await Team.updateOne(
+            { _id: team._id },
+            { $set: { captainID: targetUser.id, viceCaptainID: newViceCaptainID } }
+        );
+
+        await Player.updateMany(
+            { guildId: guild.id, teamId: team._id },
+            { $set: { isCaptain: false, isViceCaptain: false } }
+        );
+
+        await Player.updateOne(
+            { guildId: guild.id, discordID: targetUser.id, teamId: team._id },
+            { $set: { isCaptain: true, isViceCaptain: false } }
+        );
+
+        if (newViceCaptainID) {
+            await Player.updateOne(
+                { guildId: guild.id, discordID: String(newViceCaptainID), teamId: team._id },
+                { $set: { isViceCaptain: true } }
+            );
+        }
+
+        await TournamentTeam.updateOne(
+            { _id: entry._id },
+            { $set: { viceCaptainID: newViceCaptainID } }
+        );
+    } else {
+        await TournamentTeam.updateOne(
+            { _id: entry._id },
+            { $set: { captainID: targetUser.id, viceCaptainID: newViceCaptainID } }
+        );
+    }
+
+    // ── Move captain Discord role (this tournament's role) ──
     await moveCaptainRole({
         guild,
-        oldCaptainId: actorId,
+        roleId: tournament.captainRoleId,
+        oldCaptainId,
         newCaptainId: targetUser.id
     });
 
@@ -234,8 +291,9 @@ async function runChangeCaptain({ guild, actorId, targetUser, reply }) {
         .setColor(0x57F287)
         .setTitle('👑 CAPTAIN CHANGED')
         .setDescription(
+            `Tournament: **${tournament.name}**\n` +
             `Team: **${team.name}**\n\n` +
-            `Old Captain: <@${actorId}>\n` +
+            `Old Captain: ${oldCaptainId ? `<@${oldCaptainId}>` : 'Not assigned'}\n` +
             `New Captain: ${targetUser}`
         )
         .setTimestamp();
@@ -248,33 +306,24 @@ async function runChangeCaptain({ guild, actorId, targetUser, reply }) {
 ==================================================== */
 
 /**
- * Move the captain Discord role from old captain to new captain.
- * Reads all tournament settings for the guild to find configured captain roles.
+ * Move the tournament's captain Discord role from old captain to new captain.
  */
-async function moveCaptainRole({ guild, oldCaptainId, newCaptainId }) {
-    const settings = await TournamentSettings.find({
-        guildId: guild.id,
-        captainRoleId: { $exists: true, $ne: '' }
-    }).lean();
+async function moveCaptainRole({ guild, roleId, oldCaptainId, newCaptainId }) {
+    if (!roleId) return;
 
-    // Deduplicate role IDs
-    const roleIds = [...new Set(settings.map(t => t.captainRoleId).filter(Boolean))];
+    const role = guild.roles.cache.get(roleId);
+    if (!role) return;
 
-    if (!roleIds.length) return;
-
-    const oldMember = await guild.members.fetch(oldCaptainId).catch(() => null);
+    const oldMember = oldCaptainId
+        ? await guild.members.fetch(oldCaptainId).catch(() => null)
+        : null;
     const newMember = await guild.members.fetch(newCaptainId).catch(() => null);
 
-    for (const roleId of roleIds) {
-        const role = guild.roles.cache.get(roleId);
-        if (!role) continue;
+    if (oldMember?.roles.cache.has(roleId)) {
+        await oldMember.roles.remove(roleId).catch(() => null);
+    }
 
-        if (oldMember?.roles.cache.has(roleId)) {
-            await oldMember.roles.remove(roleId).catch(() => null);
-        }
-
-        if (newMember && !newMember.roles.cache.has(roleId)) {
-            await newMember.roles.add(roleId).catch(() => null);
-        }
+    if (newMember && !newMember.roles.cache.has(roleId)) {
+        await newMember.roles.add(roleId).catch(() => null);
     }
 }

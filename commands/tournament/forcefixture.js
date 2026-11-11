@@ -19,6 +19,7 @@ const {
 const { Fixture } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine } = require('../../utils/ai/emojiSlots');
 
 module.exports = {
     name: 'forcefixture',
@@ -32,11 +33,6 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('forcefixture')
         .setDescription('Force-change fixture status')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Optional tournament key')
-                .setRequired(false)
-        )
         .addIntegerOption(opt =>
             opt.setName('match')
                 .setDescription('Match number')
@@ -52,6 +48,11 @@ module.exports = {
                     { name: 'Played', value: 'Played' },
                     { name: 'Cancelled', value: 'Cancelled' }
                 )
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Optional tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -141,6 +142,10 @@ async function runForceFixture({ guild, key, matchNumber, status, reply }) {
 
     /* ── Apply status change ── */
     fixture.status = status;
+    if (['Played', 'Cancelled'].includes(status) && fixture.reserved?.isReserved) {
+        fixture.reserved.isReserved = false;
+        fixture.reserved.until = null;
+    }
     await fixture.save();
 
     /* ── Response ── */
@@ -151,7 +156,7 @@ async function runForceFixture({ guild, key, matchNumber, status, reply }) {
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
             `Match #**${fixture.matchNumber}**\n` +
-            `**${fixture.homeTeam} vs ${fixture.awayTeam}**\n\n` +
+            `**${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}**\n\n` +
             `New status: **${fixture.status}**`
         )
         .setTimestamp();

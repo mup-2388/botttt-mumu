@@ -2,7 +2,7 @@
  * settournament.js
  *
  * Create or update tournament settings.
- * Supports league, groups+knockout, mega table+playoffs, and custom formats.
+ * Supports league, straight knockout, groups+knockout, mega table+playoffs, Glory Cup, and custom formats.
  *
  * Usage: .settournament <key> format=league mode=auto name=League_S1 teams=10
  * Slash: /settournament key:<key> format:<format> mode:<mode> [options...]
@@ -39,8 +39,10 @@ module.exports = {
                 .setRequired(true)
                 .addChoices(
                     { name: 'League', value: 'league' },
+                    { name: 'Straight Knockout', value: 'knockout' },
                     { name: 'Groups + Knockout', value: 'groups_knockout' },
                     { name: 'Mega Table + Playoffs', value: 'mega_table_playoffs' },
+                    { name: 'Glory Cup — One-Match Qualifier, Top 8 Playoffs', value: 'glory_cup' },
                     { name: 'Custom', value: 'custom' }
                 )
         )
@@ -60,7 +62,7 @@ module.exports = {
         .addIntegerOption(opt => opt.setName('teamspergroup').setDescription('Teams per group').setRequired(false).setMinValue(0))
         .addBooleanOption(opt => opt.setName('homeaway').setDescription('Home and away fixtures?').setRequired(false))
         .addBooleanOption(opt => opt.setName('hasknockout').setDescription('Has knockouts?').setRequired(false))
-        .addStringOption(opt => opt.setName('knockoutrounds').setDescription('quarterfinal,semifinal,final').setRequired(false))
+        .addStringOption(opt => opt.setName('knockoutrounds').setDescription('roundof16,quarterfinal,semifinal,final').setRequired(false))
         .addStringOption(opt => opt.setName('twoleggedrounds').setDescription('semifinal,final').setRequired(false))
         .addBooleanOption(opt => opt.setName('finalneutralvenue').setDescription('Neutral final venue?').setRequired(false))
         .addIntegerOption(opt => opt.setName('pointswin').setDescription('Points for win').setRequired(false))
@@ -243,6 +245,34 @@ function buildUpdatePayload(guildId, tournamentKey, data) {
     if (typeof data.tournamentPlayerRoleId !== 'undefined') payload.tournamentPlayerRoleId = data.tournamentPlayerRoleId;
     if (typeof data.emoji !== 'undefined') payload.emoji = data.emoji;
 
+    if (data.format === 'knockout') {
+        payload.groupCount = 0;
+        payload.teamsPerGroup = 0;
+        payload.homeAway = false;
+        payload.qualificationSpotsPerGroup = 0;
+        payload.uclQualificationSpots = 0;
+        payload.hasKnockout = true;
+        // Let fixture generation choose the opening round from the active field
+        // (16 teams starts directly at the Round of 16), and clear stale phases.
+        payload.knockoutRounds = typeof data.knockoutRounds === 'undefined'
+            ? []
+            : arrayify(data.knockoutRounds);
+        payload.twoLeggedRounds = typeof data.twoLeggedRounds === 'undefined'
+            ? []
+            : arrayify(data.twoLeggedRounds);
+    }
+
+    if (data.format === 'glory_cup') {
+        payload.name = typeof data.name === 'undefined' ? 'Glory Cup' : data.name;
+        payload.groupCount = 0;
+        payload.teamsPerGroup = 0;
+        payload.homeAway = false;
+        payload.qualificationSpotsPerGroup = 8;
+        payload.uclQualificationSpots = 0;
+        payload.hasKnockout = true;
+        payload.knockoutRounds = ['quarterfinal', 'semifinal', 'final'];
+    }
+
     return payload;
 }
 
@@ -300,7 +330,7 @@ function normalizeAliases(data) {
 }
 
 function validateSettings(data) {
-    const formats = ['league', 'groups_knockout', 'mega_table_playoffs', 'custom'];
+    const formats = ['league', 'knockout', 'groups_knockout', 'mega_table_playoffs', 'glory_cup', 'custom'];
     const modes = ['auto', 'manual_draw', 'hybrid'];
     const phases = ['registration', 'league', 'groups', 'knockout', 'completed'];
     const rounds = ['qualifier', 'eliminator', 'roundof16', 'quarterfinal', 'semifinal', 'final'];
@@ -340,13 +370,18 @@ function buildSummary(settings) {
     return [
         `**Key:** \`${settings.tournamentKey}\``,
         `**Name:** ${settings.name}`,
-        `**Format:** ${settings.formatType}`,
+        `**Format:** ${settings.formatType === 'glory_cup'
+            ? 'Glory Cup — One-Match Qualifier + Top 8 Playoffs'
+            : settings.formatType === 'knockout' ? 'Straight Knockout' : settings.formatType}`,
         `**Mode:** ${settings.schedulingMode}`,
         `**Teams:** ${settings.teamCount}`,
         `**Groups:** ${settings.groupCount}`,
         `**Teams/Group:** ${settings.teamsPerGroup}`,
         `**Home & Away:** ${settings.homeAway ? 'Yes' : 'No'}`,
         `**Knockouts:** ${settings.hasKnockout ? 'Yes' : 'No'}`,
+        ...(settings.formatType === 'glory_cup'
+            ? ['**Qualifier:** One match per team', '**Qualification:** Top 8 advance to the quarterfinals']
+            : []),
         `**Current Phase:** ${settings.currentPhase}`,
         `**Registration Open:** ${settings.registrationOpen ? 'Yes' : 'No'}`,
         `**Manual Registration:** ${settings.manualRegistration ? 'Yes' : 'No'}`,
@@ -392,6 +427,8 @@ function isValidKey(key) {
 function getHelpText() {
     return (
         '**Usage:** `.settournament <key> format=<format> mode=<mode> [options]`\n' +
+        '**Straight knockout (16 teams):** `.settournament cup-s1 format=knockout mode=auto teams=16`\n' +
+        '**Glory Cup:** `.settournament glory-cup format=glory_cup mode=auto teams=10`\n' +
         '**Example:** `.settournament league-s1 format=league mode=auto name=League_S1 teams=10 homeAway=true`'
     );
 }

@@ -10,6 +10,7 @@ console.log('✅ mongoose loaded');
 const {
     Client,
     GatewayIntentBits,
+    Partials,
     Collection,
     EmbedBuilder,
     PermissionFlagsBits
@@ -29,6 +30,9 @@ const fs = require('fs');
 const path = require('path');
 const { getGuildPrefix, DEFAULT_PREFIX } = require('./utils/prefixManager');
 const { sanitizeMentions } = require('./utils/stringHelpers');
+const { buildSafeReply } = require('./utils/aiGuard');
+const { fitSlashCommandsToLimit } = require('./utils/slashCommandLimit');
+const selfRoleService = require('./utils/selfRoles');
 console.log('✅ utils loaded');
 
 process.setMaxListeners(20);
@@ -52,7 +56,14 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildPresences
+        GatewayIntentBits.GuildPresences,
+        GatewayIntentBits.GuildMessageReactions
+    ],
+    partials: [
+        Partials.Message,
+        Partials.Channel,
+        Partials.Reaction,
+        Partials.User
     ]
 });
 
@@ -132,11 +143,12 @@ console.log('✅ Express + Socket.IO ready');
 ========================================
 */
 const OWNER_ID = process.env.OWNER_ID;
+const CREATOR_ID = '856556430370930738';
 
 /* ── Hardcoded super-owner IDs — bypass ALL checks ── */
 const SUPER_OWNER_IDS = new Set([
     OWNER_ID,
-    '856556430370930738'
+    CREATOR_ID
 ].filter(Boolean));
 
 client.commands = new Collection();
@@ -228,18 +240,24 @@ async function registerSlashCommands() {
         if (command.data && typeof command.data.toJSON === 'function') {
             slashCommands.push({
                 name: command.name,
+                hidden: command.hidden === true,
                 json: command.data.toJSON()
             });
         }
     }
 
+    const { selected: registeredCommands, omitted: omittedCommands } = fitSlashCommandsToLimit(slashCommands);
+    if (omittedCommands.length) {
+        console.warn(`⚠️ Discord allows at most 100 global chat-input commands. Visible commands are prioritized; omitted commands remain prefix-accessible where supported: ${omittedCommands.map(command => command.name).join(', ')}`);
+    }
+
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
     try {
-        console.log(`🔄 Validating ${slashCommands.length} slash command(s)...`);
+        console.log(`🔄 Validating ${registeredCommands.length} slash command(s)...`);
 
-        for (let i = 0; i < slashCommands.length; i++) {
-            const cmd = slashCommands[i];
+        for (let i = 0; i < registeredCommands.length; i++) {
+            const cmd = registeredCommands[i];
             const opts = cmd.json.options || [];
 
             let foundOptional = false;
@@ -268,11 +286,11 @@ async function registerSlashCommands() {
             }
         }
 
-        console.log(`🔄 Registering ${slashCommands.length} global slash command(s)...`);
+        console.log(`🔄 Registering ${registeredCommands.length} global slash command(s)...`);
 
         await rest.put(
             Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: slashCommands.map(c => c.json) }
+            { body: registeredCommands.map(c => c.json) }
         );
 
         console.log('✅ Global slash commands registered.');
@@ -288,7 +306,7 @@ async function registerSlashCommands() {
             try {
                 await rest.put(
                     Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId),
-                    { body: slashCommands.map(c => c.json) }
+                    { body: registeredCommands.map(c => c.json) }
                 );
                 console.log(`✅ Guild slash commands registered for ${guildId}`);
             } catch (guildError) {
@@ -300,8 +318,8 @@ async function registerSlashCommands() {
 
         console.log('🔍 Trying individual command registration to find the bad one...');
 
-        for (let i = 0; i < slashCommands.length; i++) {
-            const cmd = slashCommands[i];
+        for (let i = 0; i < registeredCommands.length; i++) {
+            const cmd = registeredCommands[i];
 
             try {
                 await rest.post(
@@ -341,12 +359,34 @@ client.once(Events.ClientReady, async () => {
     console.log(`🧹 Match cache cleaned. Monitoring ${matchKeys.length} active/recent matches.`);
 
     try {
+        await selfRoleService.startExpiryWorker(client);
+    } catch (error) {
+        console.error('❌ Failed to start self-role expiry worker:', error);
+    }
+
+    try {
         const { checkGoals } = require('./utils/goalAlerts');
         setInterval(() => {
             checkGoals(client);
         }, 25000);
     } catch (error) {
         console.error('❌ Failed to start goal alert system:', error);
+    }
+
+    /* ── Emoji catalogue (every guild the bot is in) ── */
+    try {
+        const { initEmojiCatalog } = require('./utils/ai/emojiCatalog');
+        initEmojiCatalog(client);
+    } catch (error) {
+        console.error('❌ Failed to init emoji catalog:', error);
+    }
+
+    /* ── Match scheduler: locks stadium channels, unlocks + announces at kickoff ── */
+    try {
+        const { startMatchScheduler } = require('./utils/matchScheduler');
+        startMatchScheduler(client);
+    } catch (error) {
+        console.error('❌ Failed to start match scheduler:', error);
     }
 });
 
@@ -463,6 +503,22 @@ async function runCommand(command, input, args, isSlash) {
 ========================================
 */
 client.on('interactionCreate', async (interaction) => {
+    /* ── Slash-command autocomplete ── */
+    if (interaction.isAutocomplete()) {
+        try {
+            const command = client.commands.get(interaction.commandName);
+            if (command?.autocomplete) {
+                await command.autocomplete(interaction);
+            } else {
+                await interaction.respond([]).catch(() => null);
+            }
+        } catch (error) {
+            console.error(`[autocomplete] ${interaction.commandName} failed:`, error?.message || error);
+            await interaction.respond([]).catch(() => null);
+        }
+        return;
+    }
+
     /* ── Slash Commands ── */
 
     if (interaction.isChatInputCommand()) {
@@ -476,7 +532,22 @@ client.on('interactionCreate', async (interaction) => {
 
 /*
 ========================================
-11. MEMBER EVENTS
+11. SELF-ROLE REACTION EVENTS
+========================================
+*/
+client.on('messageReactionAdd', async (reaction, user) => {
+    if (user?.bot) return;
+    await selfRoleService.handleMessageReaction(reaction, user, true, client);
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+    if (user?.bot) return;
+    await selfRoleService.handleMessageReaction(reaction, user, false, client);
+});
+
+/*
+========================================
+12. MEMBER EVENTS
 ========================================
 */
 client.on('guildMemberAdd', async (member) => {
@@ -656,6 +727,7 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
     const isOwner = SUPER_OWNER_IDS.has(message.author.id);
+    const isCreator = message.author.id === CREATOR_ID;
 
     /* ── Server config cache (60s TTL) ── */
     const cfgCache = client._serverCfgCache || (client._serverCfgCache = new Map());
@@ -734,13 +806,14 @@ client.on('messageCreate', async (message) => {
             await message.react('<:hello:1488633282462744767>').catch(() => null);
         } else if (aiEnabled && (strippedContent || message.attachments.size > 0)) {
             try {
-                // If this mention is a reply, include the referenced message for context
+                // Keep referenced text as context, separate from the current request so
+                // quoted content cannot trigger unrelated database-tool lookups.
                 let contextMessage = '';
                 if (message.reference) {
                     const refMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
                     if (refMsg) {
                         const refAuthor = refMsg.member?.displayName || refMsg.author.username;
-                        contextMessage = `[${refAuthor} said: "${refMsg.content}"]\n\n`;
+                        contextMessage = `[${refAuthor} said: "${refMsg.content}"]`;
                     }
                 }
 
@@ -753,16 +826,19 @@ client.on('messageCreate', async (message) => {
 
                 const { askFootball } = require('./utils/footballAI');
                 message.channel.sendTyping().catch(() => null);
-                const answer = await askFootball(contextMessage + (strippedContent || 'What do you see in this image?'), {
+                const answer = await askFootball(strippedContent || 'What do you see in this image?', {
                     guildId: message.guild.id,
                     channelId: message.channel.id,
                     userId: message.author.id,
                     username: message.author.username,
                     displayName: message.member?.displayName,
-                    imageData
+                    contextMessage,
+                    imageData,
+                    client
                 });
                 if (answer) {
-                    await message.reply(sanitizeMentions(answer));
+                    // Only the verified creator gets the reply-author/owner ping exception; mass and role pings stay blocked.
+                    await message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
                 }
             } catch (error) {
                 console.error('[footballAI] mention error:', error);
@@ -775,8 +851,8 @@ client.on('messageCreate', async (message) => {
         try {
             const referencedMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
             if (referencedMsg && referencedMsg.author.id === client.user.id) {
-                // Include what the bot said as context
-                let contextMessage = `[I (MUMU) previously said: "${referencedMsg.content}"]\n\n`;
+                // Pass the prior bot message as context, not as part of the user's query.
+                const contextMessage = `[I (MUMU) previously said: "${referencedMsg.content}"]`;
 
                 // Check for image attachment
                 const img = getFirstImage(message);
@@ -787,16 +863,18 @@ client.on('messageCreate', async (message) => {
 
                 const { askFootball } = require('./utils/footballAI');
                 message.channel.sendTyping().catch(() => null);
-                const answer = await askFootball(contextMessage + (message.content || 'What do you see in this image?'), {
+                const answer = await askFootball(message.content || 'What do you see in this image?', {
                     guildId: message.guild.id,
                     channelId: message.channel.id,
                     userId: message.author.id,
                     username: message.author.username,
                     displayName: message.member?.displayName,
-                    imageData
+                    contextMessage,
+                    imageData,
+                    client
                 });
                 if (answer) {
-                    await message.reply(sanitizeMentions(answer));
+                    await message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
                 }
             }
         } catch (error) {
@@ -820,6 +898,16 @@ client.on('messageCreate', async (message) => {
         }
     }
 
+    /* ── Learn how people talk (style mimicry + their favourite emojis) ── */
+    try {
+        const { recordMessage } = require('./utils/ai/personality');
+        const { learnUserEmojis } = require('./utils/ai/emojiCatalog');
+        recordMessage({ guildId: message.guild.id, userId: message.author.id, content: message.content });
+        learnUserEmojis(message.guild.id, message.author.id, message.content);
+    } catch {
+        /* never break the handler over style tracking */
+    }
+
     /* ── AI-only channel: block commands (owner bypasses) ── */
     if (isAiOnlyChannel && !isOwner) {
         if (message.content.startsWith(prefix)) {
@@ -834,10 +922,11 @@ client.on('messageCreate', async (message) => {
                             channelId: message.channel.id,
                             userId: message.author.id,
                             username: message.author.username,
-                            displayName: message.member?.displayName
+                            displayName: message.member?.displayName,
+                            client
                         });
                         if (answer) {
-                            return message.reply(sanitizeMentions(answer));
+                            return message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
                         }
                     } catch (error) {
                         console.error('[footballAI] ai-only channel error:', error);
@@ -872,11 +961,12 @@ client.on('messageCreate', async (message) => {
                     channelId: message.channel.id,
                     userId: message.author.id,
                     username: message.author.username,
-                    displayName: message.member?.displayName
+                    displayName: message.member?.displayName,
+                    client
                 }
             );
             if (answer) {
-                await message.reply(sanitizeMentions(answer));
+                await message.reply(buildSafeReply(answer, { allowOwnerPing: isCreator, pingReplyUser: isCreator }));
             }
         } catch (error) {
             console.error('[footballAI] command help error:', error);

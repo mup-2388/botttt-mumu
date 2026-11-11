@@ -36,11 +36,12 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { getDefaultTournament } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'audit-teams',
     description: 'Audit global teams, or the teams of one specific tournament.',
-    usage: '.audit-teams [tournament=<key> | <key>]',
+    usage: '.audit-teams [tournament=<key> | <key> | all]  (no key = default tournament)',
     aliases: ['auditteams', 'teamaudit'],
     hidden: true,
     cooldown: 5,
@@ -115,7 +116,8 @@ module.exports = {
 
 /**
  * Prefix args → tournament query:
- *   .audit-teams                     → null (global view)
+ *   .audit-teams                     → DEFAULT tournament
+ *   .audit-teams all                 → null (every tournament / global view)
  *   .audit-teams league-s4           → 'league-s4'
  *   .audit-teams tournament=league-s4 → 'league-s4'
  *   .audit-teams league s4 (name)    → 'league s4'
@@ -139,9 +141,26 @@ function parseTournamentArg(args) {
 ==================================================== */
 
 async function runAudit({ guild, tournamentQuery, reply }) {
+    // `.audit-teams all` (or the slash tournament:all) → every tournament
+    if (tournamentQuery && ['all', '*'].includes(String(tournamentQuery).trim().toLowerCase())) {
+        return runGlobalAudit({ guild, reply });
+    }
+
     if (tournamentQuery) {
         return runTournamentAudit({ guild, tournamentQuery, reply });
     }
+
+    // No argument → the server's default tournament
+    const defaultTournament = await getDefaultTournament(guild.id, { includeCompleted: true });
+
+    if (defaultTournament) {
+        return runTournamentAudit({
+            guild,
+            tournamentQuery: defaultTournament.tournamentKey,
+            reply
+        });
+    }
+
     return runGlobalAudit({ guild, reply });
 }
 

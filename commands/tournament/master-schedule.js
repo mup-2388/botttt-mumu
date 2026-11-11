@@ -28,6 +28,8 @@ const {
 } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase, truncate } = require('../../utils/displayHelpers');
+const { vsLine, slotEmoji } = require('../../utils/ai/emojiSlots');
+const { isReserved, reservedBadge } = require('../../utils/reservedMatches');
 const { extractRoundNumber } = require('../../utils/fixtureBuilder');
 
 const LIVE_KEY = 'live_master_schedule';
@@ -124,7 +126,12 @@ async function runMasterSchedule({ client, guild, userId, phase, reply }) {
     const tournaments = await getSelectableTournaments(guild.id);
     if (!tournaments.length) return reply({ content: '📭 No active tournaments found.' });
 
-    let tournament = await getDefaultTournament(guild.id) || tournaments[0];
+    let tournament = await getDefaultTournament(guild.id);
+
+    if (!tournament) {
+        return reply({ content: '⚠️ No default tournament is set. Set a default tournament, then open the master schedule again.' });
+    }
+
     let state = await buildState({ guild, tournament, tournaments, phase });
 
     const sent = await reply({
@@ -224,7 +231,7 @@ function buildEmbed(state) {
 
     const embed = new EmbedBuilder()
         .setColor(0xFEBE10)
-        .setTitle(`🗓️ MASTER SCHEDULE — ${state.tournament.name.toUpperCase()}`)
+        .setTitle(`${slotEmoji('calendar', state.guild.id)} MASTER SCHEDULE — ${state.tournament.name.toUpperCase()}`)
         .setDescription(
             `Showing: **${tournamentEmoji} ${current.label}**\n` +
             `Page **${state.page + 1}/${state.pages.length}**`
@@ -234,7 +241,7 @@ function buildEmbed(state) {
     embed.addFields({
         name: `${tournamentEmoji} ${current.label}`,
         value: current.fixtures.length
-            ? current.fixtures.map(f => formatFixture(f, state.stadiumMap)).join('\n\n')
+            ? current.fixtures.map(f => formatFixture(f, state.stadiumMap, state.guild.id)).join('\n\n')
             : 'No fixtures found.',
         inline: false
     });
@@ -306,19 +313,20 @@ function buildMatchdayPages(fixtures) {
    FORMATTING
 ==================================================== */
 
-function formatFixture(fixture, stadiumMap) {
+function formatFixture(fixture, stadiumMap, guildId = fixture.guildId) {
     const stadium =
         fixture.venueType === 'neutral'
             ? fixture.venueName || 'Neutral Ground'
             : stadiumMap.get(String(fixture.homeTeam || '').toLowerCase()) || fixture.venueName || 'Home Ground';
 
-    const score = fixture.status === 'Played'
-        ? ` **${fixture.result?.home ?? '-'}-${fixture.result?.away ?? '-'}** `
-        : ' vs ';
+    const matchup = fixture.status === 'Played'
+        ? `${fixture.homeTeam} **${slotEmoji('goals', guildId)} ${fixture.result?.home ?? '-'}-${fixture.result?.away ?? '-'} ${slotEmoji('goals', guildId)}** ${fixture.awayTeam}`
+        : vsLine(fixture.homeTeam, fixture.awayTeam, guildId);
+    const badge = isReserved(fixture) ? `\n${reservedBadge(fixture, { guildId })}` : '';
 
     return (
-        `**#${fixture.matchNumber} • ${fixture.homeTeam}${score}${fixture.awayTeam}**\n` +
-        `🏟️ ${stadium} • 📍 ${fixture.status}`
+        `**#${fixture.matchNumber} • ${matchup}**\n` +
+        `🏟️ ${stadium} • 📍 ${fixture.status}${badge}`
     );
 }
 

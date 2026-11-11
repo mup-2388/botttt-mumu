@@ -33,7 +33,7 @@ const tournamentSettingsSchema = new mongoose.Schema(
 
         formatType: {
             type: String,
-            enum: ['league', 'groups_knockout', 'mega_table_playoffs', 'club_world_cup', 'custom'],
+            enum: ['league', 'knockout', 'groups_knockout', 'mega_table_playoffs', 'glory_cup', 'club_world_cup', 'custom'],
             default: 'league'
         },
 
@@ -108,7 +108,7 @@ const tournamentSettingsSchema = new mongoose.Schema(
 
         currentPhase: {
             type: String,
-            enum: ['registration', 'league', 'groups', 'super8', 'knockout', 'completed'],
+            enum: ['registration', 'league', 'groups', 'super8', 'knockout', 'qualifier', 'eliminator', 'roundof16', 'quarterfinal', 'semifinal', 'final', 'completed'],
             default: 'registration'
         },
 
@@ -648,6 +648,7 @@ const fixtureSchema = new mongoose.Schema(
                 'super8',
                 'qualifier',
                 'eliminator',
+                'roundof16',
                 'quarterfinal',
                 'semifinal',
                 'final',
@@ -726,6 +727,59 @@ const fixtureSchema = new mongoose.Schema(
         scheduledAt: {
             type: Date,
             default: null
+        },
+
+        /*
+         * Match-day channel plan (see utils/matchScheduler.js):
+         * the stadium channel is locked immediately and announced when scheduled,
+         * then unlocked and pinged one minute before kickoff.
+         */
+        channelPlan: {
+            channelId: { type: String, default: null },
+            state: {
+                type: String,
+                enum: ['pending', 'locked', 'announced', 'done', 'cancelled'],
+                default: 'pending'
+            },
+            lockAt: { type: Date, default: null },
+            announceAt: { type: Date, default: null }, // one-minute-before unlock + final ping time
+            lockedAt: { type: Date, default: null },
+            announcedAt: { type: Date, default: null }, // legacy / reminder timestamp
+            scheduledAnnouncementClaimedAt: { type: Date, default: null },
+            scheduledAnnouncedAt: { type: Date, default: null },
+            scheduledAnnouncementMessageId: { type: String, default: null },
+            unlockClaimedAt: { type: Date, default: null },
+            unlockedAt: { type: Date, default: null },
+            unlockAnnouncedAt: { type: Date, default: null },
+            unlockMessageId: { type: String, default: null },
+            reminderClaimedAt: { type: Date, default: null }, // legacy reminder-only flow
+            reminderAnnouncedAt: { type: Date, default: null }, // legacy reminder-only flow
+            reminderMessageId: { type: String, default: null }, // legacy reminder-only flow
+            kickoffClaimedAt: { type: Date, default: null }, // legacy kickoff-time flow
+            kickoffUnlockedAt: { type: Date, default: null }, // legacy kickoff-time flow
+            kickoffAnnouncedAt: { type: Date, default: null }, // legacy kickoff-time flow
+            kickoffMessageId: { type: String, default: null }, // legacy kickoff-time flow
+            lockedBy: { type: String, default: null },
+            previousOverwrite: { type: mongoose.Schema.Types.Mixed, default: null },
+            pingCaptains: { type: Boolean, default: false },
+            announcementMessageId: { type: String, default: null },
+            lastError: { type: String, default: null },
+            scheduledBy: { type: String, default: null }
+        },
+
+        /*
+         * A match the organizers could not play on its matchday. Reserved
+         * fixtures stay Pending (so they can still be reported/played whenever),
+         * keep their new kickoff in scheduledAt, and are flagged everywhere
+         * fixtures are listed. Reserving also releases the stadium channel lock.
+         */
+        reserved: {
+            isReserved: { type: Boolean, default: false },
+            at: { type: Date, default: null },          // when it was marked
+            by: { type: String, default: null },        // organizer user id
+            from: { type: Date, default: null },        // kickoff that was missed
+            until: { type: Date, default: null },       // new day/time (null = not decided)
+            note: { type: String, default: null }
         },
 
         status: {
@@ -876,6 +930,11 @@ const serverConfigSchema = new mongoose.Schema(
             default: ''
         },
 
+        defaultFixturesChannelId: {
+            type: String,
+            default: ''
+        },
+
         organizerIds: {
             type: [String],
             default: []
@@ -894,6 +953,13 @@ const serverConfigSchema = new mongoose.Schema(
         transfersLocked: {
             type: Boolean,
             default: false
+        },
+
+        // When false, setcolor is blocked and team-role sync preserves
+        // whatever colors are already set on Discord roles.
+        teamRoleColorsEnabled: {
+            type: Boolean,
+            default: true
         },
 
         emojis: {

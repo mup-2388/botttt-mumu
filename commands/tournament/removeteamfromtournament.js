@@ -25,12 +25,14 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
+const { optionalStep } = require('../../utils/optionalStep');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 module.exports = {
     name: 'removeteamfromtournament',
     description: 'Remove a team from a tournament and give opponents 3-0 walkover wins.',
-    usage: '.removeteamfromtournament <key> <team name>',
+    usage: '.removeteamfromtournament [key] <team name>',
     aliases: ['removefromtour', 'rtt', 'removetourteam'],
     hidden: false,
     cooldown: 5,
@@ -40,14 +42,14 @@ module.exports = {
         .setName('removeteamfromtournament')
         .setDescription('Remove a team from a specific tournament')
         .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
-        .addStringOption(opt =>
             opt.setName('team')
                 .setDescription('Team name')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -62,19 +64,29 @@ module.exports = {
                 return message.reply('🚫 You are not authorized.');
             }
 
-            if (args.length < 2) {
-                return message.reply('❓ Usage: `.removeteamfromtournament <key> <team name>`');
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            if (!parsedKey.rest.length) {
+                return message.reply(
+                    '❓ Usage: `.removeteamfromtournament [key] <team name>`\n' +
+                    'Without a key the server default tournament is used.'
+                );
             }
 
             return await runRemove({
                 guild: message.guild,
-                tournamentKey: args[0].toLowerCase(),
-                teamName: args.slice(1).join(' '),
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
+                teamName: parsedKey.rest.join(' '),
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
             console.error('[removeteamfromtournament] prefix error:', error);
-            return message.reply('❌ Failed to remove team from tournament.');
+            return message.reply(
+                '❌ Failed to remove team from tournament.\n`' + String(error?.message || error).slice(0, 200) + '`'
+            );
         }
     },
 
@@ -92,18 +104,25 @@ module.exports = {
 
             return await runRemove({
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 teamName: interaction.options.getString('team'),
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
             console.error('[removeteamfromtournament] slash error:', error);
 
+            const reason = String(error?.message || error).slice(0, 200);
+
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ Failed to remove team from tournament.');
+                return interaction.editReply(
+                    '❌ Failed to remove team from tournament.\n`' + reason + '`'
+                );
             }
 
-            return interaction.reply({ content: '❌ Failed to remove team from tournament.', ephemeral: true });
+            return interaction.reply({
+                content: '❌ Failed to remove team from tournament.\n`' + reason + '`',
+                ephemeral: true
+            });
         }
     }
 };
@@ -120,14 +139,13 @@ module.exports = {
  */
 async function runRemove({ guild, tournamentKey, teamName, reply }) {
     /* ── Find tournament ── */
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     /* ── Find team ── */
     const team = await Team.findOne({
@@ -143,11 +161,29 @@ async function runRemove({ guild, tournamentKey, teamName, reply }) {
     const entry = await TournamentTeam.findOne({
         guildId: guild.id,
         tournamentId: tournament._id,
-        teamId: team._id
+        teamId: team._id,
+        isActive: { $ne: false }
     });
 
     if (!entry) {
-        return reply({ content: `❌ **${team.name}** is not in **${tournament.name}**.` });
+        const existing = await TournamentTeam.findOne({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            teamId: team._id
+        })
+            .lean()
+            .catch(() => null);
+
+        if (existing) {
+            return reply({
+                content:
+                    `ℹ️ **${team.name}** is already out of **${tournament.name}** — nothing changed.`
+            });
+        }
+
+        return reply({
+            content: `ℹ️ **${team.name}** is not part of **${tournament.name}** — nothing to remove.`
+        });
     }
 
     /* ── Deactivate tournament team ── */
@@ -164,12 +200,19 @@ async function runRemove({ guild, tournamentKey, teamName, reply }) {
         { $set: { isActive: false } }
     );
 
-    /* ── Apply walkovers to remaining fixtures ── */
-    const walkoverResult = await applyWalkovers({
-        guildId: guild.id,
-        tournament,
-        withdrawnTeam: team
-    });
+    /* ── Apply walkovers to remaining fixtures (optional follow-up) ──
+       The team is already withdrawn above, so a failure here must not turn
+       the command into "❌ Failed to remove team from tournament". */
+    const walkoverResult = await optionalStep(
+        'removeteamfromtournament: walkovers',
+        () =>
+            applyWalkovers({
+                guildId: guild.id,
+                tournament,
+                withdrawnTeam: team
+            }),
+        { updatedFixtures: 0, opponentWins: 0, withdrawnLosses: 0, failed: true }
+    );
 
     /* ── Response ── */
     const embed = new EmbedBuilder()
@@ -182,10 +225,11 @@ async function runRemove({ guild, tournamentKey, teamName, reply }) {
         )
         .addFields({
             name: 'Walkovers Applied',
-            value:
-                `Fixtures reported 3-0: **${walkoverResult.updatedFixtures}**\n` +
-                `Opponent standing wins: **${walkoverResult.opponentWins}**\n` +
-                `Withdrawn team losses: **${walkoverResult.withdrawnLosses}**`,
+            value: walkoverResult.failed
+                ? '⚠️ Walkover step failed — fixtures were left unchanged (see the bot console).'
+                : `Fixtures reported 3-0: **${walkoverResult.updatedFixtures}**\n` +
+                  `Opponent standing wins: **${walkoverResult.opponentWins}**\n` +
+                  `Withdrawn team losses: **${walkoverResult.withdrawnLosses}**`,
             inline: false
         })
         .setTimestamp();

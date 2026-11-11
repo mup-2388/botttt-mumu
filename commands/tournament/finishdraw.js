@@ -26,6 +26,7 @@ const {
 } = require('../../utils/drawBoard');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine } = require('../../utils/ai/emojiSlots');
 const {
     buildRoundRobinFixtures,
     buildKnockoutFixtures,
@@ -418,7 +419,7 @@ async function finishKnockoutDraw({ client, guild, drawKey, session, tournament,
                 value:
                     resolvedPairs
                         .map(([h, a]) =>
-                            `• ${h.teamId?.name || h.teamNameSnapshot} vs ${a.teamId?.name || a.teamNameSnapshot}`
+                            `• ${vsLine(h.teamId?.name || h.teamNameSnapshot, a.teamId?.name || a.teamNameSnapshot, guild.id)}`
                         )
                         .join('\n') || 'None',
                 inline: false

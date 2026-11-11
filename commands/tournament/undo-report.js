@@ -33,6 +33,7 @@ const { updateLiveTopStats } = require('../../utils/updateTopStats');
 const { refreshLiveMasterSchedules } = require('./master-schedule');
 const { refreshLiveBracket } = require('./sendbracket');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine, slotEmoji } = require('../../utils/ai/emojiSlots');
 
 module.exports = {
     name: 'undo-report',
@@ -46,15 +47,15 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('undo-report')
         .setDescription('Undo a reported fixture')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Optional tournament key')
-                .setRequired(false)
-        )
         .addIntegerOption(opt =>
             opt.setName('match')
                 .setDescription('Match number')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Optional tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -303,8 +304,8 @@ async function runUndo({
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
             `Fixture #**${fixture.matchNumber}**\n` +
-            `**${fixture.homeTeam} vs ${fixture.awayTeam}**\n\n` +
-            `Previous Score: **${homeGoals}-${awayGoals}**\n` +
+            `**${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}**\n\n` +
+            `Previous Score: **${slotEmoji('goals', guild.id)} ${homeGoals}-${awayGoals} ${slotEmoji('goals', guild.id)}**\n` +
             `Status Reset To: **Pending**`
         )
         .addFields(

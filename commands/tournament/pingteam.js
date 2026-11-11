@@ -5,14 +5,18 @@
  * Uses a manual 10s cooldown per user per guild.
  * Sends ONLY the role ping — no confirmation message.
  *
- * Usage:  .pingteam
- * Slash:  /pingteam
+ * Works for the server's DEFAULT tournament unless `tournament=<key>` is given:
+ * the team is the one you captain/vice-captain THERE.
+ *
+ * Usage:  .pingteam [tournament=<key>]
+ * Slash:  /pingteam [tournament:<key>]
  *
  * Aliases: pt
  */
 
 const { SlashCommandBuilder } = require('discord.js');
-const { Team } = require('../../models/Tournament');
+const { extractTournamentFromArgs } = require('../../utils/getTournament');
+const { resolveActorTeam } = require('../../utils/tournamentContext');
 
 const COOLDOWN = 10 * 1000;
 const cooldowns = new Map();
@@ -20,27 +24,38 @@ const cooldowns = new Map();
 module.exports = {
     name: 'pingteam',
     description: 'Ping your team captain-only.',
-    usage: '.pingteam',
+    usage: '.pingteam [tournament=<key>]',
     aliases: ['pt'],
     hidden: false,
     cooldown: 10,
 
     data: new SlashCommandBuilder()
         .setName('pingteam')
-        .setDescription('Ping your team captain-only'),
+        .setDescription('Ping your team captain-only')
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
+        ),
 
     /* ================================================
        PREFIX
     ================================================ */
 
-    async execute(message) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
+
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
 
             return await runPing({
                 guild: message.guild,
                 user: message.author,
                 channel: message.channel,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -61,6 +76,7 @@ module.exports = {
                 guild: interaction.guild,
                 user: interaction.user,
                 channel: interaction.channel,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -79,8 +95,8 @@ module.exports = {
    CORE LOGIC
 ==================================================== */
 
-/** Ping the team's Discord role. Only captain/VC can use this. */
-async function runPing({ guild, user, channel, reply }) {
+/** Ping the team's Discord role. Only captain/VC of a team in the tournament can use this. */
+async function runPing({ guild, user, channel, tournamentKey = null, reply }) {
     /* ── Cooldown check ── */
     const now = Date.now();
     const cooldownKey = `${guild.id}:${user.id}`;
@@ -94,22 +110,18 @@ async function runPing({ guild, user, channel, reply }) {
         }
     }
 
-    /* ── Find team where user is captain or VC ── */
-    let team = await Team.findOne({
+    /* ── Find the user's team in the tournament ── */
+    const { tournament, ctx, error } = await resolveActorTeam({
         guildId: guild.id,
-        captainID: user.id
+        userId: user.id,
+        tournamentKey,
+        need: 'manage',
+        noun: 'ping your team'
     });
 
-    if (!team) {
-        team = await Team.findOne({
-            guildId: guild.id,
-            viceCaptainID: user.id
-        });
-    }
+    if (error) return reply({ content: error });
 
-    if (!team) {
-        return reply({ content: '🚫 Only team captains or vice captains can use this command.' });
-    }
+    const team = ctx.team;
 
     /* ── Find matching Discord role ── */
     const role = guild.roles.cache.find(

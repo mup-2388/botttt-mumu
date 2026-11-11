@@ -3,10 +3,11 @@
  *
  * Organizer command to directly move a player to a different team.
  * Cannot move captains — change captain first.
- * Updates global Player + all active TournamentPlayer entries.
+ * Works inside the server's DEFAULT tournament unless `tournament=<key>` is
+ * given: the target team must be registered in that tournament.
  *
- * Usage:  .moveplayer @user <team name>
- * Slash:  /moveplayer user:<user> team:<team>
+ * Usage:  .moveplayer @user <team name> [tournament=<key>]
+ * Slash:  /moveplayer user:<user> team:<team> [tournament:<key>]
  *
  * Aliases: mp, forcemoveplayer
  */
@@ -17,21 +18,23 @@ const {
     EmbedBuilder
 } = require('discord.js');
 
-const {
-    Team,
-    Player,
-    TournamentSettings,
-    TournamentTeam,
-    TournamentPlayer
-} = require('../../models/Tournament');
+const { Player } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { escapeRegex, getUserFromArgs } = require('../../utils/stringHelpers');
+const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const {
+    sameId,
+    effectiveCaptainId,
+    getUserTeamInTournament,
+    findTeamInTournamentByName,
+    assignPlayerToTeamInTournament
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'moveplayer',
     description: 'Organizer command to directly move a player to a team.',
-    usage: '.moveplayer @user <team name>',
+    usage: '.moveplayer @user <team name> [tournament=<key>]',
     aliases: ['mp', 'forcemoveplayer'],
     hidden: true,
     cooldown: 5,
@@ -49,6 +52,11 @@ module.exports = {
             opt.setName('team')
                 .setDescription('Target team name')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -63,28 +71,34 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            const target =
-                message.mentions.users.first() ||
-                await getUserFromArgs(message);
-
-            if (!target) {
-                return message.reply('❌ Usage: `.moveplayer @user <team name>`');
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
             }
 
-            const teamName = args
+            const target =
+                message.mentions.users.first() ||
+                await getUserFromArgs(message, parsedKey.rest);
+
+            if (!target) {
+                return message.reply('❌ Usage: `.moveplayer @user <team name> [tournament=<key>]`');
+            }
+
+            const teamName = parsedKey.rest
                 .join(' ')
                 .replace(/<@!?\d{17,20}>/g, '')
                 .replace(/\d{17,20}/g, '')
                 .trim();
 
             if (!teamName) {
-                return message.reply('❌ Usage: `.moveplayer @user <team name>`');
+                return message.reply('❌ Usage: `.moveplayer @user <team name> [tournament=<key>]`');
             }
 
             return await runMovePlayer({
                 guild: message.guild,
                 targetUser: target,
                 teamName,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -109,6 +123,7 @@ module.exports = {
                 guild: interaction.guild,
                 targetUser: interaction.options.getUser('user'),
                 teamName: interaction.options.getString('team'),
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -128,27 +143,33 @@ module.exports = {
 ==================================================== */
 
 /**
- * Move a player to a new team:
- * 1. Validate player exists and is not captain
- * 2. Resolve target team
- * 3. Update global Player record
- * 4. Update all active TournamentPlayer entries
+ * Move a player to a new team INSIDE the tournament:
+ * 1. Resolve tournament (explicit key, else the server default)
+ * 2. Validate player exists and is not captain (of their team in that tournament)
+ * 3. Resolve target team among the tournament's teams
+ * 4. Move the tournament roster entry (global record follows when it should)
  */
-async function runMovePlayer({ guild, targetUser, teamName, reply }) {
+async function runMovePlayer({ guild, targetUser, teamName, tournamentKey = null, reply }) {
+    const resolved = await resolveTournament(guild.id, tournamentKey);
+    if (!resolved.tournament) return reply({ content: resolved.error });
+
+    const tournament = resolved.tournament;
+
     /* ── Find player ── */
     const player = await Player.findOne({
         guildId: guild.id,
         discordID: targetUser.id
-    }).populate('teamId');
+    });
 
     if (!player) {
         return reply({ content: `❌ ${targetUser} is not registered as a player.` });
     }
 
-    const oldTeam = player.teamId || null;
+    const oldCtx = await getUserTeamInTournament(guild.id, tournament, targetUser.id);
+    const oldTeam = oldCtx?.team || null;
 
     /* ── Block captain from being moved directly ── */
-    if (oldTeam && (player.isCaptain || String(oldTeam.captainID) === String(targetUser.id))) {
+    if (oldCtx && (oldCtx.isCaptain || sameId(effectiveCaptainId(oldCtx.entry, oldCtx.team), targetUser.id))) {
         return reply({
             content:
                 `❌ ${targetUser} is currently captain of **${oldTeam.name}**.\n` +
@@ -156,38 +177,28 @@ async function runMovePlayer({ guild, targetUser, teamName, reply }) {
         });
     }
 
-    /* ── Resolve target team ── */
-    const newTeam = await Team.findOne({
-        guildId: guild.id,
-        name: { $regex: new RegExp(`^${escapeRegex(teamName)}$`, 'i') }
-    });
+    /* ── Resolve target team (must be in this tournament) ── */
+    const found = await findTeamInTournamentByName(guild.id, tournament, teamName);
 
-    if (!newTeam) {
-        return reply({ content: `❌ Target team not found: \`${teamName}\`` });
+    if (!found) {
+        return reply({
+            content: `❌ Target team \`${teamName}\` is not registered in **${tournament.name}** (\`${tournament.tournamentKey}\`).`
+        });
     }
+
+    const newTeam = found.team;
 
     if (oldTeam && String(oldTeam._id) === String(newTeam._id)) {
         return reply({ content: `❌ ${targetUser} is already in **${newTeam.name}**.` });
     }
 
-    /* ── Update global player record ── */
-    await Player.updateOne(
-        { _id: player._id },
-        {
-            $set: {
-                teamId: newTeam._id,
-                teamNameSnapshot: newTeam.name,
-                isCaptain: false,
-                isViceCaptain: false
-            }
-        }
-    );
-
-    /* ── Update active tournament entries ── */
-    const updatedTournamentPlayers = await updateActiveTournamentPlayerTeams({
+    /* ── Move ── */
+    await assignPlayerToTeamInTournament({
         guildId: guild.id,
-        playerId: player._id,
-        newTeam
+        tournament,
+        player,
+        newTeam,
+        oldTeamId: oldTeam?._id || null
     });
 
     /* ── Response ── */
@@ -199,56 +210,9 @@ async function runMovePlayer({ guild, targetUser, teamName, reply }) {
             `Old Team: **${oldTeam?.name || 'FREE AGENT'}**`
         )
         .setFooter({
-            text: `Active tournament records updated: ${updatedTournamentPlayers}`
+            text: `Tournament: ${tournament.name} (${tournament.tournamentKey})`
         })
         .setTimestamp();
 
     return reply({ embeds: [embed] });
-}
-
-/* ====================================================
-   TOURNAMENT SYNC
-==================================================== */
-
-/** Update a player's team across all active tournaments where the new team is registered. */
-async function updateActiveTournamentPlayerTeams({ guildId, playerId, newTeam }) {
-    const activeTournaments = await TournamentSettings.find({
-        guildId,
-        currentPhase: { $ne: 'completed' }
-    }).lean();
-
-    let updated = 0;
-
-    for (const tournament of activeTournaments) {
-        const tournamentTeam = await TournamentTeam.findOne({
-            guildId,
-            tournamentId: tournament._id,
-            teamId: newTeam._id,
-            isActive: true
-        });
-
-        if (!tournamentTeam) continue;
-
-        const result = await TournamentPlayer.updateMany(
-            {
-                guildId,
-                tournamentId: tournament._id,
-                playerId,
-                isActive: true
-            },
-            {
-                $set: {
-                    teamId: newTeam._id,
-                    tournamentTeamId: tournamentTeam._id,
-                    teamNameSnapshot: newTeam.name,
-                    isCaptain: false,
-                    isViceCaptain: false
-                }
-            }
-        );
-
-        updated += result.modifiedCount || 0;
-    }
-
-    return updated;
 }

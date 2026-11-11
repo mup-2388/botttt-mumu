@@ -5,10 +5,12 @@
  * Captain/VC of the new team initiates. Both the player and the old team's
  * captain/VC must accept within the timeout window.
  *
- * Updates global Player record + all active TournamentPlayer entries.
+ * Everything happens INSIDE one tournament — the server's DEFAULT tournament
+ * unless `tournament=<key>` is given. Both teams and the player's current team
+ * are the ones registered in that tournament.
  *
- * Usage:  .transfer @user
- * Slash:  /transfer user:<user>
+ * Usage:  .transfer @user [tournament=<key>]
+ * Slash:  /transfer user:<user> [tournament:<key>]
  * Aliases: tr
  */
 
@@ -23,14 +25,20 @@ const {
 
 const {
     Player,
-    Team,
-    TournamentSettings,
     TournamentTeam,
     TournamentPlayer,
     ServerConfig
 } = require('../../models/Tournament');
 
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs } = require('../../utils/getTournament');
+const {
+    resolveActorTeam,
+    getUserTeamInTournament,
+    effectiveCaptainId,
+    effectiveViceCaptainId,
+    sameId
+} = require('../../utils/tournamentContext');
 
 /** How long both parties have to accept (5 minutes) */
 const TRANSFER_TIMEOUT = 5 * 60 * 1000;
@@ -38,7 +46,7 @@ const TRANSFER_TIMEOUT = 5 * 60 * 1000;
 module.exports = {
     name: 'transfer',
     description: 'Request a player transfer with approval buttons.',
-    usage: '.transfer @user',
+    usage: '.transfer @user [tournament=<key>]',
     aliases: ['tr'],
     hidden: false,
     cooldown: 10,
@@ -51,20 +59,30 @@ module.exports = {
             opt.setName('user')
                 .setDescription('Player to transfer')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
        PREFIX
     ================================================ */
 
-    async execute(message) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
 
-            const target = message.mentions.users.first() || await getUserFromArgs(message);
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const target = message.mentions.users.first() || await getUserFromArgs(message, parsedKey.rest);
 
             if (!target) {
-                return message.reply('❌ Usage: `.transfer @user`');
+                return message.reply('❌ Usage: `.transfer @user [tournament=<key>]`');
             }
 
             return await runTransferRequest({
@@ -72,6 +90,7 @@ module.exports = {
                 channel: message.channel,
                 actorId: message.author.id,
                 targetUser: target,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -95,6 +114,7 @@ module.exports = {
                 channel: interaction.channel,
                 actorId: interaction.user.id,
                 targetUser: target,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -119,7 +139,7 @@ module.exports = {
 /**
  * Validate the transfer request, build the approval UI, and start the collector.
  */
-async function runTransferRequest({ guild, channel, actorId, targetUser, reply }) {
+async function runTransferRequest({ guild, channel, actorId, targetUser, tournamentKey = null, reply }) {
     // ── Transfer lock check ──
     const config = await ServerConfig.findOne({ guildId: guild.id }).lean();
     if (config?.transfersLocked) {
@@ -131,49 +151,49 @@ async function runTransferRequest({ guild, channel, actorId, targetUser, reply }
         return reply({ content: '❌ You cannot transfer yourself.' });
     }
 
-    // ── Verify actor is captain/VC of a team ──
-    const newCaptainPlayer = await Player.findOne({
+    // ── Verify actor is captain/VC of a team IN THIS TOURNAMENT ──
+    const { tournament, ctx: actorCtx, error } = await resolveActorTeam({
         guildId: guild.id,
-        discordID: actorId
-    }).populate('teamId');
+        userId: actorId,
+        tournamentKey,
+        need: 'manage',
+        noun: 'request transfers'
+    });
 
-    if (!newCaptainPlayer?.teamId) {
-        return reply({ content: '❌ You are not linked to any team.' });
-    }
+    if (error) return reply({ content: error });
 
-    const newTeam = newCaptainPlayer.teamId;
-
-    const isCaptain =
-        String(newTeam.captainID) === String(actorId) ||
-        newCaptainPlayer.isCaptain;
-
-    const isViceCaptain =
-        String(newTeam.viceCaptainID) === String(actorId) ||
-        newCaptainPlayer.isViceCaptain;
-
-    if (!isCaptain && !isViceCaptain) {
-        return reply({ content: '❌ Only a team captain or vice captain can request transfers.' });
-    }
+    // Plain copy carrying the EFFECTIVE (per-tournament aware) captain / VC
+    const newTeam = {
+        ...actorCtx.team.toObject(),
+        captainID: effectiveCaptainId(actorCtx.entry, actorCtx.team),
+        viceCaptainID: effectiveViceCaptainId(actorCtx.entry, actorCtx.team)
+    };
 
     // ── Find target player ──
     const targetPlayer = await Player.findOne({
         guildId: guild.id,
         discordID: targetUser.id
-    }).populate('teamId');
+    });
 
     if (!targetPlayer) {
         return reply({ content: `❌ ${targetUser} is not registered as a player.` });
     }
 
-    if (!targetPlayer.teamId) {
+    const targetCtx = await getUserTeamInTournament(guild.id, tournament, targetUser.id);
+
+    if (!targetCtx) {
         return reply({
             content:
-                `❌ ${targetUser} is currently a **FREE AGENT**.\n` +
+                `❌ ${targetUser} is currently a **FREE AGENT** in **${tournament.name}**.\n` +
                 'Use `.claimplayer @user` to sign them instead.'
         });
     }
 
-    const oldTeam = targetPlayer.teamId;
+    const oldTeam = {
+        ...targetCtx.team.toObject(),
+        captainID: effectiveCaptainId(targetCtx.entry, targetCtx.team),
+        viceCaptainID: effectiveViceCaptainId(targetCtx.entry, targetCtx.team)
+    };
 
     // ── Same-team check ──
     if (String(oldTeam._id) === String(newTeam._id)) {
@@ -182,8 +202,8 @@ async function runTransferRequest({ guild, channel, actorId, targetUser, reply }
 
     // ── Cannot transfer a captain ──
     const targetIsCaptain =
-        targetPlayer.isCaptain ||
-        String(oldTeam.captainID) === String(targetUser.id);
+        targetCtx.isCaptain ||
+        sameId(oldTeam.captainID, targetUser.id);
 
     if (targetIsCaptain) {
         return reply({
@@ -252,6 +272,7 @@ async function runTransferRequest({ guild, channel, actorId, targetUser, reply }
                 oldCaptainId,
                 state,
                 guild,
+                tournament,
                 targetPlayer,
                 oldTeam,
                 newTeam,
@@ -300,7 +321,7 @@ async function runTransferRequest({ guild, channel, actorId, targetUser, reply }
  */
 async function handleTransferInteraction({
     interaction, targetUser, oldTeamApprover, oldViceCaptainId, oldCaptainId,
-    state, guild, targetPlayer, oldTeam, newTeam, collector, message
+    state, guild, tournament, targetPlayer, oldTeam, newTeam, collector, message
 }) {
     const userId = String(interaction.user.id);
 
@@ -365,7 +386,7 @@ async function handleTransferInteraction({
 
         // ── Both approved → complete transfer ──
         if (state.playerAccepted && state.oldCaptainAccepted) {
-            const result = await completeTransfer({ guild, targetPlayer, oldTeam, newTeam });
+            const result = await completeTransfer({ guild, tournament, targetPlayer, oldTeam, newTeam });
 
             const completedEmbed = buildTransferEmbed({
                 status: 'completed',
@@ -375,7 +396,8 @@ async function handleTransferInteraction({
                 oldTeamApprover,
                 oldViceCaptainId,
                 state,
-                updatedTournamentPlayers: result.updatedTournamentPlayers
+                updatedTournamentPlayers: result.updatedTournamentPlayers,
+                tournamentName: tournament.name
             });
 
             collector.stop('completed');
@@ -410,62 +432,71 @@ async function handleTransferInteraction({
 ==================================================== */
 
 /**
- * Execute the transfer: update global Player and all active TournamentPlayer records.
+ * Execute the transfer INSIDE the tournament:
+ *  - the player's TournamentPlayer entry moves to the new team
+ *  - a vice-captain seat on the old team is vacated
+ *  - the global Player record follows only if it still points at the old team
+ *    (or no team) — it is never yanked away from a team of another tournament
  */
-async function completeTransfer({ guild, targetPlayer, oldTeam, newTeam }) {
-    // ── Update global player record ──
-    await Player.updateOne(
-        { _id: targetPlayer._id },
-        {
-            $set: {
-                teamId: newTeam._id,
-                teamNameSnapshot: newTeam.name,
-                isCaptain: false,
-                isViceCaptain: false
-            }
-        }
-    );
-
-    // ── Update all active tournament entries ──
-    const activeTournaments = await TournamentSettings.find({
+async function completeTransfer({ guild, tournament, targetPlayer, oldTeam, newTeam }) {
+    const newTournamentTeam = await TournamentTeam.findOne({
         guildId: guild.id,
-        currentPhase: { $ne: 'completed' }
+        tournamentId: tournament._id,
+        teamId: newTeam._id,
+        isActive: true
     });
 
-    let updatedTournamentPlayers = 0;
+    if (!newTournamentTeam) return { updatedTournamentPlayers: 0 };
 
-    for (const tournament of activeTournaments) {
-        const newTournamentTeam = await TournamentTeam.findOne({
+    const tp = await TournamentPlayer.findOneAndUpdate(
+        {
             guildId: guild.id,
             tournamentId: tournament._id,
-            teamId: newTeam._id,
-            isActive: true
-        });
-
-        if (!newTournamentTeam) continue;
-
-        const result = await TournamentPlayer.updateMany(
-            {
+            playerId: targetPlayer._id
+        },
+        {
+            $set: {
                 guildId: guild.id,
                 tournamentId: tournament._id,
                 playerId: targetPlayer._id,
-                isActive: true
-            },
+                teamId: newTeam._id,
+                playerNameSnapshot: targetPlayer.name,
+                teamNameSnapshot: newTeam.name,
+                isActive: true,
+                isCaptain: false,
+                isViceCaptain: false
+            }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    // Vacate a VC seat on the old team
+    await TournamentTeam.updateOne(
+        {
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            teamId: oldTeam._id,
+            viceCaptainID: String(targetPlayer.discordID)
+        },
+        { $set: { viceCaptainID: null } }
+    );
+
+    // Global player record follows only when it pointed at the old team / nowhere
+    if (!targetPlayer.teamId || String(targetPlayer.teamId) === String(oldTeam._id)) {
+        await Player.updateOne(
+            { _id: targetPlayer._id },
             {
                 $set: {
                     teamId: newTeam._id,
-                    tournamentTeamId: newTournamentTeam._id,
                     teamNameSnapshot: newTeam.name,
                     isCaptain: false,
                     isViceCaptain: false
                 }
             }
         );
-
-        updatedTournamentPlayers += result.modifiedCount || 0;
     }
 
-    return { updatedTournamentPlayers };
+    return { updatedTournamentPlayers: tp ? 1 : 0 };
 }
 
 /* ====================================================
@@ -478,7 +509,7 @@ async function completeTransfer({ guild, targetPlayer, oldTeam, newTeam }) {
 function buildTransferEmbed({
     status, targetUser, oldTeam, newTeam,
     oldTeamApprover, oldViceCaptainId, state,
-    rejectedBy, updatedTournamentPlayers
+    rejectedBy, updatedTournamentPlayers, tournamentName
 }) {
     const colors = {
         pending: 0xFEE75C,
@@ -512,7 +543,7 @@ function buildTransferEmbed({
             `${targetUser} has joined **${newTeam.name}**.\n\n` +
             `From: **${oldTeam.name}**\n` +
             `To: **${newTeam.name}**\n` +
-            `Active tournament records updated: **${updatedTournamentPlayers || 0}**`;
+            `Tournament: **${tournamentName || '—'}** • records updated: **${updatedTournamentPlayers || 0}**`;
     }
 
     if (status === 'rejected') {

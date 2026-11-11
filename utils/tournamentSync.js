@@ -23,7 +23,12 @@ async function syncAllTeamsToTournament(guildId, tournament) {
     let syncedPlayers = 0;
 
     for (const team of teams) {
-        const result = await syncTeamToTournament(guildId, tournament, team);
+        // Re-running /settournament repairs roster metadata without bringing
+        // previously withdrawn teams or players back into the tournament.
+        const result = await syncTeamToTournament(guildId, tournament, team, {
+            preserveInactive: true,
+            preserveInactivePlayers: true
+        });
         if (result.teamSynced) syncedTeams++;
         syncedPlayers += result.playersSynced;
     }
@@ -32,14 +37,27 @@ async function syncAllTeamsToTournament(guildId, tournament) {
 }
 
 async function syncTeamToOpenTournaments(guildId, team) {
-    // Manual registration tournaments are excluded — teams join those
-    // explicitly via /register ... tournament:<key>.
-    const tournaments = await TournamentSettings.find({
+    /*
+     * Only the server's DEFAULT tournament is auto-synced. Other tournaments
+     * in the same server keep their own rosters (they are filled explicitly
+     * with /register … tournament:<key> or /addplayer … tournament:<key>),
+     * so a new tournament never inherits an older tournament's teams.
+     *
+     * Manual registration tournaments are excluded as well.
+     */
+    const { getDefaultTournamentKey } = require('./getTournament');
+    const defaultKey = await getDefaultTournamentKey(guildId);
+
+    const query = {
         guildId,
         registrationOpen: true,
         currentPhase: 'registration',
         manualRegistration: { $ne: true }
-    });
+    };
+
+    if (defaultKey) query.tournamentKey = defaultKey;
+
+    const tournaments = await TournamentSettings.find(query);
 
     let syncedTournaments = 0;
     let syncedPlayers = 0;
@@ -53,35 +71,41 @@ async function syncTeamToOpenTournaments(guildId, team) {
     return { syncedTournaments, syncedPlayers };
 }
 
-async function syncTeamToTournament(guildId, tournament, team) {
+async function syncTeamToTournament(guildId, tournament, team, {
+    preserveInactive = false,
+    preserveInactivePlayers = false
+} = {}) {
     if (!tournament || !team) {
         return { teamSynced: false, playersSynced: 0 };
     }
 
-    if (tournament.teamCount > 0) {
+    const teamFilter = {
+        guildId,
+        tournamentId: tournament._id,
+        teamId: team._id
+    };
+    const existingEntry = await TournamentTeam.findOne(teamFilter);
+
+    // Bulk setup sync must not silently undo an organizer's withdrawal. The
+    // explicit /addteamtotournament path still reactivates entries as before.
+    if (preserveInactive && existingEntry?.isActive === false) {
+        return { teamSynced: false, playersSynced: 0, skippedReason: 'team_inactive' };
+    }
+
+    if (tournament.teamCount > 0 && !existingEntry) {
         const currentCount = await TournamentTeam.countDocuments({
             guildId,
             tournamentId: tournament._id,
             isActive: true
         });
 
-        const alreadyExists = await TournamentTeam.findOne({
-            guildId,
-            tournamentId: tournament._id,
-            teamId: team._id
-        });
-
-        if (!alreadyExists && currentCount >= tournament.teamCount) {
+        if (currentCount >= tournament.teamCount) {
             return { teamSynced: false, playersSynced: 0, skippedReason: 'tournament_full' };
         }
     }
 
-    await TournamentTeam.findOneAndUpdate(
-        {
-            guildId,
-            tournamentId: tournament._id,
-            teamId: team._id
-        },
+    const tournamentTeam = await TournamentTeam.findOneAndUpdate(
+        teamFilter,
         {
             $set: {
                 guildId,
@@ -118,8 +142,15 @@ async function syncTeamToTournament(guildId, tournament, team) {
     let playersSynced = 0;
 
     for (const player of players) {
-        await syncPlayerToTournament(guildId, tournament, player, team);
-        playersSynced++;
+        const result = await syncPlayerToTournament(
+            guildId,
+            tournament,
+            player,
+            team,
+            tournamentTeam,
+            { preserveInactive: preserveInactivePlayers }
+        );
+        if (result?.isActive !== false) playersSynced++;
     }
 
     return { teamSynced: true, playersSynced };
@@ -146,20 +177,45 @@ async function syncPlayerToOpenTournaments(guildId, player) {
         // Manual registration tournaments are not touched by auto-sync.
         if (entry.tournamentId.manualRegistration === true) continue;
 
-        await syncPlayerToTournament(guildId, entry.tournamentId, player, team);
+        await syncPlayerToTournament(guildId, entry.tournamentId, player, team, entry);
         syncedTournaments++;
     }
 
     return { syncedTournaments };
 }
 
-async function syncPlayerToTournament(guildId, tournament, player, team) {
-    return TournamentPlayer.findOneAndUpdate(
-        {
+async function syncPlayerToTournament(
+    guildId,
+    tournament,
+    player,
+    team,
+    tournamentTeam = null,
+    { preserveInactive = false } = {}
+) {
+    const filter = {
+        guildId,
+        tournamentId: tournament._id,
+        playerId: player._id
+    };
+
+    if (preserveInactive) {
+        const existingPlayerEntry = await TournamentPlayer.findOne(filter);
+        if (existingPlayerEntry?.isActive === false) return existingPlayerEntry;
+    }
+
+    const entry = tournamentTeam || (team?._id
+        ? await TournamentTeam.findOne({
             guildId,
             tournamentId: tournament._id,
-            playerId: player._id
-        },
+            teamId: team._id
+        })
+        : null);
+    const { captainID, viceCaptainID } = getEffectiveLeadership(team, entry);
+    const isCaptain = sameId(player.discordID, captainID);
+    const isViceCaptain = !isCaptain && sameId(player.discordID, viceCaptainID);
+
+    return TournamentPlayer.findOneAndUpdate(
+        filter,
         {
             $set: {
                 guildId,
@@ -168,7 +224,9 @@ async function syncPlayerToTournament(guildId, tournament, player, team) {
                 teamId: team?._id || player.teamId || null,
                 playerNameSnapshot: player.name,
                 teamNameSnapshot: team?.name || player.teamNameSnapshot || '',
-                isActive: true
+                isActive: true,
+                isCaptain,
+                isViceCaptain
             },
             $setOnInsert: {
                 stats: {
@@ -190,6 +248,19 @@ async function syncPlayerToTournament(guildId, tournament, player, team) {
             setDefaultsOnInsert: true
         }
     );
+}
+
+function getEffectiveLeadership(team, tournamentTeam) {
+    const captainID = tournamentTeam?.captainID || team?.captainID || null;
+    const viceCaptainID = tournamentTeam?.viceCaptainID ||
+        (tournamentTeam?.captainID ? null : team?.viceCaptainID) ||
+        null;
+
+    return { captainID, viceCaptainID };
+}
+
+function sameId(a, b) {
+    return a != null && b != null && String(a) === String(b);
 }
 
 /**
@@ -328,4 +399,4 @@ module.exports = {
     syncPlayerToOpenTournaments,
     syncPlayerToTournament,
     enrollTeamInTournament
-};
+};

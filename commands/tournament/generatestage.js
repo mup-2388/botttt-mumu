@@ -20,7 +20,17 @@ const { Fixture, TournamentTeam } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase } = require('../../utils/displayHelpers');
-const { buildRoundRobinFixtures, buildKnockoutFixtures, getNextMatchNumber } = require('../../utils/fixtureBuilder');
+const {
+    buildRoundRobinFixtures,
+    buildOneMatchPerTeamFixtures,
+    buildKnockoutFixtures,
+    buildStandardKnockoutPairs,
+    getKnockoutRounds,
+    getNextMatchNumber
+} = require('../../utils/fixtureBuilder');
+const { sortTeams } = require('../../utils/standingsHelpers');
+
+const GLORY_CUP_QUALIFIER_COUNT = 8;
 
 module.exports = {
     name: 'generatestage',
@@ -35,11 +45,6 @@ module.exports = {
         .setName('generatestage')
         .setDescription('Generate tournament stage')
         .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Optional tournament key')
-                .setRequired(false)
-        )
-        .addStringOption(opt =>
             opt.setName('stage')
                 .setDescription('Stage to generate')
                 .setRequired(true)
@@ -52,6 +57,11 @@ module.exports = {
         .addBooleanOption(opt =>
             opt.setName('force')
                 .setDescription('Regenerate existing fixtures')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Optional tournament key (default: the default tournament)')
                 .setRequired(false)
         ),
 
@@ -149,6 +159,12 @@ async function runGenerate({ guild, key, stage, force, reply }) {
 
     if (!tournament) return reply({ content: '❌ Tournament not found.' });
 
+    if (tournament.formatType === 'knockout' && stage !== 'knockout') {
+        return reply({
+            content: '❌ Straight knockout tournaments have no league or group stage. Generate the knockout round directly.'
+        });
+    }
+
     const teams = await TournamentTeam.find({
         guildId: guild.id,
         tournamentId: tournament._id,
@@ -183,6 +199,34 @@ async function generateLeague({ guild, tournament, teams, force, reply }) {
         });
     }
 
+    const isGloryCup = tournament.formatType === 'glory_cup';
+    if (isGloryCup && teams.length < GLORY_CUP_QUALIFIER_COUNT) {
+        return reply({
+            content: `❌ Glory Cup needs at least 8 active teams for its top-eight playoffs; found **${teams.length}**. No fixtures were changed.`
+        });
+    }
+
+    if (isGloryCup && teams.length % 2 !== 0) {
+        return reply({
+            content: `❌ Glory Cup's one-match qualifier needs an even number of active teams so every team plays exactly once; found **${teams.length}**. No fixtures were changed.`
+        });
+    }
+
+    if (isGloryCup && existing && force) {
+        const inProgressCount = await Fixture.countDocuments({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            phase: 'league',
+            status: { $in: ['Played', 'Live'] }
+        });
+
+        if (inProgressCount > 0) {
+            return reply({
+                content: `❌ Glory Cup qualifier fixtures were not replaced because **${inProgressCount}** match(es) are live or played. No fixtures were deleted.`
+            });
+        }
+    }
+
     if (existing && force) {
         await Fixture.deleteMany({
             guildId: guild.id,
@@ -191,23 +235,34 @@ async function generateLeague({ guild, tournament, teams, force, reply }) {
         });
     }
 
-    const fixtures = buildRoundRobinFixtures({
-        guildId: guild.id,
-        tournament,
-        teams: normalizeTournamentTeams(teams),
-        phase: 'league',
-        roundPrefix: 'Matchday',
-        groupKey: null,
-        homeAway: tournament.homeAway,
-        startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
-    });
+    const normalizedTeams = normalizeTournamentTeams(teams);
+    const fixtures = isGloryCup
+        ? buildOneMatchPerTeamFixtures({
+            guildId: guild.id,
+            tournament,
+            teams: normalizedTeams,
+            phase: 'league',
+            roundLabel: 'Matchday 1',
+            startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
+        })
+        : buildRoundRobinFixtures({
+            guildId: guild.id,
+            tournament,
+            teams: normalizedTeams,
+            phase: 'league',
+            roundPrefix: 'Matchday',
+            groupKey: null,
+            homeAway: tournament.homeAway,
+            startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
+        });
 
     await Fixture.insertMany(fixtures);
 
     tournament.currentPhase = 'league';
     await tournament.save();
 
-    return successReply(reply, tournament, '🏟️ LEAGUE GENERATED', fixtures.length);
+    const title = isGloryCup ? '🏆 GLORY CUP QUALIFIERS GENERATED' : '🏟️ LEAGUE GENERATED';
+    return successReply(reply, tournament, title, fixtures.length);
 }
 
 /* ====================================================
@@ -295,38 +350,65 @@ async function generateGroups({ guild, tournament, teams, force, reply }) {
 ==================================================== */
 
 async function generateKnockout({ guild, tournament, teams, force, reply }) {
-    if (!tournament.hasKnockout) {
+    const isStraightKnockout = tournament.formatType === 'knockout';
+    if (!tournament.hasKnockout && !isStraightKnockout) {
         return reply({ content: '❌ This tournament has no knockout stage enabled.' });
     }
 
-    const round = resolveNextKnockoutRound(tournament);
+    const straightRounds = isStraightKnockout ? getKnockoutRounds(teams.length) : [];
+    if (isStraightKnockout && !straightRounds.length) {
+        return reply({
+            content:
+                `❌ Straight knockout needs a power-of-two field of 2–16 active teams ` +
+                `(2, 4, 8, or 16); found **${teams.length}**. No fixtures were changed.`
+        });
+    }
 
+    const round = isStraightKnockout
+        ? straightRounds[0]
+        : resolveNextKnockoutRound(tournament, teams.length);
     if (!round) {
         return reply({ content: '❌ No knockout round found in tournament settings.' });
     }
 
-    const existing = await Fixture.countDocuments({
+    const existingFilter = {
         guildId: guild.id,
         tournamentId: tournament._id,
-        phase: round
-    });
+        ...(isStraightKnockout ? {} : { phase: round })
+    };
+    const existing = await Fixture.countDocuments(existingFilter);
 
     if (existing && !force) {
         return reply({
-            content: `❌ ${prettyPhase(round)} fixtures already exist: **${existing}**. Use \`--force\`.`
+            content: isStraightKnockout
+                ? `❌ Fixtures already exist for this straight-knockout tournament: **${existing}**. Use \`--force\` to replace the schedule.`
+                : `❌ ${prettyPhase(round)} fixtures already exist: **${existing}**. Use \`--force\`.`
         });
     }
 
-    if (existing && force) {
-        await Fixture.deleteMany({
+    if (isStraightKnockout && existing && force) {
+        const inProgressCount = await Fixture.countDocuments({
             guildId: guild.id,
             tournamentId: tournament._id,
-            phase: round
+            status: { $in: ['Played', 'Live'] }
         });
+
+        if (inProgressCount > 0) {
+            return reply({
+                content: `❌ Straight-knockout fixtures were not replaced because **${inProgressCount}** match(es) are live or played. No fixtures were deleted.`
+            });
+        }
     }
 
-    /* ── Get qualified teams sorted by standings ── */
-    const qualified = await getQualifiedTeams({ tournament, teams });
+    const qualified = isStraightKnockout
+        ? normalizeTournamentTeams(sortTeams(teams))
+        : await getQualifiedTeams({ tournament, teams });
+
+    if (tournament.formatType === 'glory_cup' && qualified.length !== GLORY_CUP_QUALIFIER_COUNT) {
+        return reply({
+            content: `❌ Glory Cup knockouts require 8 active teams; found **${qualified.length}**.`
+        });
+    }
 
     if (qualified.length < 2 || qualified.length % 2 !== 0) {
         return reply({
@@ -334,13 +416,52 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
         });
     }
 
-    /* ── Pair up teams ── */
-    const pairs = [];
-    for (let i = 0; i < qualified.length; i += 2) {
-        pairs.push([qualified[i], qualified[i + 1]]);
+    if (tournament.formatType === 'glory_cup') {
+        if (teams.length % 2 !== 0) {
+            return reply({
+                content: `❌ Glory Cup needs an even number of active teams so everyone can play one qualifier match; found **${teams.length}**.`
+            });
+        }
+
+        const expectedQualifiers = teams.length / 2;
+        const qualifierFilter = {
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            phase: 'league'
+        };
+        const [qualifierFixtureCount, playedQualifierCount] = await Promise.all([
+            Fixture.countDocuments(qualifierFilter),
+            Fixture.countDocuments({ ...qualifierFilter, status: 'Played' })
+        ]);
+
+        if (qualifierFixtureCount !== expectedQualifiers || playedQualifierCount !== expectedQualifiers) {
+            return reply({
+                content:
+                    `❌ Glory Cup knockouts are locked until every active team has played its single qualifier match. ` +
+                    `Expected **${expectedQualifiers}** qualifier fixture(s), found **${qualifierFixtureCount}**, ` +
+                    `played **${playedQualifierCount}/${expectedQualifiers}**.`
+            });
+        }
     }
 
-    const isTwoLegged =
+    const pairs = isStraightKnockout
+        ? buildStandardKnockoutPairs(qualified)
+        : tournament.formatType === 'glory_cup'
+            ? [
+                [qualified[0], qualified[7]], // 1 v 8
+                [qualified[3], qualified[4]], // 4 v 5
+                [qualified[1], qualified[6]], // 2 v 7
+                [qualified[2], qualified[5]]  // 3 v 6
+            ]
+            : [];
+
+    if (!isStraightKnockout && tournament.formatType !== 'glory_cup') {
+        for (let i = 0; i < qualified.length; i += 2) {
+            pairs.push([qualified[i], qualified[i + 1]]);
+        }
+    }
+
+    const isTwoLegged = !isStraightKnockout &&
         Array.isArray(tournament.twoLeggedRounds) &&
         tournament.twoLeggedRounds.includes(round);
 
@@ -350,12 +471,30 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
         phase: round,
         pairs,
         twoLegged: isTwoLegged,
-        startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
+        startMatchNumber: isStraightKnockout
+            ? 1
+            : await getNextMatchNumber(guild.id, tournament._id)
     });
+
+    // Validate and build the replacement bracket before deleting the old one.
+    if (existing && force) {
+        await Fixture.deleteMany(isStraightKnockout
+            ? { guildId: guild.id, tournamentId: tournament._id }
+            : { guildId: guild.id, tournamentId: tournament._id, phase: round });
+    }
 
     await Fixture.insertMany(fixtures);
 
     tournament.currentPhase = 'knockout';
+    if (isStraightKnockout) {
+        tournament.groupCount = 0;
+        tournament.teamsPerGroup = 0;
+        tournament.homeAway = false;
+        tournament.hasKnockout = true;
+        tournament.knockoutRounds = straightRounds;
+        tournament.twoLeggedRounds = [];
+        tournament.teamCount = teams.length;
+    }
     await tournament.save();
 
     return successReply(reply, tournament, `🏆 ${prettyPhase(round).toUpperCase()} GENERATED`, fixtures.length);
@@ -375,7 +514,11 @@ function normalizeTournamentTeams(teams) {
 }
 
 /** Determine the next knockout round from tournament config or derived from qualified teams. */
-function resolveNextKnockoutRound(tournament) {
+function resolveNextKnockoutRound(tournament, teamCount = null) {
+    if (tournament.formatType === 'knockout') {
+        return getKnockoutRounds(teamCount || tournament.teamCount)[0] || null;
+    }
+
     const rounds = Array.isArray(tournament.knockoutRounds)
         ? tournament.knockoutRounds
         : [];
@@ -390,10 +533,12 @@ function resolveNextKnockoutRound(tournament) {
 
 /**
  * Derive the number of qualified teams from tournament settings.
- * For groups_knockout format: groupCount * qualificationSpotsPerGroup
- * Otherwise: teamCount or 4
+ * Glory Cup always qualifies the top 8; groups_knockout uses
+ * groupCount * qualificationSpotsPerGroup; other formats use teamCount or 4.
  */
 function deriveQualifiedCount(tournament) {
+    if (tournament.formatType === 'glory_cup') return GLORY_CUP_QUALIFIER_COUNT;
+
     if (tournament.formatType === 'groups_knockout' && tournament.groupCount > 0) {
         return tournament.groupCount * (tournament.qualificationSpotsPerGroup || 2);
     }
@@ -425,6 +570,16 @@ function deriveKnockoutRounds(qualifiedTeamCount) {
 
 /** Get qualified teams sorted by standings (points → GD → GF), with cross-group seeding. */
 async function getQualifiedTeams({ tournament, teams }) {
+    if (tournament.formatType === 'glory_cup') {
+        return sortTeams(teams)
+            .slice(0, GLORY_CUP_QUALIFIER_COUNT)
+            .map(entry => ({
+                tournamentTeamId: entry._id,
+                teamId: entry.teamId?._id || entry.teamId,
+                name: entry.teamId?.name || entry.teamNameSnapshot
+            }));
+    }
+
     const groupKeys = [...new Set(teams.map(t => t.groupKey).filter(Boolean))].sort();
     const spotsPerGroup = tournament.qualificationSpotsPerGroup || 2;
 

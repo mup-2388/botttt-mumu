@@ -12,6 +12,7 @@
 
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { generateBracketEmbed } = require('./sendbracket');
+const { extractTournamentFromArgs } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'bracket',
@@ -34,9 +35,17 @@ module.exports = {
        PREFIX
     ================================================ */
 
-    async execute(message, args) {
+    async execute(message, args = []) {
         try {
-            const key = args[0]?.toLowerCase() || null;
+            const parsed = await extractTournamentFromArgs(message.guild.id, args);
+
+            if (parsed.explicit && parsed.error) {
+                return message.reply(parsed.error);
+            }
+
+            // No key → the server's default tournament (already resolved for us)
+            const key = parsed.tournament?.tournamentKey || null;
+
             const embed = await generateBracketEmbed(message.guild.id, key);
             return message.reply({ embeds: [embed] });
         } catch (error) {

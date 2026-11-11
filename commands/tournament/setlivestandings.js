@@ -185,12 +185,23 @@ async function runSetup({
         messageId: loading.id
     });
 
-    await updateLiveStandings(
+    const liveUpdated = await updateLiveStandings(
         client,
         guild.id,
         tournament.tournamentKey,
         groupKey
     );
+
+    if (!liveUpdated) {
+        await LiveMessage.findOneAndDelete({
+            guildId: guild.id,
+            type: 'standings',
+            tournamentKey: tournament.tournamentKey,
+            groupKey: groupKey || null
+        }).catch(() => null);
+        await loading.edit('❌ Could not initialize live standings. Check the bot’s channel permissions and try again.').catch(() => null);
+        return reply({ content: '❌ Could not initialize live standings. No live record was kept.' });
+    }
 
     const embed = new EmbedBuilder()
         .setColor(0x2ECC71)

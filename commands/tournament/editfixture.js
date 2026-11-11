@@ -19,6 +19,7 @@ const {
 const { Fixture } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { vsLine, slotEmoji } = require('../../utils/ai/emojiSlots');
 
 module.exports = {
     name: 'editfixture',
@@ -172,11 +173,11 @@ async function runEditFixture({ guild, key, matchNumber, date, venue, venueType,
             `${tournament.emoji || '🏆'} Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
             `Match #**${fixture.matchNumber}**\n` +
-            `**${fixture.homeTeam} vs ${fixture.awayTeam}**`
+            `**${vsLine(fixture.homeTeam, fixture.awayTeam, guild.id)}**`
         )
         .addFields(
             {
-                name: 'Schedule',
+                name: `${slotEmoji('calendar', guild.id)} Schedule`,
                 value: fixture.scheduledAt
                     ? `<t:${Math.floor(new Date(fixture.scheduledAt).getTime() / 1000)}:F>`
                     : 'Not scheduled',

@@ -4,9 +4,13 @@
  * Change a team name safely across all collections.
  * Captains/VCs can rename their own team; organizers can rename any team.
  *
- * Usage:  .ctn <new name>
+ * Inside the server's DEFAULT tournament unless `tournament=<key>` is given:
+ * captains can only rename the team they lead there, and organizers only teams
+ * registered there.
+ *
+ * Usage:  .ctn <new name> [tournament=<key>]
  *         .ctn <old name> => <new name>   (organizer only)
- * Slash:  /changeteamname new_name:<name> [old_name:<name>]
+ * Slash:  /changeteamname new_name:<name> [old_name:<name>] [tournament:<key>]
  *
  * Aliases: ctn, renameteam
  */
@@ -28,11 +32,19 @@ const {
 
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { escapeRegex } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const {
+    effectiveCaptainId,
+    effectiveViceCaptainId,
+    findTeamInTournamentByName,
+    getTournamentTeams,
+    sameId
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'changeteamname',
     description: 'Change a team name safely.',
-    usage: '.ctn <new name> OR .ctn <old name> => <new name>',
+    usage: '.ctn <new name> OR .ctn <old name> => <new name> [tournament=<key>]',
     aliases: ['ctn', 'renameteam'],
     hidden: false,
     cooldown: 5,
@@ -50,6 +62,11 @@ module.exports = {
             opt.setName('old_name')
                 .setDescription('Old team name (organizer only). Captains can omit this.')
                 .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -60,21 +77,27 @@ module.exports = {
         try {
             if (!message.guild) return;
 
-            if (!args.length) {
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            if (!parsedKey.rest.length) {
                 return message.reply(
                     '❌ Usage:\n' +
-                    'Captain: `.ctn <new name>`\n' +
-                    'Organizer: `.ctn <old name> => <new name>`'
+                    'Captain: `.ctn <new name> [tournament=<key>]`\n' +
+                    'Organizer: `.ctn <old name> => <new name> [tournament=<key>]`'
                 );
             }
 
-            const parsed = parsePrefixArgs(args);
+            const parsed = parsePrefixArgs(parsedKey.rest);
 
             return await runChangeTeamName({
                 guild: message.guild,
                 actorId: message.author.id,
                 oldName: parsed.oldName,
                 newName: parsed.newName,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -96,6 +119,7 @@ module.exports = {
                 actorId: interaction.user.id,
                 oldName: interaction.options.getString('old_name'),
                 newName: interaction.options.getString('new_name'),
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -119,10 +143,14 @@ module.exports = {
 
 /**
  * Rename a team across all collections.
- * - If oldName is provided: organizer-only path.
- * - If oldName is omitted: auto-detect from actor's team (captain/VC only).
+ * - If oldName is provided: organizer-only path (team must be in the tournament).
+ * - If oldName is omitted: auto-detect from actor's team IN THE TOURNAMENT
+ *   (captain / vice captain only).
+ *
+ * The Team document is server-wide, so the new name is also written to the
+ * tournament snapshots (Teams/Players/Fixtures) that reference it.
  */
-async function runChangeTeamName({ guild, actorId, oldName, newName, reply }) {
+async function runChangeTeamName({ guild, actorId, oldName, newName, tournamentKey = null, reply }) {
     const cleanNewName = normalizeName(newName);
 
     /* ── Validate new name ── */
@@ -140,44 +168,62 @@ async function runChangeTeamName({ guild, actorId, oldName, newName, reply }) {
         return reply({ content: `❌ A team named **${cleanNewName}** already exists.` });
     }
 
+    /* ── Resolve the tournament ── */
+    const resolved = await resolveTournament(guild.id, tournamentKey);
+    if (!resolved.tournament) return reply({ content: resolved.error });
+
+    const tournament = resolved.tournament;
+
     /* ── Resolve which team to rename ── */
     let team = null;
     const organizer = await isOrganizer(guild.id, actorId);
 
+    // All teams registered in this tournament: { entry, team }
+    const tournamentTeams = await getTournamentTeams(guild.id, tournament);
+
     if (oldName) {
-        // Organizer path — rename any team
+        // Organizer path — rename any team that is in this tournament
         if (!organizer) {
             return reply({ content: '❌ Only organizers can rename another team by old name.' });
         }
 
-        team = await Team.findOne({
-            guildId: guild.id,
-            name: { $regex: new RegExp(`^${escapeRegex(normalizeName(oldName))}$`, 'i') }
-        });
+        const wanted = normalizeName(oldName).toLowerCase();
+        const found =
+            tournamentTeams.find(x => x.team.name.toLowerCase() === wanted) ||
+            (await findTeamInTournamentByName(guild.id, tournament, oldName));
+
+        if (!found) {
+            return reply({
+                content: `❌ Team \`${oldName}\` is not registered in **${tournament.name}** (\`${tournament.tournamentKey}\`).`
+            });
+        }
+
+        team = found.team;
     } else {
-        // Captain/VC path — rename own team
-        const captainPlayer = await Player.findOne({
-            guildId: guild.id,
-            discordID: actorId
-        }).populate('teamId');
+        // Captain/VC path — rename the team they lead in THIS tournament
+        const mine = tournamentTeams.filter(x =>
+            sameId(effectiveCaptainId(x.entry, x.team), actorId) ||
+            sameId(effectiveViceCaptainId(x.entry, x.team), actorId)
+        );
 
-        if (!captainPlayer?.teamId) {
-            return reply({ content: '❌ You are not linked to any team.' });
+        if (!mine.length) {
+            return reply({
+                content:
+                    `❌ You are not the captain or vice captain of a team in **${tournament.name}**.` +
+                    (resolved.explicit ? '' : '\nManaging a team in another tournament? Add `tournament=<key>`.')
+            });
         }
 
-        team = captainPlayer.teamId;
-
-        const isCaptain =
-            String(team.captainID) === String(actorId) ||
-            captainPlayer.isCaptain;
-
-        const isViceCaptain =
-            String(team.viceCaptainID) === String(actorId) ||
-            captainPlayer.isViceCaptain;
-
-        if (!isCaptain && !isViceCaptain) {
-            return reply({ content: '❌ Only the team captain or vice captain can rename their team.' });
+        if (mine.length > 1) {
+            const list = mine.map(x => `• **${x.team.name}**`).join('\n');
+            return reply({
+                content:
+                    `🤔 You manage more than one team in **${tournament.name}**:\n${list}\n\n` +
+                    'Organizer form: `.ctn <old name> => <new name>`'
+            });
         }
+
+        team = mine[0].team;
     }
 
     if (!team) {
@@ -198,55 +244,42 @@ async function runChangeTeamName({ guild, actorId, oldName, newName, reply }) {
         { $set: { teamNameSnapshot: cleanNewName } }
     );
 
-    /* ── Update active tournament data ── */
-    const activeTournaments = await TournamentSettings.find({
-        guildId: guild.id,
-        currentPhase: { $ne: 'completed' }
-    }).select('_id').lean();
+    /* ── Update the SAME tournament's records ── */
+    const ttResult = await TournamentTeam.updateMany(
+        { guildId: guild.id, tournamentId: tournament._id, teamId: team._id },
+        { $set: { teamNameSnapshot: cleanNewName } }
+    );
 
-    const activeTournamentIds = activeTournaments.map(t => t._id);
-    let tournamentTeamsUpdated = 0;
-    let tournamentPlayersUpdated = 0;
-    let fixturesUpdated = 0;
+    const tpResult = await TournamentPlayer.updateMany(
+        { guildId: guild.id, tournamentId: tournament._id, teamId: team._id },
+        { $set: { teamNameSnapshot: cleanNewName } }
+    );
 
-    if (activeTournamentIds.length) {
-        const ttResult = await TournamentTeam.updateMany(
-            { guildId: guild.id, tournamentId: { $in: activeTournamentIds }, teamId: team._id },
-            { $set: { teamNameSnapshot: cleanNewName } }
-        );
-        tournamentTeamsUpdated = ttResult.modifiedCount || 0;
+    const homeResult = await Fixture.updateMany(
+        { guildId: guild.id, tournamentId: tournament._id, homeTeamId: team._id },
+        { $set: { homeTeam: cleanNewName } }
+    );
 
-        const tpResult = await TournamentPlayer.updateMany(
-            { guildId: guild.id, tournamentId: { $in: activeTournamentIds }, teamId: team._id },
-            { $set: { teamNameSnapshot: cleanNewName } }
-        );
-        tournamentPlayersUpdated = tpResult.modifiedCount || 0;
+    const awayResult = await Fixture.updateMany(
+        { guildId: guild.id, tournamentId: tournament._id, awayTeamId: team._id },
+        { $set: { awayTeam: cleanNewName } }
+    );
 
-        // Update fixture home/away name snapshots
-        const homeResult = await Fixture.updateMany(
-            { guildId: guild.id, tournamentId: { $in: activeTournamentIds }, homeTeamId: team._id },
-            { $set: { homeTeam: cleanNewName } }
-        );
-
-        const awayResult = await Fixture.updateMany(
-            { guildId: guild.id, tournamentId: { $in: activeTournamentIds }, awayTeamId: team._id },
-            { $set: { awayTeam: cleanNewName } }
-        );
-
-        fixturesUpdated =
-            (homeResult.modifiedCount || 0) +
-            (awayResult.modifiedCount || 0);
-    }
+    const fixturesUpdated =
+        (homeResult.modifiedCount || 0) + (awayResult.modifiedCount || 0);
 
     /* ── Response ── */
     const embed = new EmbedBuilder()
         .setColor(0x57F287)
         .setTitle('✅ Team Name Changed')
-        .setDescription(`**${oldTeamName}** → **${cleanNewName}**`)
+        .setDescription(
+            `Tournament: **${tournament.name}**\n` +
+            `**${oldTeamName}** → **${cleanNewName}**`
+        )
         .setFooter({
             text:
-                `Tournament teams: ${tournamentTeamsUpdated} • ` +
-                `Tournament players: ${tournamentPlayersUpdated} • ` +
+                `Tournament teams: ${ttResult.modifiedCount || 0} • ` +
+                `Tournament players: ${tpResult.modifiedCount || 0} • ` +
                 `Fixtures: ${fixturesUpdated}`
         })
         .setTimestamp();

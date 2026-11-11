@@ -19,12 +19,15 @@ const {
 } = require('discord.js');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { parseTeamToken, resolveManagedTeam } = require('../../utils/teamResolver');
+const { ServerConfig } = require('../../models/Tournament');
+const { resolveManagedTeamInTournament } = require('../../utils/teamResolver');
+const { extractTournamentFromArgs, resolveTournament } = require('../../utils/getTournament');
+const { parseTeamTokenInTournament } = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'setcolor',
     description: 'Set your team color, or set any team color as organizer.',
-    usage: '.setcolor [team=<name>] <color name OR hex> | Organizer: .setcolor <team name> <color>',
+    usage: '.setcolor [team=<name>] <color name OR hex> [tournament=<key>] | Organizer: .setcolor <team name> <color>',
     aliases: ['teamcolor'],
     hidden: false,
     cooldown: 5,
@@ -40,6 +43,11 @@ module.exports = {
         .addStringOption(opt =>
             opt.setName('team')
                 .setDescription('Team name (captain: one of your teams • organizer: any team)')
+                .setRequired(false)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
                 .setRequired(false)
         ),
 
@@ -67,14 +75,31 @@ module.exports = {
             let colorInput;
             let teamName;
 
+            // Optional tournament=<key> token (never a loose word)
+            const parsedKey = await extractTournamentFromArgs(guildId, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const resolvedTournament = await resolveTournament(
+                guildId,
+                parsedKey.explicit ? parsedKey.tournament.tournamentKey : null
+            );
+            if (!resolvedTournament.tournament) {
+                return message.reply(resolvedTournament.error);
+            }
+            const tournament = resolvedTournament.tournament;
+
             if (organizer) {
                 // Organizer: last arg is the color, the rest is the team name
-                colorInput = args[args.length - 1];
-                teamName = args.length > 1 ? args.slice(0, -1).join(' ').trim() : null;
+                colorInput = parsedKey.rest[parsedKey.rest.length - 1];
+                teamName = parsedKey.rest.length > 1
+                    ? parsedKey.rest.slice(0, -1).join(' ').trim()
+                    : null;
             } else {
                 // Captain: optional team= token, last remaining arg is the color
-                const token = await parseTeamToken(guildId, userId, args);
-                const rest = token.teamName ? token.rest : args;
+                const token = await parseTeamTokenInTournament(guildId, tournament, parsedKey.rest);
+                const rest = token.teamName ? token.rest : parsedKey.rest;
 
                 if (!rest.length) {
                     return message.reply(
@@ -94,6 +119,7 @@ module.exports = {
                 organizer,
                 teamName,
                 colorInput,
+                tournament,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -118,6 +144,7 @@ module.exports = {
                 organizer,
                 teamName: interaction.options.getString('team'),
                 colorInput: interaction.options.getString('color'),
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -185,13 +212,37 @@ function parseColorInput(input) {
  * Set a team's color.
  * Team resolution via resolveManagedTeam (organizer: any, captain: own teams).
  */
-async function runSetColor({ guild, userId, organizer, teamName, colorInput, reply }) {
-    const resolved = await resolveManagedTeam({
+async function runSetColor({ guild, userId, organizer, teamName, colorInput, tournament = null, tournamentKey = null, reply }) {
+    const serverConfig = await ServerConfig.findOne({ guildId: guild.id }).lean();
+    if (serverConfig?.teamRoleColorsEnabled === false) {
+        return reply({
+            content:
+                '🎨 Team-role color changes are disabled in this server. Existing role colors are being preserved. ' +
+                'An organizer can re-enable them with `.teamrolecolors on`.'
+        });
+    }
+
+    if (!tournament) {
+        const r = await resolveTournament(guild.id, tournamentKey);
+        if (!r.tournament) return reply({ content: r.error });
+        tournament = r.tournament;
+    }
+
+    const resolved = await resolveManagedTeamInTournament({
         guildId: guild.id,
+        tournament,
         userId,
         organizer,
         teamName
     });
+
+    if (resolved.status === 'none') {
+        return reply({
+            content:
+                `❌ You are not the captain or vice captain of a team in **${tournament.name}**.` +
+                (tournamentKey ? '' : '\nManaging a team in another tournament? Add `tournament=<key>`.')
+        });
+    }
 
     if (resolved.status === 'ambiguous') {
         const list = resolved.teams.map(t => `• **${t.name}**`).join('\n');
@@ -251,4 +302,4 @@ async function runSetColor({ guild, userId, organizer, teamName, colorInput, rep
     return reply({ embeds: [embed] });
 }
 
-
+module.exports.runSetColor = runSetColor;

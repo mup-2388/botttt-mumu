@@ -1,6 +1,6 @@
 // services/tournament/fixtureService.js
 
-const { Fixture } = require('../../models/Tournament');
+const { Fixture } = require('./Tournament');
 
 async function createFixture(data) {
   return Fixture.create(data);

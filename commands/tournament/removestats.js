@@ -34,7 +34,7 @@ const { isOrganizer } = require('../../utils/isOrganizer');
 module.exports = {
     name: 'removestats',
     description: 'Remove raw match stats from a tournament.',
-    usage: '.removestats <key> [raw stats]',
+    usage: '.removestats [key] [raw stats]',
     aliases: ['rs', 'undostats'],
     hidden: false,
     cooldown: 3,
@@ -44,14 +44,14 @@ module.exports = {
         .setName('removestats')
         .setDescription('Remove raw stats from tournament players')
         .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
-        .addStringOption(opt =>
             opt.setName('stats')
                 .setDescription('Raw stats text (discordID, goals, assists, interceptions, tackles, saves)')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -120,7 +120,7 @@ module.exports = {
 
             await interaction.deferReply({ ephemeral: true });
 
-            const tournamentKey = interaction.options.getString('key').toLowerCase();
+            const tournamentKey = interaction.options.getString('key')?.toLowerCase() || null;
             const rawText = interaction.options.getString('stats');
 
             if (!rawText) {
@@ -130,7 +130,9 @@ module.exports = {
             const tournament = await resolveTournament(interaction.guild.id, tournamentKey);
 
             if (!tournament) {
-                return interaction.editReply(`❌ Tournament \`${tournamentKey}\` not found.`);
+                return interaction.editReply(
+                    '❌ Tournament not found. Set a default tournament or pass a key.'
+                );
             }
 
             return await runRemoveStats({

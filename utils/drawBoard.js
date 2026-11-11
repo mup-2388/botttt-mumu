@@ -16,6 +16,7 @@ const {
 } = require('discord.js');
 
 const { prettyPhase } = require('./displayHelpers');
+const { vsLine } = require('./ai/emojiSlots');
 
 const DRAW_EMOJI = '🎴';
 
@@ -73,7 +74,7 @@ function buildPublicDrawEmbed(session) {
             {
                 name: 'Completed Ties',
                 value: session.ties.length
-                    ? session.ties.map(t => `**Tie ${t.tieNumber}:** ${t.team1.name} vs ${t.team2.name}`).join('\n')
+                    ? session.ties.map(t => `**Tie ${t.tieNumber}:** ${vsLine(t.team1.name, t.team2.name, session.guildId)}`).join('\n')
                     : '—',
                 inline: false
             },

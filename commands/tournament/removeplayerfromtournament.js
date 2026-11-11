@@ -23,12 +23,13 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 const { getUserFromArgs } = require('../../utils/stringHelpers');
 
 module.exports = {
     name: 'removeplayerfromtournament',
     description: 'Remove a player from a tournament.',
-    usage: '.removeplayerfromtournament <key> @user',
+    usage: '.removeplayerfromtournament [key] @user',
     aliases: ['rptt', 'removetournamentplayer'],
     hidden: false,
     cooldown: 5,
@@ -37,15 +38,15 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('removeplayerfromtournament')
         .setDescription('Remove a player from a tournament')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
         .addUserOption(opt =>
             opt.setName('user')
                 .setDescription('Player user')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -60,22 +61,32 @@ module.exports = {
                 return message.reply('🚫 You are not authorized.');
             }
 
-            const user = message.mentions.users.first()
-                || await getUserFromArgs(message, args.slice(1));
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
 
-            if (!args.length || !user) {
-                return message.reply('❓ Usage: `.removeplayerfromtournament <key> @user`');
+            const user = message.mentions.users.first()
+                || await getUserFromArgs(message, parsedKey.rest);
+
+            if (!user) {
+                return message.reply(
+                    '❓ Usage: `.removeplayerfromtournament [key] @user`\n' +
+                    'Without a key the server default tournament is used.'
+                );
             }
 
             return await runRemove({
                 guild: message.guild,
-                tournamentKey: args[0].toLowerCase(),
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 discordID: user.id,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
             console.error('[removeplayerfromtournament] prefix error:', error);
-            return message.reply('❌ Failed to remove player.');
+            return message.reply(
+                '❌ Failed to remove player.\n`' + String(error?.message || error).slice(0, 200) + '`'
+            );
         }
     },
 
@@ -93,18 +104,25 @@ module.exports = {
 
             return await runRemove({
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 discordID: interaction.options.getUser('user').id,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
             console.error('[removeplayerfromtournament] slash error:', error);
 
+            const reason = String(error?.message || error).slice(0, 200);
+
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ Failed to remove player.');
+                return interaction.editReply(
+                    '❌ Failed to remove player.\n`' + reason + '`'
+                );
             }
 
-            return interaction.reply({ content: '❌ Failed to remove player.', ephemeral: true });
+            return interaction.reply({
+                content: '❌ Failed to remove player.\n`' + reason + '`',
+                ephemeral: true
+            });
         }
     }
 };
@@ -115,14 +133,13 @@ module.exports = {
 
 /** Deactivate a player's tournament entry. Does not delete the global player. */
 async function runRemove({ guild, tournamentKey, discordID, reply }) {
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     const player = await Player.findOne({
         guildId: guild.id,
@@ -130,21 +147,44 @@ async function runRemove({ guild, tournamentKey, discordID, reply }) {
     });
 
     if (!player) {
-        return reply({ content: '❌ Global player profile not found.' });
+        return reply({
+            content: 'ℹ️ No global player profile for that user — nothing to remove.'
+        });
     }
 
     const updated = await TournamentPlayer.findOneAndUpdate(
         {
             guildId: guild.id,
             tournamentId: tournament._id,
-            playerId: player._id
+            playerId: player._id,
+            isActive: { $ne: false }
         },
         { $set: { isActive: false } },
         { new: true }
     );
 
+    /* Already removed / never registered: report the true state instead of
+       "failed" — running the command twice must not look like an error. */
     if (!updated) {
-        return reply({ content: `❌ ${player.name} is not in this tournament.` });
+        const entry = await TournamentPlayer.findOne({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            playerId: player._id
+        })
+            .lean()
+            .catch(() => null);
+
+        if (entry) {
+            return reply({
+                content:
+                    `ℹ️ **${player.name}** is already removed from **${tournament.name}** — nothing changed.`
+            });
+        }
+
+        return reply({
+            content:
+                `ℹ️ **${player.name}** is not part of **${tournament.name}** — nothing to remove.`
+        });
     }
 
     const embed = new EmbedBuilder()

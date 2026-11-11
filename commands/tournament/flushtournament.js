@@ -38,11 +38,12 @@ const {
 
 const { getDrawKey } = require('../../utils/drawBoard');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'flushtournament',
     description: 'Flush a tournament (remove all teams/players, force manual registration).',
-    usage: '.flushtournament <tournamentKey> --confirm',
+    usage: '.flushtournament [tournamentKey] --confirm  (key omitted = default tournament)',
     aliases: ['fflush', 'tflush'],
     hidden: false,
     cooldown: 5,
@@ -51,16 +52,17 @@ module.exports = {
     data: new SlashCommandBuilder()
         .setName('flushtournament')
         .setDescription('Flush a tournament and force manual registration')
-        .addStringOption(opt =>
-            opt.setName('key')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
         .addBooleanOption(opt =>
             opt.setName('confirm')
                 .setDescription('Required safety confirmation')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('key')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
+
 
     /* ================================================
        PREFIX
@@ -112,7 +114,7 @@ module.exports = {
             return await runFlush({
                 client: interaction.client,
                 guild: interaction.guild,
-                tournamentKey: interaction.options.getString('key').toLowerCase(),
+                tournamentKey: interaction.options.getString('key')?.toLowerCase() || null,
                 confirm: interaction.options.getBoolean('confirm'),
                 actorTag: interaction.user.tag,
                 reply: payload => interaction.editReply(payload)
@@ -137,18 +139,14 @@ module.exports = {
 ==================================================== */
 
 function parsePrefixArgs(args) {
-    if (!args.length) {
-        return {
-            ok: false,
-            error:
-                '❌ Usage:\n' +
-                '`.flushtournament <tournamentKey> --confirm`\n\n' +
-                'Example: `.flushtournament league-s2 --confirm`'
-        };
-    }
-
-    const tournamentKey = args[0].toLowerCase();
     const confirm = args.includes('--confirm');
+
+    const keyToken = args.find(a => /^(tournament|key)=/i.test(a));
+    const loose = args.find(a => !a.startsWith('--') && !/^(tournament|key)=/i.test(a));
+
+    const tournamentKey = (
+        keyToken ? keyToken.split('=')[1] : loose
+    )?.trim().toLowerCase() || null;
 
     return { ok: true, tournamentKey, confirm };
 }
@@ -183,16 +181,13 @@ async function runFlush({
         });
     }
 
-    const tournament = await TournamentSettings.findOne({
-        guildId: guild.id,
-        tournamentKey
-    });
+    const resolved = await resolveTournament(guild.id, tournamentKey);
 
-    if (!tournament) {
-        return reply({
-            content: `❌ Tournament \`${tournamentKey}\` not found.`
-        });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
     }
+
+    const tournament = resolved.tournament;
 
     /* ── 1. Remove every team entry ── */
     const teamResult = await TournamentTeam.deleteMany({

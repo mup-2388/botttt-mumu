@@ -33,13 +33,16 @@ const {
 } = require('../../utils/getTournament');
 
 const { prettyPhase } = require('../../utils/displayHelpers');
+const { slotEmoji, vsLine } = require('../../utils/ai/emojiSlots');
+const { isReserved, reservedBadge } = require('../../utils/reservedMatches');
+const { resolveUserTeam } = require('../../utils/tournamentContext');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 const PAGE_SIZE = 4;
 
 module.exports = {
     name: 'nextmatch',
-    aliases: ['nm', 'fixtures', 'schedule'],
+    aliases: ['nm', 'fixtures'],
     description: 'Shows a paginated team schedule with next match info.',
     usage: '.nm [team name]',
     hidden: false,
@@ -109,15 +112,18 @@ async function runNextMatch({
     teamNameInput,
     reply
 }) {
-    const team = await resolveTeam({ guild, userId, teamNameInput });
+    const resolvedTeam = await resolveTeamForUser({ guild, userId, teamNameInput });
 
-    if (!team) {
+    if (!resolvedTeam?.team) {
         return reply({
             content: teamNameInput
                 ? `🚫 Team not found: \`${teamNameInput}\`.`
-                : '❌ You are not linked to a team. Use `.nm <Team Name>`.'
+                : '❌ You are not linked to a team yet.\n' +
+                  'Use `.nm <Team Name>` to see a team\'s fixtures (e.g. `.nm Reds`).'
         });
     }
+
+    const team = resolvedTeam.team;
 
     const tournaments = await getSelectableTournaments(guild.id);
 
@@ -125,7 +131,9 @@ async function runNextMatch({
         return reply({ content: '📭 No active tournaments found.' });
     }
 
-    let tournament = await getDefaultTournament(guild.id);
+    // Prefer the tournament the team was found in (so a roster-only player
+    // sees THEIR fixtures instead of an empty list from the default tournament).
+    let tournament = resolvedTeam.tournament || await getDefaultTournament(guild.id);
     if (!tournament) tournament = tournaments[0];
 
     let state = await buildState({
@@ -256,37 +264,38 @@ async function buildState({
     };
 }
 
-async function resolveTeam({
+/**
+ * Find the team the command should show.
+ *
+ * With a team name → that team.
+ * Without one → the team the user is on, using the SAME resolution as the
+ * other commands: their team in the tournament (default first), then the
+ * global player record, then any roster / captain entry. Checking only
+ * `Player.teamId` is what used to make roster-only players look "unlinked".
+ *
+ * Returns { team, tournament } (tournament may be null).
+ */
+async function resolveTeamForUser({
     guild,
     userId,
     teamNameInput
 }) {
     if (teamNameInput) {
-        return Team.findOne({
+        const team = await Team.findOne({
             guildId: guild.id,
             name: {
                 $regex: new RegExp(`^${escapeRegex(teamNameInput.trim())}$`, 'i')
             }
         });
+
+        return team ? { team, tournament: null } : null;
     }
 
-    const player = await Player.findOne({
-        guildId: guild.id,
-        discordID: userId
-    }).populate('teamId');
+    const resolved = await resolveUserTeam(guild.id, userId);
 
-    if (player?.teamId) return player.teamId;
+    if (!resolved?.team) return null;
 
-    if (player?.teamNameSnapshot) {
-        return Team.findOne({
-            guildId: guild.id,
-            name: {
-                $regex: new RegExp(`^${escapeRegex(player.teamNameSnapshot)}$`, 'i')
-            }
-        });
-    }
-
-    return null;
+    return { team: resolved.team, tournament: resolved.tournament || null };
 }
 
 async function buildScheduleEmbed(state) {
@@ -307,9 +316,9 @@ async function buildScheduleEmbed(state) {
     const gd = (stats.gf || 0) - (stats.ga || 0);
     const tournamentEmoji = tournament.emoji || '🏆';
 
-    const nextPending = fixtures.find(f =>
-        f.status === 'Pending' || f.status === 'Live'
-    );
+    /* A reserved match is still up next — it just has no fixed day. */
+    const nextPending = fixtures.find(f => isReserved(f)) ||
+        fixtures.find(f => f.status === 'Pending' || f.status === 'Live');
 
     const embed = new EmbedBuilder()
         .setColor(parseColor(team.color))
@@ -355,12 +364,15 @@ async function buildScheduleEmbed(state) {
         });
 
         embed.addFields({
-            name: '⏭️ Next Match',
+            name: `${slotEmoji('calendar', guild.id) || '⏭️'} Next Match`,
             value:
-                `**${nextPending.homeTeam} vs ${nextPending.awayTeam}**\n` +
+                `**${vsLine(nextPending.homeTeam, nextPending.awayTeam, guild.id)}**\n` +
                 `🏷️ ${nextPending.roundLabel || prettyPhase(nextPending.phase)}\n` +
                 `👑 Opp. Captain: ${opponentTeam?.captainID ? `<@${opponentTeam.captainID}>` : 'Not Assigned'}\n` +
-                `📍 Status: **${nextPending.status}**`,
+                `📍 Status: **${nextPending.status}**` +
+                (isReserved(nextPending)
+                    ? `\n${reservedBadge(nextPending, { guildId: guild.id })}\n_This one is reserved — play it whenever you can._`
+                    : ''),
             inline: false
         });
     } else {
@@ -436,13 +448,18 @@ function buildFixtureLine(fixture, index, teamName) {
     if (isCompleted) {
         const home = fixture.result?.home ?? '-';
         const away = fixture.result?.away ?? '-';
-        score = ` — **${home}-${away}**`;
+        const goal = slotEmoji('goals', fixture.guildId);
+        score = ` — **${goal} ${home}-${away} ${goal}**`;
     }
+
+    const badge = reservedBadge(fixture, { guildId: fixture.guildId });
 
     return (
         `${statusEmoji} **#${index} • ${fixture.roundLabel || prettyPhase(fixture.phase)}**\n` +
-        `${sideEmoji} **${fixture.homeTeam} vs ${fixture.awayTeam}**${score}\n` +
-        `📍 ${fixture.status}`
+        `${sideEmoji} **${vsLine(fixture.homeTeam, fixture.awayTeam, fixture.guildId)}**${score}\n` +
+        `📍 ${fixture.status}` +
+        (badge ? `\n${badge}` : '') +
+        (isReserved(fixture) ? `\n   _Play it whenever — then report the score._` : '')
     );
 }
 

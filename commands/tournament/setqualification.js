@@ -18,11 +18,12 @@ const {
 
 const { TournamentSettings } = require('../../models/Tournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
 
 module.exports = {
     name: 'setqualification',
-    description: 'Set qualification spots per group.',
-    usage: '.setqualification <tournamentKey> <spots>',
+    description: 'Set qualification spots for a tournament.',
+    usage: '.setqualification [tournamentKey] <spots>',
     aliases: ['setq', 'setqualify'],
     hidden: false,
     cooldown: 3,
@@ -30,16 +31,16 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('setqualification')
-        .setDescription('Set qualification spots per group')
-        .addStringOption(opt =>
-            opt.setName('tournament')
-                .setDescription('Tournament key')
-                .setRequired(true)
-        )
+        .setDescription('Set tournament qualification spots')
         .addIntegerOption(opt =>
             opt.setName('spots')
-                .setDescription('Qualification spots')
+                .setDescription('Qualification spots; Glory Cup is fixed to 8')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
@@ -54,18 +55,23 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            const tournamentKey = args[0]?.toLowerCase();
-            const spots = Number(args[1]);
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args);
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
 
-            if (!tournamentKey || !spots || spots < 1) {
+            const spots = Number(parsedKey.rest[0]);
+
+            if (!spots || spots < 1) {
                 return message.reply(
-                    '❓ Usage: `.setqualification <tournamentKey> <spots>`'
+                    '❓ Usage: `.setqualification [tournamentKey] <spots>`\n' +
+                    'Without a key the server default tournament is used.'
                 );
             }
 
             return await runUpdateQualification({
                 guildId: message.guild.id,
-                tournamentKey,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 spots,
                 reply: payload => message.reply(payload)
             });
@@ -90,7 +96,7 @@ module.exports = {
 
             await interaction.deferReply({ ephemeral: true });
 
-            const tournamentKey = interaction.options.getString('tournament').toLowerCase();
+            const tournamentKey = interaction.options.getString('tournament')?.toLowerCase() || null;
             const spots = interaction.options.getInteger('spots');
 
             return await runUpdateQualification({
@@ -119,16 +125,26 @@ module.exports = {
 ==================================================== */
 
 async function runUpdateQualification({ guildId, tournamentKey, spots, reply }) {
-    const tournament = await TournamentSettings.findOne({ guildId, tournamentKey });
+    const resolved = await resolveTournament(guildId, tournamentKey);
 
-    if (!tournament) {
-        return reply({ content: `❌ Tournament \`${tournamentKey}\` not found.` });
+    if (!resolved.tournament) {
+        return reply({ content: resolved.error });
+    }
+
+    const tournament = resolved.tournament;
+
+    const isGloryCup = tournament.formatType === 'glory_cup';
+    if (isGloryCup && spots !== 8) {
+        return reply({ content: '❌ Glory Cup is fixed to the top 8 playoff places.' });
     }
 
     tournament.qualificationSpotsPerGroup = spots;
 
     // Recalculate knockout rounds based on new qualification count
-    if (tournament.groupCount > 0) {
+    if (isGloryCup) {
+        tournament.knockoutRounds = deriveKnockoutRounds(8);
+        tournament.hasKnockout = true;
+    } else if (tournament.groupCount > 0) {
         const qualifiedCount = tournament.groupCount * spots;
         tournament.knockoutRounds = deriveKnockoutRounds(qualifiedCount);
         tournament.hasKnockout = true;
@@ -136,7 +152,7 @@ async function runUpdateQualification({ guildId, tournamentKey, spots, reply }) 
 
     await tournament.save();
 
-    const qualifiedCount = tournament.groupCount * spots;
+    const qualifiedCount = isGloryCup ? 8 : tournament.groupCount * spots;
     const roundsStr = tournament.knockoutRounds.length
         ? tournament.knockoutRounds.map(r => r.charAt(0).toUpperCase() + r.slice(1)).join(' → ')
         : 'None';
@@ -146,7 +162,7 @@ async function runUpdateQualification({ guildId, tournamentKey, spots, reply }) 
         .setTitle('✅ QUALIFICATION UPDATED')
         .setDescription(
             `Tournament: **${tournament.name}**\n\n` +
-            `Teams qualifying from each group: **${spots}**\n` +
+            `${isGloryCup ? 'Teams qualifying from the table' : 'Teams qualifying from each group'}: **${spots}**\n` +
             `Total qualified: **${qualifiedCount}**\n` +
             `Knockout rounds: **${roundsStr}**`
         )

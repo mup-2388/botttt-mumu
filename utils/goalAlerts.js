@@ -1,6 +1,7 @@
 const { EmbedBuilder } = require('discord.js');
 const axios = require('axios');
 const celebrations = require('./celebrationData');
+const { vsLine, slotEmoji } = require('./ai/emojiSlots');
 
 const random = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
@@ -47,7 +48,7 @@ async function checkGoals(client) {
                 if (status === 'IN_PLAY' && (cache.status === 'SCHEDULED' || cache.status === 'TIMED')) {
                     const startEmbed = new EmbedBuilder()
                         .setColor(club ? club.color : 0x3498DB)
-                        .setTitle(`🎬 KICK OFF: ${homeTeam} vs ${awayTeam}`)
+                        .setTitle(`🎬 KICK OFF: ${vsLine(homeTeam, awayTeam, guildId)}`)
                         .setDescription(`### "${club && club.startQuotes ? random(club.startQuotes) : random(celebrations.GLOBAL_ALERTS.kickOff)}"`)
                         .setFooter({ text: `${match.competition.name}` });
                     
@@ -64,7 +65,7 @@ async function checkGoals(client) {
 
                     const goalEmbed = new EmbedBuilder()
                         .setColor(isClutch ? 0xE67E22 : (club ? club.color : 0x2ECC71))
-                        .setTitle(isClutch ? `🔥 CLUTCH GOAL!` : `⚽ GOAL: ${curHome > cache.home ? homeTeam : awayTeam}`)
+                        .setTitle(isClutch ? `🔥 CLUTCH GOAL!` : `${slotEmoji('goals', guildId)} GOAL: ${curHome > cache.home ? homeTeam : awayTeam}`)
                         .setDescription(`**${homeTeam} ${curHome} - ${curAway} ${awayTeam}**\n*Minute: ${minute}'*`)
                         .setTimestamp();
                     
@@ -75,7 +76,7 @@ async function checkGoals(client) {
                 if (status === 'PAUSED' && cache.status !== 'PAUSED') {
                     const htEmbed = new EmbedBuilder()
                         .setColor(0xF1C40F)
-                        .setTitle(`⏸️ HALF TIME: ${homeTeam} ${curHome} - ${curAway} ${awayTeam}`)
+                        .setTitle(`⏸️ HALF TIME: ${homeTeam} ${slotEmoji('goals', guildId)} ${curHome} - ${curAway} ${slotEmoji('goals', guildId)} ${awayTeam}`)
                         .setDescription(`### "${random(celebrations.GLOBAL_ALERTS.halfTime)}"`);
                     
                     channel.send({ embeds: [htEmbed] });

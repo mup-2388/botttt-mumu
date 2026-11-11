@@ -197,8 +197,57 @@ async function resolveManagedTeam({ guildId, userId, organizer, teamName }) {
     return { status: 'none' };
 }
 
+/**
+ * Tournament-scoped variant of resolveManagedTeam:
+ * teams are looked up among the teams registered in ONE tournament.
+ *
+ * Same return shape as resolveManagedTeam.
+ */
+async function resolveManagedTeamInTournament({
+    guildId,
+    tournament,
+    userId,
+    organizer,
+    teamName
+}) {
+    const { getTournamentTeams, effectiveCaptainId, effectiveViceCaptainId, sameId } =
+        require('./tournamentContext');
+
+    const all = await getTournamentTeams(guildId, tournament);
+    const name = String(teamName || '').trim();
+
+    if (organizer && name) {
+        const found = all.find(x => x.team.name.toLowerCase() === name.toLowerCase());
+        return found
+            ? { status: 'ok', team: found.team }
+            : { status: 'not_found', teamName: name };
+    }
+
+    const managed = all.filter(x =>
+        sameId(effectiveCaptainId(x.entry, x.team), userId) ||
+        sameId(effectiveViceCaptainId(x.entry, x.team), userId)
+    );
+
+    if (name) {
+        const mine = managed.find(x => x.team.name.toLowerCase() === name.toLowerCase());
+        if (mine) return { status: 'ok', team: mine.team };
+
+        const exists = all.some(x => x.team.name.toLowerCase() === name.toLowerCase());
+        return exists
+            ? { status: 'not_yours', teamName: name, teams: managed.map(x => x.team) }
+            : { status: 'not_found', teamName: name };
+    }
+
+    if (managed.length === 1) return { status: 'ok', team: managed[0].team };
+    if (managed.length > 1) return { status: 'ambiguous', teams: managed.map(x => x.team) };
+
+    return { status: 'none', teams: [] };
+}
+
 module.exports = {
+    resolveManagedTeamInTournament,
     getManagedTeams,
+
     getCaptainTeams,
     isCaptainOfTeam,
     parseTeamToken,

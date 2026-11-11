@@ -3,10 +3,11 @@
  *
  * Sign a free agent (unregistered or teamless player) to your team.
  * Captain or Vice Captain only.
- * Updates global Player record + all active TournamentPlayer entries.
+ * Works inside the server's DEFAULT tournament unless `tournament=<key>` is
+ * given. "Free agent" = not on any team IN THAT TOURNAMENT.
  *
- * Usage: .claimplayer @user
- * Slash: /claimplayer user:<user>
+ * Usage: .claimplayer @user [tournament=<key>]
+ * Slash: /claimplayer user:<user> [tournament:<key>]
  *
  * Aliases: sign, signplayer
  */
@@ -19,18 +20,21 @@ const {
 
 const {
     Player,
-    TournamentSettings,
-    TournamentTeam,
-    TournamentPlayer,
     ServerConfig
 } = require('../../models/Tournament');
 
 const { getUserFromArgs } = require('../../utils/stringHelpers');
+const { extractTournamentFromArgs } = require('../../utils/getTournament');
+const {
+    resolveActorTeam,
+    getUserTeamInTournament,
+    assignPlayerToTeamInTournament
+} = require('../../utils/tournamentContext');
 
 module.exports = {
     name: 'claimplayer',
     description: 'Sign a free agent to your team as captain.',
-    usage: '.claimplayer @user',
+    usage: '.claimplayer @user [tournament=<key>]',
     aliases: ['sign', 'signplayer'],
     hidden: false,
     cooldown: 5,
@@ -43,26 +47,37 @@ module.exports = {
             opt.setName('user')
                 .setDescription('Free agent to sign')
                 .setRequired(true)
+        )
+        .addStringOption(opt =>
+            opt.setName('tournament')
+                .setDescription('Tournament key (default: the default tournament)')
+                .setRequired(false)
         ),
 
     /* ================================================
        PREFIX
     ================================================ */
 
-    async execute(message) {
+    async execute(message, args = []) {
         try {
             if (!message.guild) return;
 
-            const target = message.mentions.users.first() || await getUserFromArgs(message);
+            const parsedKey = await extractTournamentFromArgs(message.guild.id, args, { tokenOnly: true });
+            if (parsedKey.explicit && parsedKey.error) {
+                return message.reply(parsedKey.error);
+            }
+
+            const target = message.mentions.users.first() || await getUserFromArgs(message, parsedKey.rest);
 
             if (!target) {
-                return message.reply('❌ Usage: `.claimplayer @user`');
+                return message.reply('❌ Usage: `.claimplayer @user [tournament=<key>]`');
             }
 
             return await runClaimPlayer({
                 guild: message.guild,
                 actorId: message.author.id,
                 targetUser: target,
+                tournamentKey: parsedKey.explicit ? parsedKey.tournament.tournamentKey : null,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -85,6 +100,7 @@ module.exports = {
                 guild: interaction.guild,
                 actorId: interaction.user.id,
                 targetUser: target,
+                tournamentKey: interaction.options.getString('tournament')?.toLowerCase() || null,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -107,39 +123,28 @@ module.exports = {
 ==================================================== */
 
 /**
- * Claim a free agent for the actor's team.
- * Validates: actor is captain/VC, target is registered and teamless.
+ * Claim a free agent for the actor's team IN THE TOURNAMENT.
+ * Validates: actor is captain/VC there, target is registered and has no team there.
  */
-async function runClaimPlayer({ guild, actorId, targetUser, reply }) {
+async function runClaimPlayer({ guild, actorId, targetUser, tournamentKey = null, reply }) {
     // ── Transfer lock check ──
     const config = await ServerConfig.findOne({ guildId: guild.id }).lean();
     if (config?.transfersLocked) {
         return reply({ content: '🔒 Transfers are **locked**. The transfer window is currently closed.' });
     }
 
-    // ── Verify actor is captain/VC ──
-    const captainPlayer = await Player.findOne({
+    // ── Verify actor is captain/VC in the tournament ──
+    const { tournament, ctx, error } = await resolveActorTeam({
         guildId: guild.id,
-        discordID: actorId
-    }).populate('teamId');
+        userId: actorId,
+        tournamentKey,
+        need: 'manage',
+        noun: 'claim free agents'
+    });
 
-    if (!captainPlayer?.teamId) {
-        return reply({ content: '❌ You are not linked to any team.' });
-    }
+    if (error) return reply({ content: error });
 
-    const team = captainPlayer.teamId;
-
-    const isCaptain =
-        String(team.captainID) === String(actorId) ||
-        captainPlayer.isCaptain;
-
-    const isViceCaptain =
-        String(team.viceCaptainID) === String(actorId) ||
-        captainPlayer.isViceCaptain;
-
-    if (!isCaptain && !isViceCaptain) {
-        return reply({ content: '❌ Only the team captain or vice captain can claim free agents.' });
-    }
+    const { team } = ctx;
 
     // ── Find target player ──
     const targetPlayer = await Player.findOne({
@@ -151,33 +156,42 @@ async function runClaimPlayer({ guild, actorId, targetUser, reply }) {
         return reply({ content: `❌ ${targetUser} is not registered as a player.` });
     }
 
-    if (targetPlayer.teamId) {
+    const targetCtx = await getUserTeamInTournament(guild.id, tournament, targetUser.id);
+
+    if (targetCtx) {
         return reply({
             content:
-                `❌ ${targetUser} is not a free agent.\n` +
+                `❌ ${targetUser} is not a free agent in **${tournament.name}** ` +
+                `(they play for **${targetCtx.team.name}**).\n` +
                 'Use `.transfer @user` if the player belongs to another team.'
         });
     }
 
-    // ── Update global player record ──
-    await Player.updateOne(
-        { _id: targetPlayer._id },
-        {
-            $set: {
-                teamId: team._id,
-                teamNameSnapshot: team.name,
-                isCaptain: false,
-                isViceCaptain: false
-            }
-        }
-    );
-
-    // ── Update all active tournament entries ──
-    const updatedTournamentPlayers = await assignPlayerToActiveTournaments({
+    // ── Sign the player in this tournament ──
+    await assignPlayerToTeamInTournament({
         guildId: guild.id,
-        playerId: targetPlayer._id,
-        team
+        tournament,
+        player: targetPlayer,
+        newTeam: team,
+        oldTeamId: null
     });
+
+    // The global record follows this signing if the player is currently teamless
+    // or still points at a team that is not registered in this tournament
+    // (e.g. a leftover from an old tournament).
+    if (targetPlayer.teamId && String(targetPlayer.teamId) !== String(team._id)) {
+        await Player.updateOne(
+            { _id: targetPlayer._id },
+            {
+                $set: {
+                    teamId: team._id,
+                    teamNameSnapshot: team.name,
+                    isCaptain: false,
+                    isViceCaptain: false
+                }
+            }
+        );
+    }
 
     // ── Response ──
     const embed = new EmbedBuilder()
@@ -185,59 +199,9 @@ async function runClaimPlayer({ guild, actorId, targetUser, reply }) {
         .setTitle('✅ PLAYER SIGNED')
         .setDescription(
             `${targetUser} has joined **${team.name}**.\n\n` +
-            `Tournament records updated: **${updatedTournamentPlayers}**`
+            `Tournament: **${tournament.name}** (\`${tournament.tournamentKey}\`)`
         )
         .setTimestamp();
 
     return reply({ embeds: [embed] });
-}
-
-/* ====================================================
-   TOURNAMENT SYNC
-==================================================== */
-
-/**
- * Assign a player to all active tournaments where their team is registered.
- * Updates TournamentPlayer entries with the new team.
- */
-async function assignPlayerToActiveTournaments({ guildId, playerId, team }) {
-    const activeTournaments = await TournamentSettings.find({
-        guildId,
-        currentPhase: { $ne: 'completed' }
-    }).lean();
-
-    let updated = 0;
-
-    for (const tournament of activeTournaments) {
-        const tournamentTeam = await TournamentTeam.findOne({
-            guildId,
-            tournamentId: tournament._id,
-            teamId: team._id,
-            isActive: true
-        });
-
-        if (!tournamentTeam) continue;
-
-        const result = await TournamentPlayer.updateMany(
-            {
-                guildId,
-                tournamentId: tournament._id,
-                playerId,
-                isActive: true
-            },
-            {
-                $set: {
-                    teamId: team._id,
-                    tournamentTeamId: tournamentTeam._id,
-                    teamNameSnapshot: team.name,
-                    isCaptain: false,
-                    isViceCaptain: false
-                }
-            }
-        );
-
-        updated += result.modifiedCount || 0;
-    }
-
-    return updated;
 }

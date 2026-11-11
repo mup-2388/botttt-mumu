@@ -26,6 +26,8 @@ const {
 } = require('../../models/Tournament');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
+const { getDefaultTournament } = require('../../utils/getTournament');
+const { optionalStep } = require('../../utils/optionalStep');
 const { escapeRegex } = require('../../utils/stringHelpers');
 
 module.exports = {
@@ -77,7 +79,9 @@ module.exports = {
             });
         } catch (error) {
             console.error('[delete-team] prefix error:', error);
-            return message.reply('❌ Failed to remove team.');
+            return message.reply(
+                '❌ Failed to remove team.\n`' + String(error?.message || error).slice(0, 200) + '`'
+            );
         }
     },
 
@@ -105,11 +109,18 @@ module.exports = {
         } catch (error) {
             console.error('[delete-team] slash error:', error);
 
+            const reason = String(error?.message || error).slice(0, 200);
+
             if (interaction.deferred || interaction.replied) {
-                return interaction.editReply('❌ Failed to remove team.');
+                return interaction.editReply(
+                    '❌ Failed to remove team.\n`' + reason + '`'
+                );
             }
 
-            return interaction.reply({ content: '❌ Failed to remove team.', ephemeral: true });
+            return interaction.reply({
+                content: '❌ Failed to remove team.\n`' + reason + '`',
+                ephemeral: true
+            });
         }
     }
 };
@@ -134,7 +145,9 @@ async function runDeleteTeam({ guild, teamName, reply }) {
     });
 
     if (!team) {
-        return reply({ content: `❌ Team not found: \`${teamName}\`` });
+        return reply({
+            content: `ℹ️ Team not found: \`${teamName}\` — nothing to remove.`
+        });
     }
 
     const oldTeamName = team.name;
@@ -230,8 +243,12 @@ async function runDeleteTeam({ guild, teamName, reply }) {
         }
     );
 
-    /* ── Remove Discord roles ── */
-    await removeTeamRoles({ guild, playerDiscordIds, captainId: team.captainID });
+    /* ── Remove Discord roles (optional cleanup) ── */
+    await optionalStep(
+        'delete-team: Discord role cleanup',
+        () => removeTeamRoles({ guild, playerDiscordIds, captainId: team.captainID }),
+        null
+    );
 
     /* ── Delete the team ── */
     await Team.deleteOne({ _id: team._id });
@@ -262,7 +279,10 @@ async function runDeleteTeam({ guild, teamName, reply }) {
 
 /** Remove tournament player + captain roles from all affected members. */
 async function removeTeamRoles({ guild, playerDiscordIds, captainId }) {
-    const settings = await TournamentSettings.find({ guildId: guild.id }).lean().catch(() => []);
+    const defaultTournament = await getDefaultTournament(guild.id, { includeCompleted: true })
+        .catch(() => null);
+
+    const settings = defaultTournament ? [defaultTournament] : [];
 
     const captainRoleIds = [
         ...new Set(settings.map(s => s.captainRoleId).filter(Boolean))
