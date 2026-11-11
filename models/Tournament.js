@@ -33,7 +33,7 @@ const tournamentSettingsSchema = new mongoose.Schema(
 
         formatType: {
             type: String,
-            enum: ['league', 'groups_knockout', 'mega_table_playoffs', 'glory_cup', 'club_world_cup', 'custom'],
+            enum: ['league', 'knockout', 'groups_knockout', 'mega_table_playoffs', 'glory_cup', 'club_world_cup', 'custom'],
             default: 'league'
         },
 
@@ -108,7 +108,7 @@ const tournamentSettingsSchema = new mongoose.Schema(
 
         currentPhase: {
             type: String,
-            enum: ['registration', 'league', 'groups', 'super8', 'knockout', 'completed'],
+            enum: ['registration', 'league', 'groups', 'super8', 'knockout', 'qualifier', 'eliminator', 'roundof16', 'quarterfinal', 'semifinal', 'final', 'completed'],
             default: 'registration'
         },
 
@@ -648,6 +648,7 @@ const fixtureSchema = new mongoose.Schema(
                 'super8',
                 'qualifier',
                 'eliminator',
+                'roundof16',
                 'quarterfinal',
                 'semifinal',
                 'final',

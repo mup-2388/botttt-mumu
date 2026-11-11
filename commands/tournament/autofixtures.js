@@ -2,7 +2,8 @@
  * autofixtures.js
  *
  * Auto-generate fixtures for a tournament. League and group formats use
- * round robins; Glory Cup uses one qualifier match per active team.
+ * round robins, Glory Cup uses one qualifier match per team, and straight
+ * knockout starts at the opening round for the registered field.
  *
  * Group auto-assignment: Only shuffles teams into groups on FIRST assignment.
  * Using --force deletes fixtures but preserves existing group assignments.
@@ -27,7 +28,13 @@ const {
 
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
-const { buildRoundRobinFixtures, buildOneMatchPerTeamFixtures } = require('../../utils/fixtureBuilder');
+const {
+    buildRoundRobinFixtures,
+    buildOneMatchPerTeamFixtures,
+    buildKnockoutFixtures,
+    buildStandardKnockoutPairs,
+    getKnockoutRounds
+} = require('../../utils/fixtureBuilder');
 
 module.exports = {
     name: 'autofixtures',
@@ -135,6 +142,7 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
 
     const tournament = resolved.tournament;
     const isGloryCup = tournament.formatType === 'glory_cup';
+    const isStraightKnockout = tournament.formatType === 'knockout';
     const existingCount = await Fixture.countDocuments({
         guildId: guild.id,
         tournamentId: tournament._id
@@ -158,6 +166,18 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
         return reply({ content: '❌ At least 2 active teams are required in this tournament.' });
     }
 
+    const knockoutRounds = isStraightKnockout
+        ? getKnockoutRounds(tournamentTeams.length)
+        : [];
+
+    if (isStraightKnockout && !knockoutRounds.length) {
+        return reply({
+            content:
+                `❌ Straight knockout needs a power-of-two field of 2–16 active teams ` +
+                `(2, 4, 8, or 16); found **${tournamentTeams.length}**. No fixtures were changed.`
+        });
+    }
+
     if (isGloryCup && tournamentTeams.length < 8) {
         return reply({
             content: `❌ Glory Cup needs at least 8 active teams for its top-eight playoffs; found **${tournamentTeams.length}**. No fixtures were changed.`
@@ -170,7 +190,7 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
         });
     }
 
-    if (isGloryCup && existingCount > 0 && force) {
+    if ((isGloryCup || isStraightKnockout) && existingCount > 0 && force) {
         const inProgressCount = await Fixture.countDocuments({
             guildId: guild.id,
             tournamentId: tournament._id,
@@ -178,14 +198,15 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
         });
 
         if (inProgressCount > 0) {
+            const formatLabel = isGloryCup ? 'Glory Cup' : 'Straight knockout';
             return reply({
-                content: `❌ Glory Cup fixtures were not replaced because **${inProgressCount}** match(es) are live or played. No fixtures were deleted.`
+                content: `❌ ${formatLabel} fixtures were not replaced because **${inProgressCount}** match(es) are live or played. No fixtures were deleted.`
             });
         }
     }
 
-    const homeAway = !isGloryCup && tournament.homeAway === true;
-    const groupCount = isGloryCup ? 0 : (tournament.groupCount || 0);
+    const homeAway = !isGloryCup && !isStraightKnockout && tournament.homeAway === true;
+    const groupCount = isGloryCup || isStraightKnockout ? 0 : (tournament.groupCount || 0);
 
     // Auto-assign groups only for group-based formats, and only if no teams
     // have assignments yet. Glory Cup is always a flat qualifier table.
@@ -205,7 +226,20 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
 
     const fixturesToCreate = [];
 
-    if (isGloryCup) {
+    if (isStraightKnockout) {
+        const normalizedTeams = normalizeTeams(fixtureTeams);
+        const firstRound = knockoutRounds[0];
+        const pairs = buildStandardKnockoutPairs(normalizedTeams);
+
+        fixturesToCreate.push(...buildKnockoutFixtures({
+            guildId: guild.id,
+            tournament,
+            phase: firstRound,
+            pairs,
+            twoLegged: false,
+            startMatchNumber: 1
+        }));
+    } else if (isGloryCup) {
         fixturesToCreate.push(...buildOneMatchPerTeamFixtures({
             guildId: guild.id,
             tournament,
@@ -274,9 +308,19 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
     await Fixture.insertMany(fixturesToCreate);
 
     const settingsUpdate = {
-        currentPhase: groupCount > 0 ? 'groups' : 'league',
+        currentPhase: isStraightKnockout ? 'knockout' : groupCount > 0 ? 'groups' : 'league',
         teamCount: fixtureTeams.length
     };
+    if (isStraightKnockout) {
+        Object.assign(settingsUpdate, {
+            groupCount: 0,
+            teamsPerGroup: 0,
+            homeAway: false,
+            hasKnockout: true,
+            knockoutRounds,
+            twoLeggedRounds: []
+        });
+    }
     if (isGloryCup) {
         Object.assign(settingsUpdate, {
             groupCount: 0,
@@ -294,9 +338,11 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
         { $set: settingsUpdate }
     );
 
-    const formatDescription = isGloryCup
-        ? 'One-match qualifier — one match per team; top 8 advance to playoffs'
-        : groupCount > 0 ? 'Group Stage' : 'League';
+    const formatDescription = isStraightKnockout
+        ? `Straight Knockout — ${knockoutRounds[0] === 'roundof16' ? 'Round of 16' : knockoutRounds[0]}`
+        : isGloryCup
+            ? 'One-match qualifier — one match per team; top 8 advance to playoffs'
+            : groupCount > 0 ? 'Group Stage' : 'League';
     const replacementLine = existingCount > 0 && force
         ? `Replaced **${existingCount}** old fixture(s); registered teams and rosters were preserved.\n`
         : '';

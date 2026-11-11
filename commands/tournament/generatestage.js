@@ -20,7 +20,14 @@ const { Fixture, TournamentTeam } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase } = require('../../utils/displayHelpers');
-const { buildRoundRobinFixtures, buildOneMatchPerTeamFixtures, buildKnockoutFixtures, getNextMatchNumber } = require('../../utils/fixtureBuilder');
+const {
+    buildRoundRobinFixtures,
+    buildOneMatchPerTeamFixtures,
+    buildKnockoutFixtures,
+    buildStandardKnockoutPairs,
+    getKnockoutRounds,
+    getNextMatchNumber
+} = require('../../utils/fixtureBuilder');
 const { sortTeams } = require('../../utils/standingsHelpers');
 
 const GLORY_CUP_QUALIFIER_COUNT = 8;
@@ -151,6 +158,12 @@ async function runGenerate({ guild, key, stage, force, reply }) {
         : await getDefaultTournament(guild.id);
 
     if (!tournament) return reply({ content: '❌ Tournament not found.' });
+
+    if (tournament.formatType === 'knockout' && stage !== 'knockout') {
+        return reply({
+            content: '❌ Straight knockout tournaments have no league or group stage. Generate the knockout round directly.'
+        });
+    }
 
     const teams = await TournamentTeam.find({
         guildId: guild.id,
@@ -337,28 +350,59 @@ async function generateGroups({ guild, tournament, teams, force, reply }) {
 ==================================================== */
 
 async function generateKnockout({ guild, tournament, teams, force, reply }) {
-    if (!tournament.hasKnockout) {
+    const isStraightKnockout = tournament.formatType === 'knockout';
+    if (!tournament.hasKnockout && !isStraightKnockout) {
         return reply({ content: '❌ This tournament has no knockout stage enabled.' });
     }
 
-    const round = resolveNextKnockoutRound(tournament);
+    const straightRounds = isStraightKnockout ? getKnockoutRounds(teams.length) : [];
+    if (isStraightKnockout && !straightRounds.length) {
+        return reply({
+            content:
+                `❌ Straight knockout needs a power-of-two field of 2–16 active teams ` +
+                `(2, 4, 8, or 16); found **${teams.length}**. No fixtures were changed.`
+        });
+    }
+
+    const round = isStraightKnockout
+        ? straightRounds[0]
+        : resolveNextKnockoutRound(tournament, teams.length);
     if (!round) {
         return reply({ content: '❌ No knockout round found in tournament settings.' });
     }
 
-    const existing = await Fixture.countDocuments({
+    const existingFilter = {
         guildId: guild.id,
         tournamentId: tournament._id,
-        phase: round
-    });
+        ...(isStraightKnockout ? {} : { phase: round })
+    };
+    const existing = await Fixture.countDocuments(existingFilter);
 
     if (existing && !force) {
         return reply({
-            content: `❌ ${prettyPhase(round)} fixtures already exist: **${existing}**. Use \`--force\`.`
+            content: isStraightKnockout
+                ? `❌ Fixtures already exist for this straight-knockout tournament: **${existing}**. Use \`--force\` to replace the schedule.`
+                : `❌ ${prettyPhase(round)} fixtures already exist: **${existing}**. Use \`--force\`.`
         });
     }
 
-    const qualified = await getQualifiedTeams({ tournament, teams });
+    if (isStraightKnockout && existing && force) {
+        const inProgressCount = await Fixture.countDocuments({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            status: { $in: ['Played', 'Live'] }
+        });
+
+        if (inProgressCount > 0) {
+            return reply({
+                content: `❌ Straight-knockout fixtures were not replaced because **${inProgressCount}** match(es) are live or played. No fixtures were deleted.`
+            });
+        }
+    }
+
+    const qualified = isStraightKnockout
+        ? normalizeTournamentTeams(sortTeams(teams))
+        : await getQualifiedTeams({ tournament, teams });
 
     if (tournament.formatType === 'glory_cup' && qualified.length !== GLORY_CUP_QUALIFIER_COUNT) {
         return reply({
@@ -400,22 +444,24 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
         }
     }
 
-    const pairs = tournament.formatType === 'glory_cup'
-        ? [
-            [qualified[0], qualified[7]], // 1 v 8
-            [qualified[3], qualified[4]], // 4 v 5
-            [qualified[1], qualified[6]], // 2 v 7
-            [qualified[2], qualified[5]]  // 3 v 6
-        ]
-        : [];
+    const pairs = isStraightKnockout
+        ? buildStandardKnockoutPairs(qualified)
+        : tournament.formatType === 'glory_cup'
+            ? [
+                [qualified[0], qualified[7]], // 1 v 8
+                [qualified[3], qualified[4]], // 4 v 5
+                [qualified[1], qualified[6]], // 2 v 7
+                [qualified[2], qualified[5]]  // 3 v 6
+            ]
+            : [];
 
-    if (tournament.formatType !== 'glory_cup') {
+    if (!isStraightKnockout && tournament.formatType !== 'glory_cup') {
         for (let i = 0; i < qualified.length; i += 2) {
             pairs.push([qualified[i], qualified[i + 1]]);
         }
     }
 
-    const isTwoLegged =
+    const isTwoLegged = !isStraightKnockout &&
         Array.isArray(tournament.twoLeggedRounds) &&
         tournament.twoLeggedRounds.includes(round);
 
@@ -425,21 +471,30 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
         phase: round,
         pairs,
         twoLegged: isTwoLegged,
-        startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
+        startMatchNumber: isStraightKnockout
+            ? 1
+            : await getNextMatchNumber(guild.id, tournament._id)
     });
 
     // Validate and build the replacement bracket before deleting the old one.
     if (existing && force) {
-        await Fixture.deleteMany({
-            guildId: guild.id,
-            tournamentId: tournament._id,
-            phase: round
-        });
+        await Fixture.deleteMany(isStraightKnockout
+            ? { guildId: guild.id, tournamentId: tournament._id }
+            : { guildId: guild.id, tournamentId: tournament._id, phase: round });
     }
 
     await Fixture.insertMany(fixtures);
 
     tournament.currentPhase = 'knockout';
+    if (isStraightKnockout) {
+        tournament.groupCount = 0;
+        tournament.teamsPerGroup = 0;
+        tournament.homeAway = false;
+        tournament.hasKnockout = true;
+        tournament.knockoutRounds = straightRounds;
+        tournament.twoLeggedRounds = [];
+        tournament.teamCount = teams.length;
+    }
     await tournament.save();
 
     return successReply(reply, tournament, `🏆 ${prettyPhase(round).toUpperCase()} GENERATED`, fixtures.length);
@@ -459,7 +514,11 @@ function normalizeTournamentTeams(teams) {
 }
 
 /** Determine the next knockout round from tournament config or derived from qualified teams. */
-function resolveNextKnockoutRound(tournament) {
+function resolveNextKnockoutRound(tournament, teamCount = null) {
+    if (tournament.formatType === 'knockout') {
+        return getKnockoutRounds(teamCount || tournament.teamCount)[0] || null;
+    }
+
     const rounds = Array.isArray(tournament.knockoutRounds)
         ? tournament.knockoutRounds
         : [];

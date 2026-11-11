@@ -26,6 +26,7 @@ const { vsLine } = require('../../utils/ai/emojiSlots');
 const PHASE_LABELS = {
     qualifier: 'Qualifier',
     eliminator: 'Eliminator',
+    roundof16: 'Round of 16',
     quarterfinal: 'Quarter Final',
     semifinal: 'Semi Final',
     final: 'Final'
