@@ -1,12 +1,12 @@
 /**
  * testpostmatchday.js
  *
- * Post a no-ping test of the next unplayed matchday in the channel where this
- * command is used. Unlike .postmatchday, this command ignores the configured
- * destination channel and does not send any user or role mentions.
+ * Post a no-ping test of the next unplayed matchday or a selected knockout
+ * round in the channel where this command is used. Unlike .postmatchday, this
+ * command ignores the configured destination channel and sends no pings.
  *
- * Usage:  .testpostmatchday <deadline>
- * Slash:  /testpostmatchday deadline:<text>
+ * Usage:  .testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline>
+ * Slash:  /testpostmatchday deadline:<text> [round:<round>]
  */
 
 const {
@@ -15,15 +15,19 @@ const {
 } = require('discord.js');
 
 const { isOrganizer } = require('../../utils/isOrganizer');
-const { sanitizeDeadline } = require('../../utils/matchdayAnnouncement');
-const { runPostMatchday } = require('./postmatchday');
+const { KNOCKOUT_ROUNDS, sanitizeDeadline } = require('../../utils/matchdayAnnouncement');
+const {
+    runPostMatchday,
+    parseRoundPhase,
+    parsePostMatchdayArgs
+} = require('./postmatchday');
 
 const MAX_DEADLINE_LENGTH = 100;
 
 module.exports = {
     name: 'testpostmatchday',
-    description: 'Post a no-ping test announcement in the current channel.',
-    usage: '.testpostmatchday <deadline>',
+    description: 'Preview matchday or knockout-round fixtures in the current channel without pings.',
+    usage: '.testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline>',
     aliases: ['testmatchday'],
     hidden: false,
     cooldown: 5,
@@ -31,12 +35,24 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('testpostmatchday')
-        .setDescription('Post a no-ping test announcement in this channel')
+        .setDescription('Preview matchday or knockout-round fixtures in this channel')
         .addStringOption(option =>
             option.setName('deadline')
                 .setDescription('Deadline to show in the test announcement')
                 .setRequired(true)
                 .setMaxLength(MAX_DEADLINE_LENGTH)
+        )
+        .addStringOption(option =>
+            option.setName('round')
+                .setDescription('Choose a knockout round; leave blank for the next matchday')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Next Matchday', value: 'matchday' },
+                    { name: KNOCKOUT_ROUNDS.roundof16.label, value: 'roundof16' },
+                    { name: KNOCKOUT_ROUNDS.quarterfinal.label, value: 'quarterfinal' },
+                    { name: KNOCKOUT_ROUNDS.semifinal.label, value: 'semifinal' },
+                    { name: KNOCKOUT_ROUNDS.final.label, value: 'final' }
+                )
         ),
 
     async execute(message, args) {
@@ -47,9 +63,9 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            const deadline = sanitizeDeadline(args.join(' '));
+            const { deadline, roundPhase } = parsePostMatchdayArgs(args);
             if (!deadline) {
-                return message.reply('❓ Usage: `.testpostmatchday <deadline>`.');
+                return message.reply('❓ Usage: `.testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline>`.');
             }
 
             if (deadline.length > MAX_DEADLINE_LENGTH) {
@@ -59,6 +75,7 @@ module.exports = {
             return await runPostMatchday({
                 guild: message.guild,
                 deadline,
+                roundPhase,
                 testMode: true,
                 targetChannel: message.channel,
                 reply: payload => message.reply(payload)
@@ -82,6 +99,10 @@ module.exports = {
             await interaction.deferReply({ ephemeral: true });
 
             const deadline = sanitizeDeadline(interaction.options.getString('deadline'));
+            const selectedRound = interaction.options.getString('round');
+            const roundPhase = selectedRound && selectedRound !== 'matchday'
+                ? parseRoundPhase(selectedRound)
+                : null;
             if (!deadline) {
                 return interaction.editReply('❓ Please provide a deadline for the test announcement.');
             }
@@ -89,6 +110,7 @@ module.exports = {
             return await runPostMatchday({
                 guild: interaction.guild,
                 deadline,
+                roundPhase,
                 testMode: true,
                 targetChannel: interaction.channel,
                 reply: payload => interaction.editReply(payload)

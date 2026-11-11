@@ -27,6 +27,7 @@ class FakeOption {
     setDescription() { return this; }
     setRequired() { return this; }
     setMaxLength() { return this; }
+    addChoices() { return this; }
 }
 
 class FakeSlashCommandBuilder {
@@ -52,7 +53,11 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
         { roundLabel: 'Matchday 1', status: 'Pending', matchNumber: 10, homeTeam: 'Falcons', awayTeam: 'Wolves' },
         { roundLabel: 'Matchday 1', status: 'Pending', matchNumber: 2, homeTeam: 'Wolves', awayTeam: 'Falcons', scheduledAt: new Date() },
         { roundLabel: 'Matchday 1', status: 'Pending', matchNumber: 1, homeTeam: 'Falcons', awayTeam: 'Wolves', reserved: { isReserved: true } },
-        { roundLabel: 'Matchday 2', status: 'Pending', matchNumber: 3, homeTeam: 'Falcons', awayTeam: 'Wolves' }
+        { roundLabel: 'Matchday 2', status: 'Pending', matchNumber: 3, homeTeam: 'Falcons', awayTeam: 'Wolves' },
+        { phase: 'roundof16', roundLabel: 'Round of 16 1', status: 'Pending', matchNumber: 12, homeTeam: 'Falcons', awayTeam: 'Wolves' },
+        { phase: 'roundof16', roundLabel: 'Round of 16 2', status: 'Pending', matchNumber: 11, homeTeam: 'Wolves', awayTeam: 'Falcons' },
+        { phase: 'roundof16', roundLabel: 'Round of 16 3', status: 'Played', matchNumber: 10, homeTeam: 'Falcons', awayTeam: 'Wolves' },
+        { phase: 'quarterfinal', roundLabel: 'Quarter Final 1', status: 'Pending', matchNumber: 13, homeTeam: 'Falcons', awayTeam: 'Wolves' }
     ];
     const fixtureQuery = {
         select() { return this; },
@@ -151,6 +156,15 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
         '../../utils/isOrganizer': { isOrganizer: async () => true }
     });
 
+    assert.deepEqual(command.parsePostMatchdayArgs(['round of 16', 'Friday', '8 PM']), {
+        roundPhase: 'roundof16',
+        deadline: 'Friday 8 PM'
+    });
+    assert.deepEqual(command.parsePostMatchdayArgs(['Friday', '8 PM']), {
+        roundPhase: null,
+        deadline: 'Friday 8 PM'
+    });
+
     await command.runPostMatchday({
         guild,
         deadline: 'Friday 8 PM',
@@ -176,6 +190,24 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     ]);
     assert.match(replyPayloads.at(-1).content, /Posted \*\*Matchday 1\*\*/);
     assert.equal(serverConfigReads, 1);
+
+    await command.runPostMatchday({
+        guild,
+        deadline: 'Friday 8 PM',
+        roundPhase: 'roundof16',
+        reply: async payload => {
+            replyPayloads.push(payload);
+            return payload;
+        }
+    });
+
+    assert.equal(sent.length, 2);
+    assert.equal(fixtureFilters[1].phase, 'roundof16');
+    assert.match(sent[1].content, /^# ROUND OF 16/m);
+    assert.ok(sent[1].content.indexOf('__Match 11__') < sent[1].content.indexOf('__Match 12__'));
+    assert.doesNotMatch(sent[1].content, /__Match 10__|__Match 13__/);
+    assert.match(replyPayloads.at(-1).content, /Posted \*\*Round of 16\*\*/);
+    assert.equal(serverConfigReads, 2);
     const roleFetchesAfterPublish = roleFetchCalls;
 
     await command.runPostMatchday({
@@ -189,7 +221,7 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
         }
     });
 
-    assert.equal(serverConfigReads, 1, 'test mode should not read or use the configured destination');
+    assert.equal(serverConfigReads, 2, 'test mode should not read or use the configured destination');
     assert.equal(roleFetchCalls, roleFetchesAfterPublish, 'test mode should not look up ping roles');
     assert.equal(testSent.length, 1);
     assert.ok(testSent[0].content.includes('HFSL fixtures'));
@@ -198,4 +230,32 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     assert.deepEqual(testSent[0].allowedMentions.roles, []);
     assert.deepEqual(testSent[0].allowedMentions.users, []);
     assert.match(replyPayloads.at(-1).content, /No user or role pings were sent/);
+
+    const previewCommand = requireWithMocks('../commands/tournament/testpostmatchday', {
+        'discord.js': {
+            SlashCommandBuilder: FakeSlashCommandBuilder,
+            PermissionFlagsBits: { SendMessages: 1n }
+        },
+        '../../utils/isOrganizer': { isOrganizer: async () => true },
+        './postmatchday': command
+    });
+    const previewReplies = [];
+    await previewCommand.execute({
+        guild,
+        author: { id: 'organizer-1' },
+        channel: testChannel,
+        reply: async payload => {
+            previewReplies.push(payload);
+            return payload;
+        }
+    }, ['roundof16', 'Friday', '8 PM']);
+
+    assert.equal(testSent.length, 2);
+    assert.match(testSent[1].content, /^# ROUND OF 16/m);
+    assert.doesNotMatch(testSent[1].content, /<@/);
+    assert.deepEqual(testSent[1].allowedMentions.roles, []);
+    assert.deepEqual(testSent[1].allowedMentions.users, []);
+    assert.match(previewReplies.at(-1).content, /Test announcement for \*\*Round of 16\*\*/);
+    assert.equal(serverConfigReads, 2, 'preview command should continue using its current channel');
+    assert.equal(roleFetchCalls, roleFetchesAfterPublish, 'preview command should not look up ping roles');
 });

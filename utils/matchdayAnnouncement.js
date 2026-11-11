@@ -14,6 +14,13 @@ const MATCHDAY_NOTES = [
     '- NOTE: Home Advantage is there'
 ];
 
+const KNOCKOUT_ROUNDS = Object.freeze({
+    roundof16: Object.freeze({ label: 'Round of 16', heading: 'ROUND OF 16' }),
+    quarterfinal: Object.freeze({ label: 'Quarter Final', heading: 'QUARTER FINAL' }),
+    semifinal: Object.freeze({ label: 'Semi Final', heading: 'SEMI FINAL' }),
+    final: Object.freeze({ label: 'Final', heading: 'FINAL' })
+});
+
 function matchdayNumber(fixture) {
     const label = String(fixture?.roundLabel || '');
     const match = label.match(/\bmatchday\s*#?\s*(\d+)\b/i);
@@ -49,6 +56,26 @@ function selectNextMatchday(fixtures = []) {
     return { matchdayNumber: nextDay, fixtures: selected };
 }
 
+function getKnockoutRound(phase) {
+    return KNOCKOUT_ROUNDS[String(phase || '').trim().toLowerCase()] || null;
+}
+
+function selectKnockoutRound(fixtures = [], phase) {
+    const normalizedPhase = String(phase || '').trim().toLowerCase();
+    const round = getKnockoutRound(normalizedPhase);
+    if (!round) return null;
+
+    const selected = fixtures
+        .filter(fixture =>
+            String(fixture?.phase || '').trim().toLowerCase() === normalizedPhase &&
+            isUnplayedFixture(fixture)
+        )
+        .sort((a, b) => numericMatchNumber(a) - numericMatchNumber(b));
+
+    if (!selected.length) return null;
+    return { phase: normalizedPhase, label: round.label, heading: round.heading, fixtures: selected };
+}
+
 function sanitizeDeadline(value) {
     return String(value || '')
         .replace(/[\r\n]+/g, ' ')
@@ -62,6 +89,7 @@ function buildLineSeparator(repeatCount = LINE_REPEAT_COUNT) {
 
 function formatMatchdayAnnouncement({
     matchdayNumber: day,
+    heading = null,
     fixtures,
     deadline,
     guildId,
@@ -87,7 +115,7 @@ function formatMatchdayAnnouncement({
     });
 
     return [
-        `# MATCHDAY ${day}`,
+        `# ${heading || `MATCHDAY ${day}`}`,
         separator,
         matchBlocks.join('\n\n'),
         `Deadline : \`${sanitizeDeadline(deadline)}\``,
@@ -116,9 +144,12 @@ module.exports = {
     AASHANK_USER_ID,
     DISCORD_MESSAGE_LIMIT,
     MATCHDAY_NOTES,
+    KNOCKOUT_ROUNDS,
     matchdayNumber,
     isUnplayedFixture,
     selectNextMatchday,
+    getKnockoutRound,
+    selectKnockoutRound,
     sanitizeDeadline,
     buildLineSeparator,
     formatMatchdayAnnouncement

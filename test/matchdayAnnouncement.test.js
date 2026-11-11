@@ -9,6 +9,7 @@ const {
     AASHANK_USER_ID,
     MATCHDAY_NOTES,
     selectNextMatchday,
+    selectKnockoutRound,
     sanitizeDeadline,
     formatMatchdayAnnouncement
 } = require('../utils/matchdayAnnouncement');
@@ -43,6 +44,58 @@ test('includes scheduled unplayed fixtures and ignores rounds without a Matchday
     assert.equal(result.matchdayNumber, 3);
     assert.equal(result.fixtures.length, 1);
     assert.equal(result.fixtures[0].matchNumber, 18);
+});
+
+test('selects all unplayed fixtures for the requested knockout phase in match-number order', () => {
+    const result = selectKnockoutRound([
+        { phase: 'roundof16', status: 'Pending', matchNumber: 8 },
+        { phase: 'roundof16', status: 'Live', matchNumber: 2, leg: 2 },
+        { phase: 'roundof16', status: 'Played', matchNumber: 1 },
+        { phase: 'quarterfinal', status: 'Pending', matchNumber: 9 },
+        { phase: 'roundof16', status: 'Pending', matchNumber: 3, reserved: { isReserved: true } }
+    ], 'roundof16');
+
+    assert.equal(result.label, 'Round of 16');
+    assert.equal(result.heading, 'ROUND OF 16');
+    assert.deepEqual(result.fixtures.map(fixture => fixture.matchNumber), [2, 8]);
+    assert.equal(selectKnockoutRound([{ phase: 'quarterfinal', status: 'Pending', matchNumber: 9 }], 'semifinal'), null);
+    assert.equal(selectKnockoutRound([], 'league'), null);
+});
+
+test('supports every configured knockout phase and its display heading', () => {
+    const expectedRounds = [
+        ['roundof16', 'Round of 16', 'ROUND OF 16'],
+        ['quarterfinal', 'Quarter Final', 'QUARTER FINAL'],
+        ['semifinal', 'Semi Final', 'SEMI FINAL'],
+        ['final', 'Final', 'FINAL']
+    ];
+
+    for (const [phase, label, heading] of expectedRounds) {
+        const selected = selectKnockoutRound([
+            { phase, status: 'Pending', matchNumber: 1 }
+        ], phase);
+        assert.equal(selected.label, label);
+        assert.equal(selected.heading, heading);
+    }
+});
+
+test('formats knockout fixtures with a round heading while preserving the matchday template', () => {
+    const content = formatMatchdayAnnouncement({
+        heading: 'QUARTER FINAL',
+        deadline: 'Sunday 8 PM',
+        guildId: 'guild-1',
+        fixtures: [{
+            matchNumber: 9,
+            homeTeam: 'Falcons',
+            awayTeam: 'Wolves',
+            stadiumChannelId: '333333333333333333'
+        }],
+        includePings: false
+    });
+
+    assert.match(content, /^# QUARTER FINAL/m);
+    assert.doesNotMatch(content, /MATCHDAY undefined/);
+    assert.match(content, /Deadline : `Sunday 8 PM`/);
 });
 
 test('formats the selected matchday with the specified real emoji and ping markup', () => {

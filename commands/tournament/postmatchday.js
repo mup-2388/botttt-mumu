@@ -1,12 +1,12 @@
 /**
  * postmatchday.js
  *
- * Publish the earliest matchday that still has unplayed fixtures. This command
+ * Publish the next unplayed matchday or a selected knockout round. This command
  * only reads tournament/team/fixture data; it does not schedule matches, lock
  * channels, or update fixture records.
  *
- * Usage:  .postmatchday <deadline>
- * Slash:  /postmatchday deadline:<text>
+ * Usage:  .postmatchday [roundof16|quarterfinal|semifinal|final] <deadline>
+ * Slash:  /postmatchday deadline:<text> [round:<round>]
  */
 
 const {
@@ -29,7 +29,10 @@ const {
     AASHANK_USER_ID,
     DISCORD_MESSAGE_LIMIT,
     LINE_REPEAT_COUNT,
+    KNOCKOUT_ROUNDS,
     selectNextMatchday,
+    getKnockoutRound,
+    selectKnockoutRound,
     sanitizeDeadline,
     formatMatchdayAnnouncement
 } = require('../../utils/matchdayAnnouncement');
@@ -40,8 +43,8 @@ const DISCORD_ID_RE = /^\d{15,22}$/;
 
 module.exports = {
     name: 'postmatchday',
-    description: 'Post the next unplayed matchday fixtures to the default fixtures channel.',
-    usage: '.postmatchday <deadline>',
+    description: 'Post the next unplayed matchday or a selected knockout round to the fixtures channel.',
+    usage: '.postmatchday [roundof16|quarterfinal|semifinal|final] <deadline>',
     aliases: [],
     hidden: false,
     cooldown: 10,
@@ -49,12 +52,24 @@ module.exports = {
 
     data: new SlashCommandBuilder()
         .setName('postmatchday')
-        .setDescription('Post the next unplayed matchday fixtures')
+        .setDescription('Post matchday or knockout-round fixtures')
         .addStringOption(option =>
             option.setName('deadline')
                 .setDescription('Deadline to show in the announcement')
                 .setRequired(true)
                 .setMaxLength(MAX_DEADLINE_LENGTH)
+        )
+        .addStringOption(option =>
+            option.setName('round')
+                .setDescription('Choose a knockout round; leave blank for the next matchday')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Next Matchday', value: 'matchday' },
+                    { name: KNOCKOUT_ROUNDS.roundof16.label, value: 'roundof16' },
+                    { name: KNOCKOUT_ROUNDS.quarterfinal.label, value: 'quarterfinal' },
+                    { name: KNOCKOUT_ROUNDS.semifinal.label, value: 'semifinal' },
+                    { name: KNOCKOUT_ROUNDS.final.label, value: 'final' }
+                )
         ),
 
     async execute(message, args) {
@@ -65,9 +80,10 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            const deadline = sanitizeDeadline(args.join(' '));
+            const parsedArgs = parsePostMatchdayArgs(args);
+            const { deadline, roundPhase } = parsedArgs;
             if (!deadline) {
-                return message.reply('❓ Usage: `.postmatchday <deadline>` (example: `.postmatchday Friday 8 PM`).');
+                return message.reply('❓ Usage: `.postmatchday [roundof16|quarterfinal|semifinal|final] <deadline>` (example: `.postmatchday Friday 8 PM`).');
             }
 
             if (deadline.length > MAX_DEADLINE_LENGTH) {
@@ -77,6 +93,7 @@ module.exports = {
             return await runPostMatchday({
                 guild: message.guild,
                 deadline,
+                roundPhase,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -98,6 +115,10 @@ module.exports = {
             await interaction.deferReply({ ephemeral: true });
 
             const deadline = sanitizeDeadline(interaction.options.getString('deadline'));
+            const selectedRound = interaction.options.getString('round');
+            const roundPhase = selectedRound && selectedRound !== 'matchday'
+                ? parseRoundPhase(selectedRound)
+                : null;
             if (!deadline) {
                 return interaction.editReply('❓ Please provide a deadline for the announcement.');
             }
@@ -105,6 +126,7 @@ module.exports = {
             return await runPostMatchday({
                 guild: interaction.guild,
                 deadline,
+                roundPhase,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -126,9 +148,16 @@ async function runPostMatchday({
     guild,
     deadline,
     reply,
+    roundPhase = null,
     testMode = false,
     targetChannel = null
 }) {
+    const normalizedRoundPhase = String(roundPhase || '').trim().toLowerCase() || null;
+    const knockoutRound = normalizedRoundPhase ? getKnockoutRound(normalizedRoundPhase) : null;
+    if (normalizedRoundPhase && !knockoutRound) {
+        return reply({ content: '❌ Choose Round of 16, Quarter Final, Semi Final, or Final.' });
+    }
+
     let destination = targetChannel;
 
     if (testMode) {
@@ -158,20 +187,25 @@ async function runPostMatchday({
         });
     }
 
-    const fixtures = await Fixture.find({
+    const fixtureFilter = {
         guildId: guild.id,
         tournamentId: tournament._id,
         status: { $nin: ['Played', 'Cancelled'] },
-        'reserved.isReserved': { $ne: true }
-    })
-        .select('roundLabel status matchNumber homeTeam awayTeam reserved.isReserved')
-        .sort({ matchNumber: 1 })
+        'reserved.isReserved': { $ne: true },
+        ...(normalizedRoundPhase ? { phase: normalizedRoundPhase } : {})
+    };
+    const fixtures = await Fixture.find(fixtureFilter)
+        .select('phase roundLabel leg status matchNumber homeTeam awayTeam reserved.isReserved')
+        .sort({ matchNumber: 1, leg: 1 })
         .lean();
 
-    const nextMatchday = selectNextMatchday(fixtures);
-    if (!nextMatchday) {
+    const selectedFixtures = normalizedRoundPhase
+        ? selectKnockoutRound(fixtures, normalizedRoundPhase)
+        : selectNextMatchday(fixtures);
+    if (!selectedFixtures) {
+        const noFixturesFor = knockoutRound?.label || 'Matchday';
         return reply({
-            content: `📭 No unplayed Matchday fixtures were found for **${tournament.name}**.`
+            content: `📭 No unplayed ${noFixturesFor} fixtures were found for **${tournament.name}**.`
         });
     }
 
@@ -215,7 +249,7 @@ async function runPostMatchday({
     const formattedFixtures = [];
     const teamRoles = testMode ? [] : Array.from(guild.roles.cache.values());
 
-    for (const fixture of nextMatchday.fixtures) {
+    for (const fixture of selectedFixtures.fixtures) {
         const homeTeam = teamByName.get(normalizeName(fixture.homeTeam));
         const stadium = await resolveStadiumChannel(guild, homeTeam?.stadium);
 
@@ -264,9 +298,11 @@ async function runPostMatchday({
         });
     }
 
+    const announcementLabel = knockoutRound?.label || `Matchday ${selectedFixtures.matchdayNumber}`;
     let lineRepeatCount = LINE_REPEAT_COUNT;
     let content = formatMatchdayAnnouncement({
-        matchdayNumber: nextMatchday.matchdayNumber,
+        matchdayNumber: selectedFixtures.matchdayNumber,
+        heading: knockoutRound?.heading || null,
         fixtures: formattedFixtures,
         deadline,
         guildId: guild.id,
@@ -279,7 +315,8 @@ async function runPostMatchday({
     while (content.length > DISCORD_MESSAGE_LIMIT && lineRepeatCount > 1) {
         lineRepeatCount -= 1;
         content = formatMatchdayAnnouncement({
-            matchdayNumber: nextMatchday.matchdayNumber,
+            matchdayNumber: selectedFixtures.matchdayNumber,
+            heading: knockoutRound?.heading || null,
             fixtures: formattedFixtures,
             deadline,
             guildId: guild.id,
@@ -290,7 +327,7 @@ async function runPostMatchday({
 
     if (content.length > DISCORD_MESSAGE_LIMIT) {
         return reply({
-            content: `❌ This matchday announcement is ${content.length} characters, over Discord’s ${DISCORD_MESSAGE_LIMIT}-character message limit. No announcement was sent.`
+            content: `❌ This announcement is ${content.length} characters, over Discord’s ${DISCORD_MESSAGE_LIMIT}-character message limit. No announcement was sent.`
         });
     }
 
@@ -315,9 +352,36 @@ async function runPostMatchday({
 
     return reply({
         content: testMode
-            ? `🧪 Test announcement for **Matchday ${nextMatchday.matchdayNumber}** posted in <#${destination.id}>. No user or role pings were sent.`
-            : `✅ Posted **Matchday ${nextMatchday.matchdayNumber}** for **${tournament.name}** in <#${destination.id}>.`
+            ? `🧪 Test announcement for **${announcementLabel}** posted in <#${destination.id}>. No user or role pings were sent.`
+            : `✅ Posted **${announcementLabel}** for **${tournament.name}** in <#${destination.id}>.`
     });
+}
+
+function parseRoundPhase(value) {
+    const token = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const aliases = {
+        r16: 'roundof16',
+        round16: 'roundof16',
+        roundof16: 'roundof16',
+        qf: 'quarterfinal',
+        quarterfinal: 'quarterfinal',
+        quarterfinals: 'quarterfinal',
+        sf: 'semifinal',
+        semifinal: 'semifinal',
+        semifinals: 'semifinal',
+        final: 'final'
+    };
+    const phase = aliases[token] || null;
+    return getKnockoutRound(phase) ? phase : null;
+}
+
+function parsePostMatchdayArgs(args = []) {
+    const roundPhase = parseRoundPhase(args[0]);
+    const deadlineArgs = roundPhase ? args.slice(1) : args;
+    return {
+        roundPhase,
+        deadline: sanitizeDeadline(deadlineArgs.join(' '))
+    };
 }
 
 function isTestDestinationChannel(channel, guildId) {
@@ -405,6 +469,8 @@ function safeDisplayText(value) {
 }
 
 module.exports.runPostMatchday = runPostMatchday;
+module.exports.parseRoundPhase = parseRoundPhase;
+module.exports.parsePostMatchdayArgs = parsePostMatchdayArgs;
 module.exports.isSupportedTextChannel = isSupportedTextChannel;
 module.exports.resolveStadiumChannel = resolveStadiumChannel;
 module.exports.resolveTeamMention = resolveTeamMention;
