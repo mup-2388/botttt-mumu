@@ -20,7 +20,7 @@ const { Fixture, TournamentTeam } = require('../../models/Tournament');
 const { getDefaultTournament, getTournamentByKey } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { prettyPhase } = require('../../utils/displayHelpers');
-const { buildRoundRobinFixtures, buildKnockoutFixtures, getNextMatchNumber } = require('../../utils/fixtureBuilder');
+const { buildRoundRobinFixtures, buildOneMatchPerTeamFixtures, buildKnockoutFixtures, getNextMatchNumber } = require('../../utils/fixtureBuilder');
 const { sortTeams } = require('../../utils/standingsHelpers');
 
 const GLORY_CUP_QUALIFIER_COUNT = 8;
@@ -186,6 +186,34 @@ async function generateLeague({ guild, tournament, teams, force, reply }) {
         });
     }
 
+    const isGloryCup = tournament.formatType === 'glory_cup';
+    if (isGloryCup && teams.length < GLORY_CUP_QUALIFIER_COUNT) {
+        return reply({
+            content: `❌ Glory Cup needs at least 8 active teams for its top-eight playoffs; found **${teams.length}**. No fixtures were changed.`
+        });
+    }
+
+    if (isGloryCup && teams.length % 2 !== 0) {
+        return reply({
+            content: `❌ Glory Cup's one-match qualifier needs an even number of active teams so every team plays exactly once; found **${teams.length}**. No fixtures were changed.`
+        });
+    }
+
+    if (isGloryCup && existing && force) {
+        const inProgressCount = await Fixture.countDocuments({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            phase: 'league',
+            status: { $in: ['Played', 'Live'] }
+        });
+
+        if (inProgressCount > 0) {
+            return reply({
+                content: `❌ Glory Cup qualifier fixtures were not replaced because **${inProgressCount}** match(es) are live or played. No fixtures were deleted.`
+            });
+        }
+    }
+
     if (existing && force) {
         await Fixture.deleteMany({
             guildId: guild.id,
@@ -194,23 +222,34 @@ async function generateLeague({ guild, tournament, teams, force, reply }) {
         });
     }
 
-    const fixtures = buildRoundRobinFixtures({
-        guildId: guild.id,
-        tournament,
-        teams: normalizeTournamentTeams(teams),
-        phase: 'league',
-        roundPrefix: 'Matchday',
-        groupKey: null,
-        homeAway: tournament.homeAway,
-        startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
-    });
+    const normalizedTeams = normalizeTournamentTeams(teams);
+    const fixtures = isGloryCup
+        ? buildOneMatchPerTeamFixtures({
+            guildId: guild.id,
+            tournament,
+            teams: normalizedTeams,
+            phase: 'league',
+            roundLabel: 'Matchday 1',
+            startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
+        })
+        : buildRoundRobinFixtures({
+            guildId: guild.id,
+            tournament,
+            teams: normalizedTeams,
+            phase: 'league',
+            roundPrefix: 'Matchday',
+            groupKey: null,
+            homeAway: tournament.homeAway,
+            startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
+        });
 
     await Fixture.insertMany(fixtures);
 
     tournament.currentPhase = 'league';
     await tournament.save();
 
-    return successReply(reply, tournament, '🏟️ LEAGUE GENERATED', fixtures.length);
+    const title = isGloryCup ? '🏆 GLORY CUP QUALIFIERS GENERATED' : '🏟️ LEAGUE GENERATED';
+    return successReply(reply, tournament, title, fixtures.length);
 }
 
 /* ====================================================
@@ -303,7 +342,6 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
     }
 
     const round = resolveNextKnockoutRound(tournament);
-
     if (!round) {
         return reply({ content: '❌ No knockout round found in tournament settings.' });
     }
@@ -320,15 +358,6 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
         });
     }
 
-    if (existing && force) {
-        await Fixture.deleteMany({
-            guildId: guild.id,
-            tournamentId: tournament._id,
-            phase: round
-        });
-    }
-
-    /* ── Get qualified teams sorted by standings ── */
     const qualified = await getQualifiedTeams({ tournament, teams });
 
     if (tournament.formatType === 'glory_cup' && qualified.length !== GLORY_CUP_QUALIFIER_COUNT) {
@@ -343,7 +372,34 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
         });
     }
 
-    /* ── Pair up teams ── */
+    if (tournament.formatType === 'glory_cup') {
+        if (teams.length % 2 !== 0) {
+            return reply({
+                content: `❌ Glory Cup needs an even number of active teams so everyone can play one qualifier match; found **${teams.length}**.`
+            });
+        }
+
+        const expectedQualifiers = teams.length / 2;
+        const qualifierFilter = {
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            phase: 'league'
+        };
+        const [qualifierFixtureCount, playedQualifierCount] = await Promise.all([
+            Fixture.countDocuments(qualifierFilter),
+            Fixture.countDocuments({ ...qualifierFilter, status: 'Played' })
+        ]);
+
+        if (qualifierFixtureCount !== expectedQualifiers || playedQualifierCount !== expectedQualifiers) {
+            return reply({
+                content:
+                    `❌ Glory Cup knockouts are locked until every active team has played its single qualifier match. ` +
+                    `Expected **${expectedQualifiers}** qualifier fixture(s), found **${qualifierFixtureCount}**, ` +
+                    `played **${playedQualifierCount}/${expectedQualifiers}**.`
+            });
+        }
+    }
+
     const pairs = tournament.formatType === 'glory_cup'
         ? [
             [qualified[0], qualified[7]], // 1 v 8
@@ -371,6 +427,15 @@ async function generateKnockout({ guild, tournament, teams, force, reply }) {
         twoLegged: isTwoLegged,
         startMatchNumber: await getNextMatchNumber(guild.id, tournament._id)
     });
+
+    // Validate and build the replacement bracket before deleting the old one.
+    if (existing && force) {
+        await Fixture.deleteMany({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            phase: round
+        });
+    }
 
     await Fixture.insertMany(fixtures);
 

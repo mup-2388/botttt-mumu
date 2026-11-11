@@ -1,8 +1,8 @@
 /**
  * autofixtures.js
  *
- * Auto-generate round-robin fixtures for a tournament.
- * Supports league format and group stage format with optional home & away.
+ * Auto-generate fixtures for a tournament. League and group formats use
+ * round robins; Glory Cup uses one qualifier match per active team.
  *
  * Group auto-assignment: Only shuffles teams into groups on FIRST assignment.
  * Using --force deletes fixtures but preserves existing group assignments.
@@ -27,7 +27,7 @@ const {
 
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { resolveTournament, extractTournamentFromArgs } = require('../../utils/getTournament');
-const { buildRoundRobinFixtures, getNextMatchNumber } = require('../../utils/fixtureBuilder');
+const { buildRoundRobinFixtures, buildOneMatchPerTeamFixtures } = require('../../utils/fixtureBuilder');
 
 module.exports = {
     name: 'autofixtures',
@@ -127,7 +127,6 @@ module.exports = {
  *   - --force only deletes fixtures, does NOT reshuffle groups.
  */
 async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
-    // ── Find tournament ──
     const resolved = await resolveTournament(guild.id, tournamentKey);
 
     if (!resolved.tournament) {
@@ -135,8 +134,7 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
     }
 
     const tournament = resolved.tournament;
-
-    // ── Check existing fixtures ──
+    const isGloryCup = tournament.formatType === 'glory_cup';
     const existingCount = await Fixture.countDocuments({
         guildId: guild.id,
         tournamentId: tournament._id
@@ -146,20 +144,11 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
         return reply({
             content:
                 `⚠️ Fixtures already exist for **${tournament.name}**: **${existingCount}**\n\n` +
-                `Use \`.autofixtures ${tournamentKey} --force\` or slash \`force:true\` to regenerate.`
+                `Use \`.autofixtures ${tournament.tournamentKey} --force\` or slash \`force:true\` to regenerate.`
         });
     }
 
-    // ── Delete existing if forced ──
-    if (existingCount > 0 && force) {
-        await Fixture.deleteMany({
-            guildId: guild.id,
-            tournamentId: tournament._id
-        });
-    }
-
-    // ── Load tournament teams ──
-    let tournamentTeams = await TournamentTeam.find({
+    const tournamentTeams = await TournamentTeam.find({
         guildId: guild.id,
         tournamentId: tournament._id,
         isActive: true
@@ -169,42 +158,71 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
         return reply({ content: '❌ At least 2 active teams are required in this tournament.' });
     }
 
-    const homeAway = tournament.homeAway === true;
-    const groupCount = tournament.groupCount || 0;
+    if (isGloryCup && tournamentTeams.length < 8) {
+        return reply({
+            content: `❌ Glory Cup needs at least 8 active teams for its top-eight playoffs; found **${tournamentTeams.length}**. No fixtures were changed.`
+        });
+    }
 
-    // ── Auto-assign groups ONLY if teams have no assignments yet ──
+    if (isGloryCup && tournamentTeams.length % 2 !== 0) {
+        return reply({
+            content: `❌ Glory Cup's one-match qualifier needs an even number of active teams so every team plays exactly once; found **${tournamentTeams.length}**. No fixtures were changed.`
+        });
+    }
+
+    if (isGloryCup && existingCount > 0 && force) {
+        const inProgressCount = await Fixture.countDocuments({
+            guildId: guild.id,
+            tournamentId: tournament._id,
+            status: { $in: ['Played', 'Live'] }
+        });
+
+        if (inProgressCount > 0) {
+            return reply({
+                content: `❌ Glory Cup fixtures were not replaced because **${inProgressCount}** match(es) are live or played. No fixtures were deleted.`
+            });
+        }
+    }
+
+    const homeAway = !isGloryCup && tournament.homeAway === true;
+    const groupCount = isGloryCup ? 0 : (tournament.groupCount || 0);
+
+    // Auto-assign groups only for group-based formats, and only if no teams
+    // have assignments yet. Glory Cup is always a flat qualifier table.
+    let fixtureTeams = tournamentTeams;
     if (groupCount > 0) {
-        const teamsWithoutGroups = tournamentTeams.filter(
-            tt => !String(tt.groupKey || '').trim()
-        );
+        const teamsWithoutGroups = tournamentTeams.filter(tt => !String(tt.groupKey || '').trim());
 
         if (teamsWithoutGroups.length === tournamentTeams.length) {
-            // All teams need groups — do the shuffle
             await autoAssignGroups(guild.id, tournament._id, tournamentTeams, groupCount);
-
-            // Reload with fresh group assignments
-            tournamentTeams = await TournamentTeam.find({
+            fixtureTeams = await TournamentTeam.find({
                 guildId: guild.id,
                 tournamentId: tournament._id,
                 isActive: true
             }).populate('teamId').sort({ createdAt: 1 });
         }
-        // If some teams have groups and some don't, leave them as-is
     }
 
-    // ── Generate fixtures ──
-    let nextMatchNumber = 1;
     const fixturesToCreate = [];
 
-    if (groupCount > 0) {
+    if (isGloryCup) {
+        fixturesToCreate.push(...buildOneMatchPerTeamFixtures({
+            guildId: guild.id,
+            tournament,
+            teams: normalizeTeams(fixtureTeams),
+            phase: 'league',
+            roundLabel: 'Matchday 1',
+            startMatchNumber: 1
+        }));
+    } else if (groupCount > 0) {
         const groupKeys = Array.from(
             { length: groupCount },
             (_, i) => String.fromCharCode(65 + i)
         );
 
+        let nextMatchNumber = 1;
         for (const groupKey of groupKeys) {
-            const groupTeams = tournamentTeams.filter(tt => tt.groupKey === groupKey);
-
+            const groupTeams = fixtureTeams.filter(tt => tt.groupKey === groupKey);
             if (groupTeams.length < 2) continue;
 
             const groupFixtures = buildRoundRobinFixtures({
@@ -222,18 +240,16 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
             fixturesToCreate.push(...groupFixtures);
         }
     } else {
-        const leagueFixtures = buildRoundRobinFixtures({
+        fixturesToCreate.push(...buildRoundRobinFixtures({
             guildId: guild.id,
             tournament,
-            teams: normalizeTeams(tournamentTeams),
+            teams: normalizeTeams(fixtureTeams),
             phase: 'league',
             roundPrefix: 'Matchday',
             groupKey: null,
             homeAway,
-            startMatchNumber: nextMatchNumber
-        });
-
-        fixturesToCreate.push(...leagueFixtures);
+            startMatchNumber: 1
+        }));
     }
 
     if (!fixturesToCreate.length) {
@@ -247,30 +263,54 @@ async function runAutoFixtures({ guild, tournamentKey, force, reply }) {
         });
     }
 
-    // ── Save fixtures ──
+    // Keep current fixtures until the replacement schedule is fully validated.
+    if (existingCount > 0 && force) {
+        await Fixture.deleteMany({
+            guildId: guild.id,
+            tournamentId: tournament._id
+        });
+    }
+
     await Fixture.insertMany(fixturesToCreate);
 
-    // ── Update tournament phase ──
+    const settingsUpdate = {
+        currentPhase: groupCount > 0 ? 'groups' : 'league',
+        teamCount: fixtureTeams.length
+    };
+    if (isGloryCup) {
+        Object.assign(settingsUpdate, {
+            groupCount: 0,
+            teamsPerGroup: 0,
+            homeAway: false,
+            qualificationSpotsPerGroup: 8,
+            uclQualificationSpots: 0,
+            hasKnockout: true,
+            knockoutRounds: ['quarterfinal', 'semifinal', 'final']
+        });
+    }
+
     await TournamentSettings.updateOne(
-        { guildId: guild.id, tournamentKey },
-        {
-            $set: {
-                currentPhase: groupCount > 0 ? 'groups' : 'league',
-                teamCount: tournamentTeams.length
-            }
-        }
+        { guildId: guild.id, tournamentKey: tournament.tournamentKey },
+        { $set: settingsUpdate }
     );
 
-    // ── Response ──
+    const formatDescription = isGloryCup
+        ? 'One-match qualifier — one match per team; top 8 advance to playoffs'
+        : groupCount > 0 ? 'Group Stage' : 'League';
+    const replacementLine = existingCount > 0 && force
+        ? `Replaced **${existingCount}** old fixture(s); registered teams and rosters were preserved.\n`
+        : '';
+
     const embed = new EmbedBuilder()
         .setColor(0x2ECC71)
         .setTitle('📅 FIXTURES GENERATED')
         .setDescription(
             `Tournament: **${tournament.name}**\n` +
             `Key: \`${tournament.tournamentKey}\`\n\n` +
+            replacementLine +
             `Created **${fixturesToCreate.length}** fixture(s).\n` +
-            `Teams used: **${tournamentTeams.length}**\n` +
-            `Format: **${groupCount > 0 ? 'Group Stage' : 'League'}**\n` +
+            `Teams used: **${fixtureTeams.length}**\n` +
+            `Format: **${formatDescription}**\n` +
             `Home & Away: **${homeAway ? 'Yes' : 'No'}**`
         )
         .setTimestamp();

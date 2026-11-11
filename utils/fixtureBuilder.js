@@ -116,6 +116,59 @@ function buildRoundRobinFixtures({
 }
 
 /* ====================================================
+   ONE-MATCH-PER-TEAM QUALIFIER
+==================================================== */
+
+/**
+ * Build one qualifier fixture for every team, pairing teams in a shuffled draw.
+ * This is used by Glory Cup: it deliberately creates only one matchday, not a
+ * complete round-robin schedule. An odd number of teams cannot satisfy the
+ * one-match-per-team rule, so callers must handle that case before generation.
+ */
+function buildOneMatchPerTeamFixtures({
+    guildId,
+    tournament,
+    teams,
+    phase = 'league',
+    roundLabel = 'Matchday 1',
+    startMatchNumber = 1,
+    random = Math.random
+}) {
+    if (!Array.isArray(teams) || teams.length < 2) return [];
+    if (teams.length % 2 !== 0) {
+        throw new RangeError('One-match-per-team fixtures require an even number of teams.');
+    }
+
+    const draw = teams.map(entry => ({
+        tournamentTeamId: entry.tournamentTeamId,
+        teamId: entry.teamId,
+        name: entry.name
+    }));
+
+    // Fisher-Yates draw so pairings are not determined by registration order.
+    for (let i = draw.length - 1; i > 0; i--) {
+        const swapIndex = Math.floor(random() * (i + 1));
+        [draw[i], draw[swapIndex]] = [draw[swapIndex], draw[i]];
+    }
+
+    const fixtures = [];
+    for (let i = 0; i < draw.length; i += 2) {
+        fixtures.push(buildFixtureDoc({
+            guildId,
+            tournament,
+            phase,
+            groupKey: null,
+            roundLabel,
+            matchNumber: startMatchNumber + i / 2,
+            home: draw[i],
+            away: draw[i + 1]
+        }));
+    }
+
+    return fixtures;
+}
+
+/* ====================================================
    KNOCKOUT BUILDER
 ==================================================== */
 
@@ -281,6 +334,7 @@ function extractRoundNumber(label) {
 
 module.exports = {
     buildRoundRobinFixtures,
+    buildOneMatchPerTeamFixtures,
     buildKnockoutFixtures,
     buildFixtureDoc,
     getNextMatchNumber,
