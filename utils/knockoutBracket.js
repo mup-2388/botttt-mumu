@@ -1,4 +1,16 @@
-const { isKnockoutPhase } = require('./knockoutResults');
+const KNOCKOUT_PHASES = new Set([
+    'knockout',
+    'qualifier',
+    'eliminator',
+    'roundof16',
+    'quarterfinal',
+    'semifinal',
+    'final'
+]);
+
+function isKnockoutPhase(phase) {
+    return KNOCKOUT_PHASES.has(String(phase || '').trim().toLowerCase());
+}
 
 function shouldShowKnockoutBracket(tournament) {
     if (tournament?.formatType === 'knockout') return true;
@@ -7,4 +19,4 @@ function shouldShowKnockoutBracket(tournament) {
     return phase === 'completed' || isKnockoutPhase(phase);
 }
 
-module.exports = { shouldShowKnockoutBracket };
+module.exports = { shouldShowKnockoutBracket, isKnockoutPhase };

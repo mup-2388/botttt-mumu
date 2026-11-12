@@ -474,7 +474,7 @@ test('bracket renderer returns a PNG attachment and filters fixtures to knockout
     assert.ok(calls.canvasSize.width > calls.canvasSize.height);
 });
 
-test('standings uses the bracket image for straight knockout and for groups only after knockout begins', async () => {
+test('standings keeps the bracket image but does not claim the persistent live-message reference', async () => {
     async function render(tournament) {
         const calls = { bracket: 0, standings: 0, payloads: [] };
         const liveSettings = new Map();
@@ -528,11 +528,7 @@ test('standings uses the bracket image for straight knockout and for groups only
     assert.equal(straight.bracket, 1);
     assert.equal(straight.standings, 0);
     assert.equal(straight.payloads[0].files[0].name, 'knockout-bracket.png');
-    assert.deepEqual(straight.liveSettings.get('live_bracket_image:guild-1:cup'), {
-        channelId: 'standings-channel',
-        messageId: 'standings-message',
-        tournamentKey: 'cup'
-    });
+    assert.equal(straight.liveSettings.size, 0);
 
     const beforeKnockout = await render({
         _id: 'groups', tournamentKey: 'groups-cup', name: 'Groups Cup', formatType: 'groups_knockout', currentPhase: 'groups', groupCount: 2
@@ -548,11 +544,7 @@ test('standings uses the bracket image for straight knockout and for groups only
     assert.equal(duringKnockout.bracket, 1);
     assert.equal(duringKnockout.standings, 0);
     assert.equal(duringKnockout.payloads[0].files[0].name, 'knockout-bracket.png');
-    assert.deepEqual(duringKnockout.liveSettings.get('live_bracket_image:guild-1:groups-cup'), {
-        channelId: 'standings-channel',
-        messageId: 'standings-message',
-        tournamentKey: 'groups-cup'
-    });
+    assert.equal(duringKnockout.liveSettings.size, 0);
 
     const genericKnockoutPhase = await render({
         _id: 'groups', tournamentKey: 'groups-cup', name: 'Groups Cup', formatType: 'groups_knockout', currentPhase: 'knockout', groupCount: 2

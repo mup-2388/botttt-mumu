@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
-const { syncLiveBracketImageReference } = require('../utils/liveBracketImage');
+const {
+    getLiveBracketImageKey,
+    isLiveBracketImageReference
+} = require('../utils/liveBracketImage');
 
 function requireWithMocks(modulePath, mocks) {
     const resolvedPath = require.resolve(modulePath);
@@ -43,7 +46,13 @@ class FakeAttachmentBuilder {
 }
 
 function loadCommand({ hasImage = true } = {}) {
-    const tournament = { _id: 'tournament-1', tournamentKey: 'cup-s1', name: 'Cup S1', emoji: '🏆', formatType: 'knockout' };
+    const tournament = {
+        _id: 'tournament-1',
+        tournamentKey: 'cup-s1',
+        name: 'Cup S1',
+        emoji: '🏆',
+        formatType: 'knockout'
+    };
     const renderCalls = [];
     const command = requireWithMocks('../commands/tournament/bracketimage', {
         'discord.js': {
@@ -54,8 +63,7 @@ function loadCommand({ hasImage = true } = {}) {
         '../../utils/isOrganizer': { isOrganizer: async () => true },
         '../../utils/getTournament': {
             getDefaultTournament: async () => tournament,
-            getTournamentByKey: async () => tournament,
-            extractTournamentFromArgs: async () => ({ tournament, explicit: false, error: null })
+            getTournamentByKey: async () => tournament
         },
         '../../utils/generateKnockoutBracketImage': {
             generateKnockoutBracketImage: async () => {
@@ -69,7 +77,7 @@ function loadCommand({ hasImage = true } = {}) {
     return { command, tournament, renderCalls };
 }
 
-function makeChannel(id = 'channel-1') {
+function makeChannel(id) {
     const calls = { sent: [], edited: [] };
     const channel = {
         id,
@@ -94,10 +102,11 @@ function makeChannel(id = 'channel-1') {
     return { channel, calls };
 }
 
-function makeClient(channel, liveSettings) {
+function makeClient(channels, liveSettings = new Map()) {
+    const channelMap = new Map(channels.map(channel => [channel.id, channel]));
     return {
         liveSettings,
-        channels: { fetch: async id => id === channel.id ? channel : null }
+        channels: { fetch: async id => channelMap.get(id) || null }
     };
 }
 
@@ -115,118 +124,140 @@ function makeCommandMessage({ client, channel }) {
     };
 }
 
-function linkStandingsMessage({ command, tournament, client, channel }, message) {
-    client.liveSettings.set(command.getLiveBracketImageKey('guild-1', tournament.tournamentKey), {
-        channelId: channel.id,
-        messageId: message.id,
-        tournamentKey: tournament.tournamentKey
-    });
-}
-
-test('a standings message keeps only the currently displayed bracket linked', () => {
-    const liveSettings = new Map();
-    const client = { liveSettings };
-    const message = { id: 'message-1', channel: { id: 'channel-1' } };
-
-    syncLiveBracketImageReference({
-        client, guildId: 'guild-1', tournamentKey: 'cup-a', message, isBracketImage: true
-    });
-    syncLiveBracketImageReference({
-        client, guildId: 'guild-1', tournamentKey: 'cup-b', message, isBracketImage: true
-    });
-    assert.equal(liveSettings.has('live_bracket_image:guild-1:cup-a'), false);
-    assert.equal(liveSettings.has('live_bracket_image:guild-1:cup-b'), true);
-
-    syncLiveBracketImageReference({
-        client, guildId: 'guild-1', tournamentKey: 'cup-b', message, isBracketImage: false
-    });
-    assert.equal(liveSettings.size, 0);
-});
-
-test('bracketimage does not post a first image; standings must create and link it', async () => {
-    const { command, tournament, renderCalls } = loadCommand();
-    const { channel, calls } = makeChannel();
-    const client = makeClient(channel, new Map());
-    const result = await command.publishOrUpdateBracketImage({
-        client,
-        guildId: 'guild-1',
-        tournament,
-        channel
-    });
-
-    assert.deepEqual(result, { ok: false, reason: 'not-linked' });
-    assert.equal(calls.sent.length, 0);
-    assert.equal(renderCalls.length, 0);
-});
-
-test('bracketimage is unavailable to groups-knockout tournaments before the phase switch', async () => {
-    const { command, tournament, renderCalls } = loadCommand();
-    tournament.formatType = 'groups_knockout';
-    tournament.currentPhase = 'groups';
-    const { channel, calls } = makeChannel();
-    const result = await command.publishOrUpdateBracketImage({
-        client: makeClient(channel, new Map()), guildId: 'guild-1', tournament, channel
-    });
-
-    assert.deepEqual(result, { ok: false, reason: 'not-knockout-stage' });
-    assert.equal(renderCalls.length, 0);
-    assert.equal(calls.sent.length, 0);
-});
-
-test('bracketimage edits the standings-linked message and replaces its attachment', async () => {
+test('bracketimage posts and persists the first dedicated live bracket message', async () => {
     const { command, tournament } = loadCommand();
-    const { channel, calls } = makeChannel();
-    const liveSettings = new Map();
-    const client = makeClient(channel, liveSettings);
-    const originalMessage = await channel.send({ content: 'Bracket posted from standings' });
-    linkStandingsMessage({ command, tournament, client, channel }, originalMessage);
+    const { channel, calls } = makeChannel('channel-1');
+    const client = makeClient([channel]);
     const { message, replies } = makeCommandMessage({ client, channel });
 
     await command.execute(message, []);
-    assert.equal(calls.sent.length, 1);
-    assert.equal(calls.edited.length, 1);
-    assert.deepEqual(calls.edited[0].attachments, []);
-    assert.equal(calls.edited[0].files[0].name, 'knockout-bracket.png');
-    assert.match(replies[0], /Updated the live bracket image/);
-    assert.deepEqual(liveSettings.get(command.getLiveBracketImageKey('guild-1', tournament.tournamentKey)), {
-        channelId: 'channel-1', messageId: originalMessage.id, tournamentKey: 'cup-s1'
-    });
 
-    await command.execute(message, []);
+    const saved = client.liveSettings.get(getLiveBracketImageKey('guild-1', tournament.tournamentKey));
     assert.equal(calls.sent.length, 1);
-    assert.equal(calls.edited.length, 2);
+    assert.equal(calls.edited.length, 0);
+    assert.equal(calls.sent[0].files[0].name, 'knockout-bracket.png');
+    assert.match(replies[0], /Posted the live bracket/);
+    assert.equal(isLiveBracketImageReference(saved), true);
+    assert.deepEqual(saved, {
+        channelId: 'channel-1',
+        messageId: 'image-1',
+        tournamentKey: 'cup-s1',
+        source: 'bracketimage'
+    });
 });
 
-test('a report refresh reposts and re-links the image when its saved message is deleted', async () => {
+test('re-running bracketimage from another channel edits the same single message', async () => {
     const { command, tournament } = loadCommand();
-    const { channel, calls } = makeChannel();
-    const key = command.getLiveBracketImageKey('guild-1', tournament.tournamentKey);
-    const liveSettings = new Map([[key, {
+    const first = makeChannel('channel-1');
+    const elsewhere = makeChannel('channel-2');
+    const client = makeClient([first.channel, elsewhere.channel]);
+    const firstInvocation = makeCommandMessage({ client, channel: first.channel });
+    const secondInvocation = makeCommandMessage({ client, channel: elsewhere.channel });
+
+    await command.execute(firstInvocation.message, []);
+    await command.execute(secondInvocation.message, []);
+
+    const saved = client.liveSettings.get(getLiveBracketImageKey('guild-1', tournament.tournamentKey));
+    assert.equal(first.calls.sent.length, 1);
+    assert.equal(first.calls.edited.length, 1);
+    assert.deepEqual(first.calls.edited[0].attachments, []);
+    assert.equal(first.calls.edited[0].files[0].name, 'knockout-bracket.png');
+    assert.equal(elsewhere.calls.sent.length, 0);
+    assert.match(secondInvocation.replies[0], /Updated the live bracket/);
+    assert.equal(saved.channelId, 'channel-1');
+    assert.equal(saved.messageId, 'image-1');
+});
+
+test('slash /bracketimage creates then updates the persistent post instead of duplicating it', async () => {
+    const { command } = loadCommand();
+    const { channel, calls } = makeChannel('channel-1');
+    const client = makeClient([channel]);
+    const confirmations = [];
+    const interaction = {
+        guild: { id: 'guild-1' },
+        user: { id: 'organizer-1' },
+        client,
+        channel,
+        options: { getString: () => null },
+        deferReply: async () => { interaction.deferred = true; },
+        editReply: async payload => { confirmations.push(payload.content); }
+    };
+
+    await command.slashExecute(interaction);
+    await command.slashExecute(interaction);
+
+    assert.equal(calls.sent.length, 1);
+    assert.equal(calls.edited.length, 1);
+    assert.match(confirmations[0], /Posted the live bracket/);
+    assert.match(confirmations[1], /Updated the live bracket/);
+});
+
+test('simultaneous first-time bracketimage calls still create only one live message', async () => {
+    const { command } = loadCommand();
+    const { channel, calls } = makeChannel('channel-1');
+    const client = makeClient([channel]);
+    const first = makeCommandMessage({ client, channel });
+    const second = makeCommandMessage({ client, channel });
+
+    await Promise.all([
+        command.execute(first.message, []),
+        command.execute(second.message, [])
+    ]);
+
+    assert.equal(calls.sent.length, 1);
+    assert.equal(calls.edited.length, 1);
+    assert.equal(client.liveSettings.size, 1);
+});
+
+test('report refresh edits the dedicated live bracket in place without posting another message', async () => {
+    const { command, tournament } = loadCommand();
+    const { channel, calls } = makeChannel('channel-1');
+    const client = makeClient([channel]);
+    const { message } = makeCommandMessage({ client, channel });
+    await command.execute(message, []);
+
+    const result = await command.refreshLiveBracketImage(client, 'guild-1', tournament.tournamentKey, tournament);
+    assert.equal(result.ok, true);
+    assert.equal(result.updated, true);
+    assert.equal(result.action, 'updated');
+    assert.equal(calls.sent.length, 1);
+    assert.equal(calls.edited.length, 1);
+});
+
+test('a report refresh reposts and re-links the image if the saved message was deleted', async () => {
+    const { command, tournament } = loadCommand();
+    const { channel, calls } = makeChannel('channel-1');
+    const key = getLiveBracketImageKey('guild-1', tournament.tournamentKey);
+    const client = makeClient([channel], new Map([[key, {
         channelId: channel.id,
         messageId: 'deleted-image',
-        tournamentKey: tournament.tournamentKey
-    }]]);
-    const client = makeClient(channel, liveSettings);
+        tournamentKey: tournament.tournamentKey,
+        source: 'bracketimage'
+    }]]));
 
     const result = await command.refreshLiveBracketImage(client, 'guild-1', tournament.tournamentKey, tournament);
     assert.equal(result.ok, true);
     assert.equal(result.action, 'reposted');
     assert.equal(calls.sent.length, 1);
-    assert.equal(liveSettings.get(key).messageId, 'image-1');
+    assert.equal(client.liveSettings.get(key).messageId, 'image-1');
 });
 
-test('bracketimage reposts if a fetched message goes stale before it can be edited', async () => {
+test('bracketimage recovers if a fetched message goes stale before the edit', async () => {
     const { command, tournament } = loadCommand();
-    const { channel, calls } = makeChannel();
-    const liveSettings = new Map();
-    const client = makeClient(channel, liveSettings);
-    const originalMessage = await channel.send({ content: 'Bracket posted from standings' });
+    const { channel, calls } = makeChannel('channel-1');
+    const key = getLiveBracketImageKey('guild-1', tournament.tournamentKey);
+    const originalMessage = await channel.send({ content: 'Live bracket' });
     originalMessage.edit = async () => {
         const error = new Error('Unknown Message');
         error.code = 10008;
         throw error;
     };
-    linkStandingsMessage({ command, tournament, client, channel }, originalMessage);
+    const client = makeClient([channel], new Map([[key, {
+        channelId: channel.id,
+        messageId: originalMessage.id,
+        tournamentKey: tournament.tournamentKey,
+        source: 'bracketimage'
+    }]]));
 
     const result = await command.publishOrUpdateBracketImage({
         client, guildId: 'guild-1', tournament, channel
@@ -235,20 +266,65 @@ test('bracketimage reposts if a fetched message goes stale before it can be edit
     assert.equal(result.ok, true);
     assert.equal(result.action, 'reposted');
     assert.equal(calls.sent.length, 2);
-    assert.equal(liveSettings.get(command.getLiveBracketImageKey('guild-1', tournament.tournamentKey)).messageId, 'image-2');
+    assert.equal(client.liveSettings.get(key).messageId, 'image-2');
 });
 
-test('bracketimage reports missing fixtures without posting a blank image', async () => {
-    const { command, tournament } = loadCommand({ hasImage: false });
-    const { channel, calls } = makeChannel();
-    const liveSettings = new Map();
-    const client = makeClient(channel, liveSettings);
-    const originalMessage = await channel.send({ content: 'Bracket posted from standings' });
-    linkStandingsMessage({ command, tournament, client, channel }, originalMessage);
+test('bracketimage creates a dedicated message instead of taking over a legacy standings image', async () => {
+    const { command, tournament } = loadCommand();
+    const oldStandings = makeChannel('old-channel');
+    const commandChannel = makeChannel('command-channel');
+    const legacyMessage = await oldStandings.channel.send({ content: 'Old standings bracket' });
+    const key = getLiveBracketImageKey('guild-1', tournament.tournamentKey);
+    const client = makeClient([oldStandings.channel, commandChannel.channel], new Map([[key, {
+        channelId: oldStandings.channel.id,
+        messageId: legacyMessage.id,
+        tournamentKey: tournament.tournamentKey
+    }]]));
+
+    const result = await command.publishOrUpdateBracketImage({
+        client, guildId: 'guild-1', tournament, channel: commandChannel.channel
+    });
+
+    assert.equal(result.action, 'posted');
+    assert.equal(oldStandings.calls.edited.length, 0);
+    assert.equal(commandChannel.calls.sent.length, 1);
+    assert.equal(client.liveSettings.get(key).channelId, 'command-channel');
+    assert.equal(client.liveSettings.get(key).source, 'bracketimage');
+});
+
+test('reports do not create a live bracket until bracketimage has been run', async () => {
+    const { command, tournament } = loadCommand();
+    const { channel, calls } = makeChannel('channel-1');
+    const client = makeClient([channel]);
+
+    const result = await command.refreshLiveBracketImage(client, 'guild-1', tournament.tournamentKey, tournament);
+    assert.equal(result.updated, false);
+    assert.equal(result.reason, 'not-linked');
+    assert.equal(calls.sent.length, 0);
+});
+
+test('bracketimage is unavailable before groups-knockout changes to a knockout phase', async () => {
+    const { command, tournament, renderCalls } = loadCommand();
+    tournament.formatType = 'groups_knockout';
+    tournament.currentPhase = 'groups';
+    const { channel, calls } = makeChannel('channel-1');
+    const client = makeClient([channel]);
+    const { message, replies } = makeCommandMessage({ client, channel });
+
+    await command.execute(message, []);
+    assert.equal(renderCalls.length, 0);
+    assert.equal(calls.sent.length, 0);
+    assert.match(replies[0], /available after the knockout stage/i);
+});
+
+test('bracketimage does not post a blank image when knockout fixtures are missing', async () => {
+    const { command } = loadCommand({ hasImage: false });
+    const { channel, calls } = makeChannel('channel-1');
+    const client = makeClient([channel]);
     const { message, replies } = makeCommandMessage({ client, channel });
 
     await command.execute(message, []);
     assert.match(replies[0], /No knockout fixtures are available/i);
-    assert.equal(calls.sent.length, 1);
-    assert.equal(calls.edited.length, 0);
+    assert.equal(calls.sent.length, 0);
+    assert.equal(client.liveSettings.size, 0);
 });
