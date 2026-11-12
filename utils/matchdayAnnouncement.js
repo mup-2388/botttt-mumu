@@ -9,9 +9,9 @@ const AASHANK_USER_ID = '1531201010532618241';
 const DISCORD_MESSAGE_LIMIT = 2000;
 
 const MATCHDAY_NOTES = [
-    "- NO TM REQUIRED AND DON'T FORGET TO DO -ctn",
+    '- TM IS REQUIRED FOR EVERY MATCH',
     '- IF HOST FORGET TO DO -ctn | HOST BAN',
-    '- NOTE: Home Advantage is there'
+    '- NOTE: Home Advantage is disabled'
 ];
 
 const KNOCKOUT_ROUNDS = Object.freeze({
