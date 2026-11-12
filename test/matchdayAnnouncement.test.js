@@ -120,9 +120,9 @@ test('formats the selected matchday with the specified real emoji and ping marku
     assert.match(content, /<:Stadium:1487010283506630776> <#333333333333333333>/);
     assert.match(content, /Deadline : `Friday 8 PM`/);
     assert.deepEqual(MATCHDAY_NOTES, [
-        "- NO TM REQUIRED AND DON'T FORGET TO DO -ctn",
+        '- TM IS REQUIRED FOR EVERY MATCH',
         '- IF HOST FORGET TO DO -ctn | HOST BAN',
-        '- NOTE: Home Advantage is there'
+        '- NOTE: Home Advantage is disabled'
     ]);
     assert.ok(MATCHDAY_NOTES.every(note => content.includes(`\n${note}`)));
     assert.ok(content.includes(`<@&${FIXTURES_ROLE_ID}>`));
