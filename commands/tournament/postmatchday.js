@@ -7,7 +7,7 @@
  *
  * Usage:  .postmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]
  * Slash:  /postmatchday deadline:<text> [round:<round>] [venue:<name>]
- * The optional Final venue is display-only; posts still go to this server’s configured fixtures channel.
+ * The optional Final venue is display-only (a supplied channel mention stays clickable); posts still go to this server’s configured fixtures channel.
  */
 
 const {
@@ -75,7 +75,7 @@ module.exports = {
         )
         .addStringOption(option =>
             option.setName('venue')
-                .setDescription('Final only: display a neutral venue; does not change the destination channel')
+                .setDescription('Final only: display a venue label or channel mention; no destination change')
                 .setRequired(false)
                 .setMaxLength(MAX_VENUE_LENGTH)
         ),
@@ -316,7 +316,7 @@ async function runPostMatchday({
             homeMention,
             awayMention,
             ...(normalizedVenue
-                ? { venueLabel: safeDisplayText(normalizedVenue) }
+                ? { venueLabel: safeVenueDisplay(normalizedVenue) }
                 : { stadiumChannelId: stadium.channel.id })
         });
     }
@@ -428,7 +428,10 @@ function parsePostMatchdayArgs(args = []) {
 }
 
 function sanitizeVenue(value) {
-    return String(value ?? '')
+    const text = String(value ?? '').trim();
+    const unquoted = text.replace(/^(['"`])([\s\S]*)\1$/, '$2');
+
+    return unquoted
         .replace(/[\u0000-\u001f\u007f]/g, ' ')
         .replace(/\s+/g, ' ')
         .replace(/`/g, 'ˋ')
@@ -517,6 +520,21 @@ function safeDisplayText(value) {
         .replace(/</g, '‹')
         .replace(/>/g, '›');
     return escapeMarkdown(neutralized);
+}
+
+function safeVenueDisplay(value) {
+    const channelMentionPattern = /<#(\d{15,22})>/g;
+    const text = String(value || '');
+    let display = '';
+    let cursor = 0;
+
+    for (const match of text.matchAll(channelMentionPattern)) {
+        display += safeDisplayText(text.slice(cursor, match.index));
+        display += `<#${match[1]}>`;
+        cursor = match.index + match[0].length;
+    }
+
+    return display + safeDisplayText(text.slice(cursor));
 }
 
 module.exports.runPostMatchday = runPostMatchday;

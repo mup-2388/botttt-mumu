@@ -118,6 +118,26 @@ test('formats an alternative venue label instead of the home stadium channel men
     assert.doesNotMatch(content, /<#333333333333333333>/);
 });
 
+test('formats a venue channel mention as an unquoted Discord channel reference', () => {
+    const content = formatMatchdayAnnouncement({
+        heading: 'FINAL',
+        deadline: 'Sunday 8 PM',
+        guildId: 'guild-1',
+        fixtures: [{
+            matchNumber: 1,
+            homeTeam: 'Falcons',
+            awayTeam: 'Wolves',
+            venueLabel: '<#1500176658680910034>',
+            stadiumChannelId: '333333333333333333'
+        }],
+        includePings: false
+    });
+
+    assert.ok(content.includes('<:Stadium:1487010283506630776> <#1500176658680910034>'));
+    assert.doesNotMatch(content, /"<#1500176658680910034>"|`<#1500176658680910034>`/);
+    assert.doesNotMatch(content, /<#333333333333333333>/);
+});
+
 test('formats the selected matchday with the specified real emoji and ping markup', () => {
     const content = formatMatchdayAnnouncement({
         matchdayNumber: 4,

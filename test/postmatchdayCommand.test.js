@@ -272,10 +272,11 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
             replyPayloads.push(payload);
             return payload;
         }
-    }, ['final', 'Monday', '8', 'PM', 'venue:Prefix', 'Ground']);
+    }, ['final', 'Monday', '8', 'PM', 'venue:"<#1500176658680910034>"']);
 
     assert.equal(sent.length, 5);
-    assert.ok(sent[4].content.includes('<:Stadium:1487010283506630776> Prefix Ground'));
+    assert.ok(sent[4].content.includes('<:Stadium:1487010283506630776> <#1500176658680910034>'));
+    assert.doesNotMatch(sent[4].content, /"<#1500176658680910034>"|`<#1500176658680910034>`/);
     assert.equal(serverConfigReads, 5);
 
     const slashInteraction = {
@@ -285,7 +286,7 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
             getString: name => ({
                 deadline: 'Tuesday 8 PM',
                 round: 'final',
-                venue: 'Slash Arena @everyone <#333333333333333333>'
+                venue: 'Slash Arena @everyone <#1500176658680910034>'
             })[name] ?? null
         },
         deferReply: async function () { this.deferred = true; },
@@ -299,8 +300,8 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     await command.slashExecute(slashInteraction);
 
     assert.equal(sent.length, 6);
-    assert.ok(sent[5].content.includes('<:Stadium:1487010283506630776> Slash Arena @\u200beveryone ‹#333333333333333333›'));
-    assert.doesNotMatch(sent[5].content, /<#333333333333333333>/);
+    assert.ok(sent[5].content.includes('<:Stadium:1487010283506630776> Slash Arena @\u200beveryone <#1500176658680910034>'));
+    assert.doesNotMatch(sent[5].content, /@everyone|<#333333333333333333>|<#555555555555555555>/);
     assert.equal(serverConfigReads, 6);
 
     let invalidVenueReply;
@@ -379,12 +380,12 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
             previewReplies.push(payload);
             return payload;
         }
-    }, ['final', 'Sunday', '8', 'PM', 'venue:Neutral', 'Ground']);
+    }, ['final', 'Sunday', '8', 'PM', 'venue:<#1500176658680910034>']);
 
     assert.equal(testSent.length, 3);
     assert.match(testSent[2].content, /^# FINAL/m);
-    assert.ok(testSent[2].content.includes('<:Stadium:1487010283506630776> Neutral Ground'));
-    assert.doesNotMatch(testSent[2].content, /<#333333333333333333>/);
+    assert.ok(testSent[2].content.includes('<:Stadium:1487010283506630776> <#1500176658680910034>'));
+    assert.doesNotMatch(testSent[2].content, /<#333333333333333333>|<#555555555555555555>/);
     assert.doesNotMatch(testSent[2].content, /<@/);
     assert.match(previewReplies.at(-1).content, /Test announcement for \*\*Final\*\*/);
 
