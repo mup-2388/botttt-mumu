@@ -5,8 +5,9 @@
  * round in the channel where this command is used. Unlike .postmatchday, this
  * command ignores the configured destination channel and sends no pings.
  *
- * Usage:  .testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline>
- * Slash:  /testpostmatchday deadline:<text> [round:<round>]
+ * Usage:  .testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]
+ * Slash:  /testpostmatchday deadline:<text> [round:<round>] [venue:<name>]
+ * The optional Final venue changes the displayed label only.
  */
 
 const {
@@ -23,11 +24,12 @@ const {
 } = require('./postmatchday');
 
 const MAX_DEADLINE_LENGTH = 100;
+const MAX_VENUE_LENGTH = 100;
 
 module.exports = {
     name: 'testpostmatchday',
     description: 'Preview matchday or knockout-round fixtures in the current channel without pings.',
-    usage: '.testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline>',
+    usage: '.testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]',
     aliases: ['testmatchday'],
     hidden: false,
     cooldown: 5,
@@ -53,6 +55,12 @@ module.exports = {
                     { name: KNOCKOUT_ROUNDS.semifinal.label, value: 'semifinal' },
                     { name: KNOCKOUT_ROUNDS.final.label, value: 'final' }
                 )
+        )
+        .addStringOption(option =>
+            option.setName('venue')
+                .setDescription('Final only: display a neutral venue instead of the home stadium')
+                .setRequired(false)
+                .setMaxLength(MAX_VENUE_LENGTH)
         ),
 
     async execute(message, args) {
@@ -63,9 +71,9 @@ module.exports = {
                 return message.reply('🚫 Unauthorized.');
             }
 
-            const { deadline, roundPhase } = parsePostMatchdayArgs(args);
+            const { deadline, roundPhase, venue } = parsePostMatchdayArgs(args);
             if (!deadline) {
-                return message.reply('❓ Usage: `.testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline>`.');
+                return message.reply('❓ Usage: `.testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]`.');
             }
 
             if (deadline.length > MAX_DEADLINE_LENGTH) {
@@ -76,6 +84,7 @@ module.exports = {
                 guild: message.guild,
                 deadline,
                 roundPhase,
+                venue,
                 testMode: true,
                 targetChannel: message.channel,
                 reply: payload => message.reply(payload)
@@ -103,6 +112,7 @@ module.exports = {
             const roundPhase = selectedRound && selectedRound !== 'matchday'
                 ? parseRoundPhase(selectedRound)
                 : null;
+            const venue = interaction.options.getString('venue');
             if (!deadline) {
                 return interaction.editReply('❓ Please provide a deadline for the test announcement.');
             }
@@ -111,6 +121,7 @@ module.exports = {
                 guild: interaction.guild,
                 deadline,
                 roundPhase,
+                venue,
                 testMode: true,
                 targetChannel: interaction.channel,
                 reply: payload => interaction.editReply(payload)
