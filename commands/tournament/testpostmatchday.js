@@ -7,7 +7,7 @@
  *
  * Usage:  .testpostmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]
  * Slash:  /testpostmatchday deadline:<text> [round:<round>] [venue:<name>]
- * The optional Final venue changes the displayed label only.
+ * The optional Final venue changes the displayed label only; a channel mention stays clickable.
  */
 
 const {
@@ -58,7 +58,7 @@ module.exports = {
         )
         .addStringOption(option =>
             option.setName('venue')
-                .setDescription('Final only: display a neutral venue instead of the home stadium')
+                .setDescription('Final only: display a venue label or channel mention')
                 .setRequired(false)
                 .setMaxLength(MAX_VENUE_LENGTH)
         ),
