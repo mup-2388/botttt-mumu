@@ -5,8 +5,9 @@
  * only reads tournament/team/fixture data; it does not schedule matches, lock
  * channels, or update fixture records.
  *
- * Usage:  .postmatchday [roundof16|quarterfinal|semifinal|final] <deadline>
- * Slash:  /postmatchday deadline:<text> [round:<round>]
+ * Usage:  .postmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]
+ * Slash:  /postmatchday deadline:<text> [round:<round>] [venue:<name>]
+ * The optional Final venue is display-only; posts still go to this server’s configured fixtures channel.
  */
 
 const {
@@ -39,12 +40,13 @@ const {
 
 const TEXT_CHANNEL_TYPES = [ChannelType.GuildText, ChannelType.GuildAnnouncement];
 const MAX_DEADLINE_LENGTH = 100;
+const MAX_VENUE_LENGTH = 100;
 const DISCORD_ID_RE = /^\d{15,22}$/;
 
 module.exports = {
     name: 'postmatchday',
     description: 'Post the next unplayed matchday or a selected knockout round to the fixtures channel.',
-    usage: '.postmatchday [roundof16|quarterfinal|semifinal|final] <deadline>',
+    usage: '.postmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]',
     aliases: [],
     hidden: false,
     cooldown: 10,
@@ -70,6 +72,12 @@ module.exports = {
                     { name: KNOCKOUT_ROUNDS.semifinal.label, value: 'semifinal' },
                     { name: KNOCKOUT_ROUNDS.final.label, value: 'final' }
                 )
+        )
+        .addStringOption(option =>
+            option.setName('venue')
+                .setDescription('Final only: display a neutral venue; does not change the destination channel')
+                .setRequired(false)
+                .setMaxLength(MAX_VENUE_LENGTH)
         ),
 
     async execute(message, args) {
@@ -81,9 +89,9 @@ module.exports = {
             }
 
             const parsedArgs = parsePostMatchdayArgs(args);
-            const { deadline, roundPhase } = parsedArgs;
+            const { deadline, roundPhase, venue } = parsedArgs;
             if (!deadline) {
-                return message.reply('❓ Usage: `.postmatchday [roundof16|quarterfinal|semifinal|final] <deadline>` (example: `.postmatchday Friday 8 PM`).');
+                return message.reply('❓ Usage: `.postmatchday [roundof16|quarterfinal|semifinal|final] <deadline> [venue:<name>]` (example: `.postmatchday Friday 8 PM`).');
             }
 
             if (deadline.length > MAX_DEADLINE_LENGTH) {
@@ -94,6 +102,7 @@ module.exports = {
                 guild: message.guild,
                 deadline,
                 roundPhase,
+                venue,
                 reply: payload => message.reply(payload)
             });
         } catch (error) {
@@ -119,6 +128,7 @@ module.exports = {
             const roundPhase = selectedRound && selectedRound !== 'matchday'
                 ? parseRoundPhase(selectedRound)
                 : null;
+            const venue = interaction.options.getString('venue');
             if (!deadline) {
                 return interaction.editReply('❓ Please provide a deadline for the announcement.');
             }
@@ -127,6 +137,7 @@ module.exports = {
                 guild: interaction.guild,
                 deadline,
                 roundPhase,
+                venue,
                 reply: payload => interaction.editReply(payload)
             });
         } catch (error) {
@@ -149,6 +160,7 @@ async function runPostMatchday({
     deadline,
     reply,
     roundPhase = null,
+    venue = null,
     testMode = false,
     targetChannel = null
 }) {
@@ -156,6 +168,18 @@ async function runPostMatchday({
     const knockoutRound = normalizedRoundPhase ? getKnockoutRound(normalizedRoundPhase) : null;
     if (normalizedRoundPhase && !knockoutRound) {
         return reply({ content: '❌ Choose Round of 16, Quarter Final, Semi Final, or Final.' });
+    }
+
+    const venueWasProvided = venue !== null && venue !== undefined;
+    const normalizedVenue = venueWasProvided ? sanitizeVenue(venue) : null;
+    if (venueWasProvided && !normalizedVenue) {
+        return reply({ content: '❌ Provide a non-empty venue label for the Final.' });
+    }
+    if (normalizedVenue && normalizedVenue.length > MAX_VENUE_LENGTH) {
+        return reply({ content: `❌ Keep the Final venue under ${MAX_VENUE_LENGTH} characters.` });
+    }
+    if (normalizedVenue && normalizedRoundPhase !== 'final') {
+        return reply({ content: '❌ The venue override can only be used with the Final round.' });
     }
 
     let destination = targetChannel;
@@ -234,7 +258,10 @@ async function runPostMatchday({
 
     // Refresh the channel cache so saved stadium names can resolve to real
     // channel IDs even if the channels were not cached when the bot started.
-    await guild.channels.fetch().catch(() => null);
+    // A supplied Final venue is plain display text and bypasses stadium lookup.
+    if (!normalizedVenue) {
+        await guild.channels.fetch().catch(() => null);
+    }
 
     const teams = await Team.find({ guildId: guild.id })
         .select('name stadium captainID')
@@ -251,9 +278,11 @@ async function runPostMatchday({
 
     for (const fixture of selectedFixtures.fixtures) {
         const homeTeam = teamByName.get(normalizeName(fixture.homeTeam));
-        const stadium = await resolveStadiumChannel(guild, homeTeam?.stadium);
+        const stadium = normalizedVenue
+            ? null
+            : await resolveStadiumChannel(guild, homeTeam?.stadium);
 
-        if (!stadium.channel) {
+        if (!normalizedVenue && !stadium.channel) {
             unresolvedStadiums.push(
                 `• **${safeDisplayText(fixture.homeTeam || 'Unknown home team')}** — ${safeDisplayText(stadium.error)}`
             );
@@ -286,7 +315,9 @@ async function runPostMatchday({
             ...fixture,
             homeMention,
             awayMention,
-            stadiumChannelId: stadium.channel.id
+            ...(normalizedVenue
+                ? { venueLabel: safeDisplayText(normalizedVenue) }
+                : { stadiumChannelId: stadium.channel.id })
         });
     }
 
@@ -377,11 +408,31 @@ function parseRoundPhase(value) {
 
 function parsePostMatchdayArgs(args = []) {
     const roundPhase = parseRoundPhase(args[0]);
-    const deadlineArgs = roundPhase ? args.slice(1) : args;
+    const argsAfterRound = roundPhase ? args.slice(1) : args;
+    const venueIndex = argsAfterRound.findIndex(argument => /^venue:/i.test(String(argument)));
+    const deadlineArgs = venueIndex >= 0
+        ? argsAfterRound.slice(0, venueIndex)
+        : argsAfterRound;
+    const venueArgs = venueIndex >= 0
+        ? [
+            String(argsAfterRound[venueIndex]).replace(/^venue:/i, ''),
+            ...argsAfterRound.slice(venueIndex + 1)
+        ]
+        : null;
+
     return {
         roundPhase,
-        deadline: sanitizeDeadline(deadlineArgs.join(' '))
+        deadline: sanitizeDeadline(deadlineArgs.join(' ')),
+        venue: venueArgs ? sanitizeVenue(venueArgs.join(' ')) : null
     };
+}
+
+function sanitizeVenue(value) {
+    return String(value ?? '')
+        .replace(/[\u0000-\u001f\u007f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/`/g, 'ˋ')
+        .trim();
 }
 
 function isTestDestinationChannel(channel, guildId) {

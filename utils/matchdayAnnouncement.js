@@ -105,12 +105,14 @@ function formatMatchdayAnnouncement({
         const away = includePings
             ? fixture.awayMention || fixture.awayTeam
             : plainTextWithoutPings(fixture.awayTeam);
-        const stadiumId = fixture.stadiumChannelId;
+        const stadiumLine = fixture.venueLabel
+            ? `${STADIUM_EMOJI} ${fixture.venueLabel}`
+            : `${STADIUM_EMOJI} <#${fixture.stadiumChannelId}>`;
 
         return [
             `__Match ${matchNo}__`,
             vsLine(home, away, guildId),
-            `${STADIUM_EMOJI} <#${stadiumId}>`
+            stadiumLine
         ].join('\n');
     });
 

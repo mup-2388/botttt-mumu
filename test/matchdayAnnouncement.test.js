@@ -98,6 +98,26 @@ test('formats knockout fixtures with a round heading while preserving the matchd
     assert.match(content, /Deadline : `Sunday 8 PM`/);
 });
 
+test('formats an alternative venue label instead of the home stadium channel mention', () => {
+    const content = formatMatchdayAnnouncement({
+        heading: 'FINAL',
+        deadline: 'Sunday 8 PM',
+        guildId: 'guild-1',
+        fixtures: [{
+            matchNumber: 1,
+            homeTeam: 'Falcons',
+            awayTeam: 'Wolves',
+            venueLabel: 'Neutral Ground',
+            stadiumChannelId: '333333333333333333'
+        }],
+        includePings: false
+    });
+
+    assert.match(content, /^# FINAL/m);
+    assert.match(content, /<:Stadium:1487010283506630776> Neutral Ground/);
+    assert.doesNotMatch(content, /<#333333333333333333>/);
+});
+
 test('formats the selected matchday with the specified real emoji and ping markup', () => {
     const content = formatMatchdayAnnouncement({
         matchdayNumber: 4,
