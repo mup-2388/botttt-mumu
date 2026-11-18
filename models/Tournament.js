@@ -337,6 +337,91 @@ playerSchema.index(
 
 /*
 ========================================
+PLAYER ARCHIVE
+Non-operational snapshot for players removed with a bulk team cleanup.
+Historical tournament/event rows continue to reference originalPlayerId.
+========================================
+*/
+const playerArchiveSchema = new mongoose.Schema(
+    {
+        guildId: {
+            type: String,
+            required: true,
+            index: true
+        },
+
+        originalPlayerId: {
+            type: mongoose.Schema.Types.ObjectId,
+            required: true,
+            index: true
+        },
+
+        name: {
+            type: String,
+            required: true,
+            trim: true
+        },
+
+        discordID: {
+            type: String,
+            default: null
+        },
+
+        discordUsername: {
+            type: String,
+            default: null,
+            trim: true,
+            lowercase: true
+        },
+
+        formerTeamId: {
+            type: mongoose.Schema.Types.ObjectId,
+            default: null
+        },
+
+        formerTeamName: {
+            type: String,
+            default: ''
+        },
+
+        isCaptain: {
+            type: Boolean,
+            default: false
+        },
+
+        isViceCaptain: {
+            type: Boolean,
+            default: false
+        },
+
+        stats: {
+            played: { type: Number, default: 0 },
+            goals: { type: Number, default: 0 },
+            assists: { type: Number, default: 0 },
+            saves: { type: Number, default: 0 },
+            tackles: { type: Number, default: 0 },
+            interceptions: { type: Number, default: 0 },
+            yc: { type: Number, default: 0 },
+            rc: { type: Number, default: 0 },
+            mvps: { type: Number, default: 0 }
+        },
+
+        archivedAt: {
+            type: Date,
+            default: Date.now
+        }
+    },
+    { timestamps: true }
+);
+
+playerArchiveSchema.index(
+    { guildId: 1, originalPlayerId: 1 },
+    { unique: true }
+);
+playerArchiveSchema.index({ guildId: 1, discordID: 1, archivedAt: -1 });
+
+/*
+========================================
 TOURNAMENT TEAM
 A team entry inside one tournament.
 This stores tournament-specific table stats.
@@ -1023,6 +1108,7 @@ module.exports = {
     EventPlayer: mongoose.models.EventPlayer || mongoose.model('EventPlayer', eventPlayerSchema),
     Team: mongoose.models.Team || mongoose.model('Team', teamSchema),
     Player: mongoose.models.Player || mongoose.model('Player', playerSchema),
+    PlayerArchive: mongoose.models.PlayerArchive || mongoose.model('PlayerArchive', playerArchiveSchema),
     TournamentTeam: mongoose.models.TournamentTeam || mongoose.model('TournamentTeam', tournamentTeamSchema),
     TournamentPlayer: mongoose.models.TournamentPlayer || mongoose.model('TournamentPlayer', tournamentPlayerSchema),
     Fixture: mongoose.models.Fixture || mongoose.model('Fixture', fixtureSchema),

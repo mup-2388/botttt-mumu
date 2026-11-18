@@ -332,3 +332,5 @@ async function removeRoleSafely(member, roleId) {
 
     await member.roles.remove(role).catch(() => null);
 }
+
+module.exports.runDeleteTeam = runDeleteTeam;

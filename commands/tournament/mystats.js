@@ -27,6 +27,7 @@ const {
 
 const {
     Player,
+    PlayerArchive,
     Team,
     TournamentPlayer,
     EventPlayer,
@@ -247,10 +248,7 @@ async function getCompetitionByValue(guildId, value) {
 ==================================================== */
 
 async function runMyStats({ guild, targetUserId, fallbackTag, fallbackAvatar, viewerId, reply }) {
-    const globalPlayer = await Player.findOne({
-        guildId: guild.id,
-        discordID: targetUserId
-    }).populate('teamId');
+    const globalPlayer = await findStatsPlayer(guild.id, targetUserId);
 
     if (!globalPlayer) {
         return reply({ content: '❌ No player profile found.' });
@@ -346,6 +344,39 @@ async function runMyStats({ guild, targetUserId, fallbackTag, fallbackAvatar, vi
     collector.on('end', async () => {
         await msg.edit({ components: [] }).catch(() => null);
     });
+}
+
+async function findStatsPlayer(guildId, targetUserId) {
+    const currentPlayer = await Player.findOne({
+        guildId,
+        discordID: String(targetUserId)
+    }).populate('teamId');
+
+    if (currentPlayer) return currentPlayer;
+
+    const archivedPlayer = await PlayerArchive.findOne({
+        guildId,
+        discordID: String(targetUserId)
+    })
+        .sort({ archivedAt: -1 })
+        .lean();
+
+    if (!archivedPlayer) return null;
+
+    // The archive is intentionally excluded from normal player/team queries.
+    // Its original ID lets the stats view continue reading historical
+    // TournamentPlayer and EventPlayer rows without restoring a live Player.
+    return {
+        _id: archivedPlayer.originalPlayerId,
+        guildId: archivedPlayer.guildId,
+        name: archivedPlayer.name,
+        discordID: archivedPlayer.discordID,
+        discordUsername: archivedPlayer.discordUsername,
+        teamId: null,
+        teamNameSnapshot: archivedPlayer.formerTeamName || '',
+        stats: archivedPlayer.stats || {},
+        isArchived: true
+    };
 }
 
 /* ====================================================
@@ -560,7 +591,7 @@ function buildEventEmbed({ guild, globalPlayer, event, eventPlayer, emojis, fall
 }
 
 function buildAllTimeEmbed({ guild, globalPlayer, profile, emojis, fallbackTag, fallbackAvatar }) {
-    const stats = profile?.allTimeStats || {};
+    const stats = profile?.allTimeStats || globalPlayer.stats || {};
     const contributions = (stats.goals || 0) + (stats.assists || 0);
 
     return new EmbedBuilder()
@@ -829,3 +860,5 @@ function prettyAwardType(type) {
 
     return map[type] || 'Award';
 }
+
+module.exports.findStatsPlayer = findStatsPlayer;
