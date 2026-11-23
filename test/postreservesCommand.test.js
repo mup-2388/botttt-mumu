@@ -32,6 +32,7 @@ function makeHarness({ fixtures = null } = {}) {
     const destinationId = '444444444444444444';
     const stadiumId = '333333333333333333';
     const fixturesRoleId = '1554519598597021766';
+    const questionTagUserIds = ['888888888888888888', '999999999999999999'];
     const falconsRoleId = '111111111111111111';
     const wolvesRoleId = '222222222222222222';
     const sent = [];
@@ -145,7 +146,7 @@ function makeHarness({ fixtures = null } = {}) {
             ServerConfig: {
                 findOne: () => {
                     serverConfigReads++;
-                    return { lean: async () => ({ defaultFixturesChannelId: destinationId }) };
+                    return { lean: async () => ({ defaultFixturesChannelId: destinationId, questionTagUserIds }) };
                 }
             }
         },
@@ -157,10 +158,11 @@ function makeHarness({ fixtures = null } = {}) {
             vsLine: (home, away) => `${home} VS ${away}`
         },
         '../../utils/matchdayAnnouncement': {
-            FIXTURES_ROLE_ID: fixturesRoleId,
-            UNALDO_USER_ID: '774318165722529792',
-            AASHANK_USER_ID: '1531201010532618241',
-            DISCORD_MESSAGE_LIMIT: 2000
+            DISCORD_MESSAGE_LIMIT: 2000,
+            normalizeQuestionTagUserIds: userIds => [...new Set(Array.isArray(userIds) ? userIds : [])],
+            formatQuestionsLine: userIds => userIds.length
+                ? `Questions? ${userIds.map(userId => `<@${userId}>`).join(' ')}`
+                : 'Questions? Contact your server organizers.'
         },
         './postmatchday': {
             isSupportedTextChannel: channel => Boolean(channel && channel.guildId === guildId && channel.type === 0),
@@ -193,6 +195,7 @@ function makeHarness({ fixtures = null } = {}) {
         get serverConfigReads() { return serverConfigReads; },
         get roleFetchCalls() { return roleFetchCalls; },
         fixturesRoleId,
+        questionTagUserIds,
         falconsRoleId,
         wolvesRoleId,
         stadiumId,
@@ -232,16 +235,15 @@ test('postreserves announces all active reserved fixtures in paginated messages 
     assert.ok(content.includes('Weather delay for fixture 2'), 'reserve notes should be included');
     assert.doesNotMatch(content, /Agree a new time|schedule it with|report the score with/i);
     assert.ok(content.includes(`<#${harness.stadiumId}>`), 'home stadium should be shown');
-    assert.ok(content.includes(`<@&${harness.fixturesRoleId}>`), 'first page should announce the fixtures role');
+    assert.ok(content.includes(`Questions? <@${harness.questionTagUserIds[0]}> <@${harness.questionTagUserIds[1]}>`));
+    assert.doesNotMatch(content, new RegExp(`<@&${harness.fixturesRoleId}>|HFSL fixtures`));
 
     const firstPayload = harness.sent[0];
     assert.deepEqual(firstPayload.allowedMentions.parse, []);
-    assert.ok(firstPayload.allowedMentions.roles.includes(harness.fixturesRoleId));
+    assert.ok(!firstPayload.allowedMentions.roles.includes(harness.fixturesRoleId));
     assert.ok(firstPayload.allowedMentions.roles.includes(harness.falconsRoleId));
     assert.ok(firstPayload.allowedMentions.roles.includes(harness.wolvesRoleId));
-    assert.ok(firstPayload.allowedMentions.users.includes('774318165722529792'));
-    assert.ok(firstPayload.allowedMentions.users.includes('1531201010532618241'));
-    assert.ok(harness.sent.slice(1).every(payload => !payload.content.includes(`<@&${harness.fixturesRoleId}>`)), 'global fixtures ping should only be sent once');
+    assert.deepEqual(firstPayload.allowedMentions.users, harness.questionTagUserIds);
     assert.match(replies.at(-1).content, /Posted \*\*30 reserved matches\*\*/);
     assert.equal(harness.serverConfigReads, 1);
 });

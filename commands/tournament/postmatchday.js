@@ -25,11 +25,9 @@ const {
 const { getDefaultTournament } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const {
-    FIXTURES_ROLE_ID,
-    UNALDO_USER_ID,
-    AASHANK_USER_ID,
     DISCORD_MESSAGE_LIMIT,
     LINE_REPEAT_COUNT,
+    normalizeQuestionTagUserIds,
     KNOCKOUT_ROUNDS,
     selectNextMatchday,
     getKnockoutRound,
@@ -183,6 +181,7 @@ async function runPostMatchday({
     }
 
     let destination = targetChannel;
+    let questionTagUserIds = [];
 
     if (testMode) {
         if (!isTestDestinationChannel(destination, guild.id)) {
@@ -190,6 +189,7 @@ async function runPostMatchday({
         }
     } else {
         const config = await ServerConfig.findOne({ guildId: guild.id }).lean();
+        questionTagUserIds = normalizeQuestionTagUserIds(config?.questionTagUserIds);
         if (!config?.defaultFixturesChannelId) {
             return reply({
                 content: '❌ No default fixtures channel is set. Run `.setfixtureschannel` in the announcement channel first.'
@@ -240,20 +240,8 @@ async function runPostMatchday({
     const botCanMentionRoles = Boolean(channelPermissions?.has(PermissionFlagsBits.MentionEveryone));
 
     if (!testMode) {
+        // Refresh role cache so team-role mentions can be resolved.
         await guild.roles.fetch().catch(() => null);
-        const fixturesRole = guild.roles.cache.get(FIXTURES_ROLE_ID) ||
-            await guild.roles.fetch(FIXTURES_ROLE_ID).catch(() => null);
-        if (!fixturesRole) {
-            return reply({
-                content: `❌ The HFSL fixtures role (ID ${FIXTURES_ROLE_ID}) could not be found in this server. No announcement was sent.`
-            });
-        }
-
-        if (!fixturesRole.mentionable && !botCanMentionRoles) {
-            return reply({
-                content: '❌ The bot cannot ping the HFSL fixtures role. Make the role mentionable or grant the bot the “Mention @everyone, @here, and All Roles” permission. No announcement was sent.'
-            });
-        }
     }
 
     // Refresh the channel cache so saved stadium names can resolve to real
@@ -271,8 +259,8 @@ async function runPostMatchday({
     );
 
     const unresolvedStadiums = [];
-    const roleIds = new Set(testMode ? [] : [FIXTURES_ROLE_ID]);
-    const userIds = new Set(testMode ? [] : [UNALDO_USER_ID, AASHANK_USER_ID]);
+    const roleIds = new Set();
+    const userIds = new Set(testMode ? [] : questionTagUserIds);
     const formattedFixtures = [];
     const teamRoles = testMode ? [] : Array.from(guild.roles.cache.values());
 
@@ -338,7 +326,8 @@ async function runPostMatchday({
         deadline,
         guildId: guild.id,
         lineRepeatCount,
-        includePings: !testMode
+        includePings: !testMode,
+        questionTagUserIds
     });
 
     // Keep the requested long divider for ordinary matchdays, reducing only
@@ -352,7 +341,8 @@ async function runPostMatchday({
             deadline,
             guildId: guild.id,
             lineRepeatCount,
-            includePings: !testMode
+            includePings: !testMode,
+            questionTagUserIds
         });
     }
 
@@ -378,7 +368,7 @@ async function runPostMatchday({
         });
     } catch (error) {
         console.error('[postmatchday] destination send failed:', error);
-        return reply({ content: '❌ I could not post in the saved fixtures channel. Check my channel and role-mention permissions.' });
+        return reply({ content: '❌ I could not post in the saved fixtures channel. Check my channel permissions.' });
     }
 
     return reply({

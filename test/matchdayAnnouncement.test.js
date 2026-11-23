@@ -4,10 +4,9 @@ const assert = require('node:assert/strict');
 const {
     LINE_EMOJI,
     LINE_REPEAT_COUNT,
-    FIXTURES_ROLE_ID,
-    UNALDO_USER_ID,
-    AASHANK_USER_ID,
     MATCHDAY_NOTES,
+    normalizeQuestionTagUserIds,
+    formatQuestionsLine,
     selectNextMatchday,
     selectKnockoutRound,
     sanitizeDeadline,
@@ -150,7 +149,13 @@ test('formats the selected matchday with the specified real emoji and ping marku
             homeMention: '<@&111111111111111111>',
             awayMention: '<@&222222222222222222>',
             stadiumChannelId: '333333333333333333'
-        }]
+        }],
+        questionTagUserIds: [
+            '888888888888888888',
+            '999999999999999999',
+            '888888888888888888',
+            'not-a-user'
+        ]
     });
 
     assert.match(content, /^# MATCHDAY 4/m);
@@ -160,15 +165,26 @@ test('formats the selected matchday with the specified real emoji and ping marku
     assert.match(content, /<:Stadium:1487010283506630776> <#333333333333333333>/);
     assert.match(content, /Deadline : `Friday 8 PM`/);
     assert.deepEqual(MATCHDAY_NOTES, [
-        '- TM IS REQUIRED FOR EVERY MATCH',
+        '- TM IS NOT REQUIRED FOR MATCHES',
         '- IF HOST FORGET TO DO -ctn | HOST BAN',
-        '- NOTE: Home Advantage is disabled'
+        '- NOTE: Home Advantage is enabled'
     ]);
     assert.ok(MATCHDAY_NOTES.every(note => content.includes(`\n${note}`)));
-    assert.ok(content.includes(`<@&${FIXTURES_ROLE_ID}>`));
-    assert.ok(content.includes(`<@${UNALDO_USER_ID}>`));
-    assert.ok(content.includes(`<@${AASHANK_USER_ID}>`));
+    assert.ok(content.includes('Questions? <@888888888888888888> <@999999999999999999>'));
+    assert.doesNotMatch(content, /<@&1554519598597021766>|HFSL fixtures/);
     assert.doesNotMatch(content, /⚽/);
+});
+
+test('normalizes question contacts and keeps them untagged in no-ping previews', () => {
+    assert.deepEqual(normalizeQuestionTagUserIds([
+        '888888888888888888',
+        '888888888888888888',
+        'not-a-user'
+    ]), ['888888888888888888']);
+    assert.equal(
+        formatQuestionsLine(['888888888888888888'], false),
+        'Questions? Contact your server organizers.'
+    );
 });
 
 test('sanitizes a deadline so it stays on one line and inside the inline-code span', () => {
