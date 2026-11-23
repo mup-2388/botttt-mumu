@@ -1020,6 +1020,12 @@ const serverConfigSchema = new mongoose.Schema(
             default: ''
         },
 
+        // Users to tag under Questions in this server's fixture announcements.
+        questionTagUserIds: {
+            type: [String],
+            default: []
+        },
+
         organizerIds: {
             type: [String],
             default: []

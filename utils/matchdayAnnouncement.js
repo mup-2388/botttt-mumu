@@ -3,15 +3,13 @@ const { vsLine } = require('./ai/emojiSlots');
 const LINE_EMOJI = '<a:lineline:1555643251552292986>';
 const LINE_REPEAT_COUNT = 10;
 const STADIUM_EMOJI = '<:Stadium:1487010283506630776>';
-const FIXTURES_ROLE_ID = '1554519598597021766';
-const UNALDO_USER_ID = '774318165722529792';
-const AASHANK_USER_ID = '1531201010532618241';
 const DISCORD_MESSAGE_LIMIT = 2000;
+const DISCORD_USER_ID_RE = /^\d{15,22}$/;
 
 const MATCHDAY_NOTES = [
-    '- TM IS REQUIRED FOR EVERY MATCH',
+    '- TM IS NOT REQUIRED FOR MATCHES',
     '- IF HOST FORGET TO DO -ctn | HOST BAN',
-    '- NOTE: Home Advantage is disabled'
+    '- NOTE: Home Advantage is enabled'
 ];
 
 const KNOCKOUT_ROUNDS = Object.freeze({
@@ -87,6 +85,22 @@ function buildLineSeparator(repeatCount = LINE_REPEAT_COUNT) {
     return LINE_EMOJI.repeat(Math.max(1, Math.floor(Number(repeatCount) || 1)));
 }
 
+function normalizeQuestionTagUserIds(userIds = []) {
+    const values = Array.isArray(userIds) ? userIds : [];
+    return [...new Set(values
+        .map(userId => String(userId ?? '').trim())
+        .filter(userId => DISCORD_USER_ID_RE.test(userId)))];
+}
+
+function formatQuestionsLine(userIds = [], includePings = true) {
+    const ids = normalizeQuestionTagUserIds(userIds);
+    if (!includePings || ids.length === 0) {
+        return 'Questions? Contact your server organizers.';
+    }
+
+    return `Questions? ${ids.map(userId => `<@${userId}>`).join(' ')}`;
+}
+
 function formatMatchdayAnnouncement({
     matchdayNumber: day,
     heading = null,
@@ -94,7 +108,8 @@ function formatMatchdayAnnouncement({
     deadline,
     guildId,
     lineRepeatCount = LINE_REPEAT_COUNT,
-    includePings = true
+    includePings = true,
+    questionTagUserIds = []
 }) {
     const separator = buildLineSeparator(lineRepeatCount);
     const matchBlocks = (fixtures || []).map(fixture => {
@@ -123,10 +138,7 @@ function formatMatchdayAnnouncement({
         `Deadline : \`${sanitizeDeadline(deadline)}\``,
         MATCHDAY_NOTES.join('\n'),
         separator,
-        includePings ? `<@&${FIXTURES_ROLE_ID}>` : 'HFSL fixtures',
-        includePings
-            ? `Questions? <@${UNALDO_USER_ID}> <@${AASHANK_USER_ID}>`
-            : 'Questions? UNALDO · Aashank'
+        formatQuestionsLine(questionTagUserIds, includePings)
     ].join('\n\n');
 }
 
@@ -141,10 +153,9 @@ module.exports = {
     LINE_EMOJI,
     LINE_REPEAT_COUNT,
     STADIUM_EMOJI,
-    FIXTURES_ROLE_ID,
-    UNALDO_USER_ID,
-    AASHANK_USER_ID,
     DISCORD_MESSAGE_LIMIT,
+    normalizeQuestionTagUserIds,
+    formatQuestionsLine,
     MATCHDAY_NOTES,
     KNOCKOUT_ROUNDS,
     matchdayNumber,

@@ -21,10 +21,9 @@ const { getDefaultTournament } = require('../../utils/getTournament');
 const { isOrganizer } = require('../../utils/isOrganizer');
 const { vsLine } = require('../../utils/ai/emojiSlots');
 const {
-    FIXTURES_ROLE_ID,
-    UNALDO_USER_ID,
-    AASHANK_USER_ID,
-    DISCORD_MESSAGE_LIMIT
+    DISCORD_MESSAGE_LIMIT,
+    normalizeQuestionTagUserIds,
+    formatQuestionsLine
 } = require('../../utils/matchdayAnnouncement');
 const {
     isSupportedTextChannel,
@@ -99,6 +98,7 @@ module.exports = {
 
 async function runPostReserves({ guild, reply, testMode = false, targetChannel = null }) {
     let destination = targetChannel;
+    let questionTagUserIds = [];
 
     if (testMode) {
         if (!isTestDestinationChannel(destination, guild.id)) {
@@ -106,6 +106,7 @@ async function runPostReserves({ guild, reply, testMode = false, targetChannel =
         }
     } else {
         const config = await ServerConfig.findOne({ guildId: guild.id }).lean();
+        questionTagUserIds = normalizeQuestionTagUserIds(config?.questionTagUserIds);
         if (!config?.defaultFixturesChannelId) {
             return reply({
                 content: '❌ No default fixtures channel is set. Run `.setfixtureschannel` in the announcement channel first.'
@@ -148,21 +149,8 @@ async function runPostReserves({ guild, reply, testMode = false, targetChannel =
     const botCanMentionRoles = Boolean(channelPermissions?.has(PermissionFlagsBits.MentionEveryone));
 
     if (!testMode) {
+        // Refresh role cache so team-role mentions can be resolved.
         await guild.roles.fetch().catch(() => null);
-        const fixturesRole = guild.roles.cache.get(FIXTURES_ROLE_ID) ||
-            await guild.roles.fetch(FIXTURES_ROLE_ID).catch(() => null);
-
-        if (!fixturesRole) {
-            return reply({
-                content: `❌ The HFSL fixtures role (ID ${FIXTURES_ROLE_ID}) could not be found in this server. No announcement was sent.`
-            });
-        }
-
-        if (!fixturesRole.mentionable && !botCanMentionRoles) {
-            return reply({
-                content: '❌ The bot cannot ping the HFSL fixtures role. Make the role mentionable or grant the bot the “Mention @everyone, @here, and All Roles” permission. No announcement was sent.'
-            });
-        }
     }
 
     const destinationIsThread = typeof destination.isThread === 'function' && destination.isThread();
@@ -233,7 +221,8 @@ async function runPostReserves({ guild, reply, testMode = false, targetChannel =
     const pages = paginateReservedFixtures({
         preparedFixtures,
         tournament,
-        includePings: !testMode
+        includePings: !testMode,
+        questionTagUserIds
     });
 
     if (pages.error) {
@@ -242,8 +231,8 @@ async function runPostReserves({ guild, reply, testMode = false, targetChannel =
 
     let sentCount = 0;
     for (const [index, page] of pages.entries()) {
-        const roleIds = new Set(index === 0 && !testMode ? [FIXTURES_ROLE_ID] : []);
-        const userIds = new Set(index === 0 && !testMode ? [UNALDO_USER_ID, AASHANK_USER_ID] : []);
+        const roleIds = new Set();
+        const userIds = new Set(index === 0 && !testMode ? questionTagUserIds : []);
 
         for (const item of page.items) {
             for (const id of item.roleIds) roleIds.add(id);
@@ -268,7 +257,7 @@ async function runPostReserves({ guild, reply, testMode = false, targetChannel =
             return reply({
                 content: sentCount
                     ? `⚠️ Posted ${sentCount} of ${pages.length} reserved-fixture announcement messages before a send failed. Check permissions and rerun if needed.`
-                    : '❌ I could not post in the saved fixtures channel. Check my channel and role-mention permissions.'
+                    : '❌ I could not post in the saved fixtures channel. Check my channel permissions.'
             });
         }
     }
@@ -297,9 +286,9 @@ function formatReservedFixture({ fixture, homeMention, awayMention, venue, guild
     ].filter(Boolean).join('\n');
 }
 
-function paginateReservedFixtures({ preparedFixtures, tournament, includePings }) {
+function paginateReservedFixtures({ preparedFixtures, tournament, includePings, questionTagUserIds = [] }) {
     const globalMentions = includePings
-        ? `<@&${FIXTURES_ROLE_ID}>\n\nQuestions? <@${UNALDO_USER_ID}> <@${AASHANK_USER_ID}>\n\n`
+        ? `${formatQuestionsLine(questionTagUserIds, includePings)}\n\n`
         : '';
     const placeholderHeader = buildReservedHeader(tournament, '999/999', preparedFixtures.length);
     const bodyLimit = DISCORD_MESSAGE_LIMIT - globalMentions.length - placeholderHeader.length - 2;

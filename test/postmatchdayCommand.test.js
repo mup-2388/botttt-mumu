@@ -47,6 +47,7 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     const stadiumOneId = '333333333333333333';
     const stadiumTwoId = '555555555555555555';
     const fixturesRoleId = '1554519598597021766';
+    const questionTagUserIds = ['888888888888888888', '999999999999999999'];
     const homeRoleId = '111111111111111111';
     const awayRoleId = '222222222222222222';
     const sent = [];
@@ -151,7 +152,7 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
             ServerConfig: {
                 findOne: () => {
                     serverConfigReads++;
-                    return { lean: async () => ({ defaultFixturesChannelId: destinationId }) };
+                    return { lean: async () => ({ defaultFixturesChannelId: destinationId, questionTagUserIds }) };
                 }
             }
         },
@@ -200,13 +201,11 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     assert.ok(!announcement.content.includes('__Match 1__\n'));
     assert.ok(announcement.content.includes(`<:Stadium:1487010283506630776> <#${stadiumTwoId}>`));
     assert.ok(announcement.content.includes('Deadline : `Friday 8 PM`'));
-    assert.ok(announcement.content.includes(`<@&${fixturesRoleId}>`));
+    assert.ok(announcement.content.includes(`Questions? <@${questionTagUserIds[0]}> <@${questionTagUserIds[1]}>`));
+    assert.doesNotMatch(announcement.content, new RegExp(`<@&${fixturesRoleId}>|HFSL fixtures`));
     assert.deepEqual(announcement.allowedMentions.parse, []);
-    assert.deepEqual(announcement.allowedMentions.roles, [fixturesRoleId, awayRoleId, homeRoleId]);
-    assert.deepEqual(announcement.allowedMentions.users, [
-        '774318165722529792',
-        '1531201010532618241'
-    ]);
+    assert.deepEqual(announcement.allowedMentions.roles, [awayRoleId, homeRoleId]);
+    assert.deepEqual(announcement.allowedMentions.users, questionTagUserIds);
     assert.match(replyPayloads.at(-1).content, /Posted \*\*Matchday 1\*\*/);
     assert.equal(serverConfigReads, 1);
 
@@ -335,8 +334,8 @@ test('postmatchday posts the next round with real allowed mentions and no fixtur
     assert.equal(serverConfigReads, 6, 'test mode should not read or use the configured destination');
     assert.equal(roleFetchCalls, roleFetchesAfterPublish, 'test mode should not look up ping roles');
     assert.equal(testSent.length, 1);
-    assert.ok(testSent[0].content.includes('HFSL fixtures'));
-    assert.ok(testSent[0].content.includes('Questions? UNALDO · Aashank'));
+    assert.ok(testSent[0].content.includes('Questions? Contact your server organizers.'));
+    assert.doesNotMatch(testSent[0].content, /HFSL fixtures|<@&1554519598597021766>/);
     assert.doesNotMatch(testSent[0].content, /<@/);
     assert.deepEqual(testSent[0].allowedMentions.roles, []);
     assert.deepEqual(testSent[0].allowedMentions.users, []);
