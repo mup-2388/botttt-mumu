@@ -244,3 +244,51 @@ test('/schedule preview shows both texts without pinging or changing a schedule'
     assert.ok(harness.previewCalls.every(call => call.includePings === false && call.recordHistory === false));
     assert.equal(harness.scheduleCalls.length, 0);
 });
+
+test('successful prefix .schedule does not send a confirmation reply', async () => {
+    const selectedFixture = fixture(12, 'Falcons', 'Tigers');
+    const harness = loadScheduleCommand([selectedFixture], { selectedFixture });
+    const replies = [];
+    const message = {
+        guild: {
+            id: 'guild-1',
+            channels: { fetch: async id => ({ id }) }
+        },
+        author: { id: 'organizer-1' },
+        client: {},
+        reply: async payload => { replies.push(payload); }
+    };
+
+    await harness.command.execute(message, ['12', 'in', '<#12345>']);
+
+    assert.equal(harness.scheduleCalls.length, 1);
+    assert.equal(replies.length, 0);
+});
+
+test('successful /schedule set retains its confirmation embed', async () => {
+    const selectedFixture = fixture(12, 'Falcons', 'Tigers');
+    const harness = loadScheduleCommand([selectedFixture], { selectedFixture });
+    let response = null;
+    const interaction = {
+        guild: {
+            id: 'guild-1',
+            channels: { fetch: async id => ({ id }) }
+        },
+        user: { id: 'organizer-1' },
+        client: {},
+        options: {
+            getSubcommand: () => 'set',
+            getString: name => name === 'match' ? 'fixture-12' : null,
+            getChannel: () => ({ id: '12345' }),
+            getBoolean: () => false
+        },
+        deferReply: async () => {},
+        editReply: async payload => { response = payload; }
+    };
+
+    await harness.command.slashExecute(interaction);
+
+    assert.equal(harness.scheduleCalls.length, 1);
+    assert.equal(response.embeds.length, 1);
+    assert.equal(response.embeds[0].data.title, '🔒 MATCH SCHEDULED — CHANNEL LOCKED');
+});

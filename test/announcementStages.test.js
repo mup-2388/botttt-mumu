@@ -73,12 +73,14 @@ test('announcement fallbacks and prompts match scheduled, unlock, and kickoff st
         });
 
         assert.match(scheduled, /locked in/i);
+        assert.ok(scheduled.length <= 160);
+        assert.doesNotMatch(scheduled, /12 Oct, 9:00 PM IST/);
         assert.match(unlock, /one minute/i);
         assert.match(kickoff, /Two teams/i);
-        assert.match(scheduled, /12 Oct, 9:00 PM IST/);
         assert.match(unlock, /12 Oct, 9:00 PM IST/);
         assert.match(kickoff, /12 Oct, 9:00 PM IST/);
         assert.match(prompts[0].systemPrompt, /just scheduled this match/i);
+        assert.match(prompts[0].systemPrompt, /one short sentence, max 160 characters/i);
         assert.match(prompts[1].systemPrompt, /unlocked one minute before kickoff/i);
         assert.match(prompts[2].systemPrompt, /kickoff time has arrived/i);
         assert.match(prompts[3].messages[0].content, /Venue: not specified — omit venue wording/);
@@ -88,4 +90,37 @@ test('announcement fallbacks and prompts match scheduled, unlock, and kickoff st
     } finally {
         Math.random = originalRandom;
     }
+});
+
+test('scheduled AI prose is reduced to one sentence and capped at 160 characters', async () => {
+    const longFirstSentence = `${'Both teams should prepare carefully before kickoff '.repeat(8)}.`;
+    const { buildMatchAnnouncement } = requireWithMocks('../utils/ai/announcements', {
+        fs: { readFileSync: () => '[]', mkdirSync: () => {}, writeFileSync: () => {} },
+        '../aiProviders': {
+            callAI: async () => ({ text: `${longFirstSentence} This second sentence should be removed.` })
+        },
+        './tournamentTools': { runTool: async () => null },
+        '../istTime': {
+            formatIst: () => '12 Oct, 9:00 PM IST',
+            discordFull: () => '<t:1000:F>',
+            discordRelative: () => '<t:1000:R>'
+        },
+        './emojiCatalog': { emojiHint: () => '' },
+        './emojiSlots': { slotHint: () => '', slotEmoji: () => '', vsLine: (home, away) => `${home} vs ${away}` }
+    });
+
+    const body = await buildMatchAnnouncement({
+        guildId: 'guild-1',
+        tournament: { name: 'Default League', tournamentKey: 'default' },
+        fixture: { matchNumber: 12 },
+        homeTeam: 'Falcons',
+        awayTeam: 'Tigers',
+        scheduledAt: new Date('2026-10-12T15:30:00.000Z'),
+        announcementType: 'scheduled',
+        recordHistory: false
+    });
+
+    assert.ok(body.length <= 160);
+    assert.match(body, /…$/);
+    assert.doesNotMatch(body, /second sentence/i);
 });

@@ -11,6 +11,7 @@
  */
 
 const REFRESH_MS = 30 * 60 * 1000;
+const { isBlockedEmoji, isBlockedEmojiRef } = require('./emojiPolicy');
 
 const catalog = new Map();     // emoji id -> { name, id, animated, guildId, guildName, ref, keywords }
 const userEmojis = new Map();  // `${guildId}:${userId}` -> Map(ref -> count)
@@ -39,6 +40,8 @@ function crawl(client) {
         if (!emojis) continue;
 
         for (const emoji of emojis.values()) {
+            if (isBlockedEmoji(emoji)) continue;
+
             seen.add(String(emoji.id));
             catalog.set(String(emoji.id), {
                 name: emoji.name,
@@ -122,7 +125,10 @@ function learnUserEmojis(guildId, userId, content) {
         userEmojis.set(k, map);
     }
 
-    for (const m of matches) map.set(m[0], (map.get(m[0]) || 0) + 1);
+    for (const m of matches) {
+        if (isBlockedEmojiRef(m[0])) continue;
+        map.set(m[0], (map.get(m[0]) || 0) + 1);
+    }
     for (const u of unicode) map.set(u, (map.get(u) || 0) + 1);
 
     if (userEmojis.size > 1000) userEmojis.delete(userEmojis.keys().next().value);
@@ -133,6 +139,7 @@ function userTopEmojis(guildId, userId, n = 3) {
     if (!map) return [];
 
     return [...map.entries()]
+        .filter(([ref]) => !isBlockedEmojiRef(ref))
         .sort((a, b) => b[1] - a[1])
         .slice(0, n)
         .map(([ref]) => ref);
@@ -144,7 +151,10 @@ function guildFavourites(guildId, n = 6) {
 
     for (const [k, map] of userEmojis.entries()) {
         if (!k.startsWith(`${guildId}:`)) continue;
-        for (const [ref, c] of map.entries()) counts.set(ref, (counts.get(ref) || 0) + c);
+        for (const [ref, c] of map.entries()) {
+            if (isBlockedEmojiRef(ref)) continue;
+            counts.set(ref, (counts.get(ref) || 0) + c);
+        }
     }
 
     return [...counts.entries()]

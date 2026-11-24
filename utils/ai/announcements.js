@@ -53,9 +53,9 @@ const TEMPLATES = [
 ];
 
 const SCHEDULE_TEMPLATES = [
-    '{match} is locked in for {time}. Start sharpening the banter — the football can wait until kickoff. {fire}',
-    'On the calendar: {match} at {time}. Both teams now have time to prepare their excuses properly. {goal}',
-    '{match}, {time}. The fixture is set; no backing out when the group chat gets confident. 🏟️'
+    '{match} is locked in — get your tactics ready and save the excuses for full-time. {fire}',
+    'Fixture confirmed — get ready to play; the banter can wait until kickoff. {goal}',
+    '{match} is official: time to prepare, not panic. 🏟️'
 ];
 
 const REMINDER_TEMPLATES = [
@@ -87,6 +87,21 @@ function pushHistory(entry) {
 
 function pick(list) {
     return list[Math.floor(Math.random() * list.length)];
+}
+
+function compactScheduleAnnouncement(value) {
+    const text = String(value || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const sentence = text.match(/^.*?[.!?](?=\s|$)/)?.[0] || text;
+    const maxLength = 160;
+
+    if (sentence.length <= maxLength) return sentence;
+
+    let shortened = sentence.slice(0, maxLength - 1);
+    const wordBoundary = shortened.lastIndexOf(' ');
+    if (wordBoundary > maxLength * 0.75) shortened = shortened.slice(0, wordBoundary);
+    shortened = shortened.trim().replace(/[,:;.!?—–-]+$/g, '');
+
+    return `${shortened}…`;
 }
 
 /* ── Fact packing ──
@@ -259,17 +274,21 @@ async function buildMatchAnnouncement({
     const angleChoices = venueName ? ANGLES : ANGLES.filter(item => !/ground|venue|stadium/i.test(item));
     const angle = pick(angleChoices);
     const tone = pick(TONES);
-    const stageInstruction = announcementType === 'scheduled'
-        ? 'The organizer has just scheduled this match. Confirm the fixture and time, build anticipation, and make both teams feel called out in a friendly way.'
+    const isScheduleNotice = announcementType === 'scheduled';
+    const stageInstruction = isScheduleNotice
+        ? 'The organizer has just scheduled this match. Give one punchy confirmation and tell both teams to get ready.'
         : ['reminder', 'unlock'].includes(announcementType)
             ? 'The channel is being unlocked one minute before kickoff. Tell both teams to get ready now; do not imply the match is already underway.'
             : 'The scheduled kickoff time has arrived. Tell both teams to get started now; do not say kickoff is still in the future.';
+    const lengthInstruction = isScheduleNotice
+        ? 'LENGTH: one short sentence, max 160 characters.'
+        : 'LENGTH: 2-4 sentences, max 400 characters.';
 
     const systemPrompt =
         `You are MUMU, the host of a Discord football league. You write a match announcement for the requested stage.\n\n` +
         `STYLE: ${tone}. Angle to take: ${angle}. Roast level: light-medium — tease the teams, never the people's real lives.\n` +
         `ANNOUNCEMENT MOMENT: ${stageInstruction}\n` +
-        `LENGTH: 2-4 sentences, max 400 characters. Discord markdown allowed (**bold**, *italic*).\n` +
+        `${lengthInstruction} Discord markdown allowed (**bold**, *italic*).\n` +
         `${emojiRule(emojiHint(`${homeTeam} ${awayTeam} match`, guildId, 12), guildId)}\n` +
         `${slotHint(guildId, ['goals', 'assists', 'saves', 'calendar', 'vs', 'fire'])}\n\n` +
         `HARD RULES:\n` +
@@ -293,7 +312,7 @@ async function buildMatchAnnouncement({
         messages: [{ role: 'user', content: userPrompt }],
         systemPrompt,
         temperature: 0.95,
-        maxTokens: 320
+        maxTokens: isScheduleNotice ? 120 : 320
     });
 
     let body = res?.text ? String(res.text).trim() : '';
@@ -312,6 +331,10 @@ async function buildMatchAnnouncement({
     if (!body || body.length < 15) {
         body = templateAnnouncement({ homeTeam, awayTeam, scheduledAt, venueName, guildId, announcementType });
         body = body.replace(/<@&\d+>/g, '');
+    }
+
+    if (isScheduleNotice) {
+        body = compactScheduleAnnouncement(body);
     }
 
     if (recordHistory) pushHistory(body.split('\n')[0].slice(0, 120));
