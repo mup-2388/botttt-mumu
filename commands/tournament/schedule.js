@@ -187,6 +187,7 @@ module.exports = {
                 guild: message.guild,
                 raw: args.join(' '),
                 actorId: message.author.id,
+                sendConfirmation: false,
                 reply: p => message.reply(p)
             });
         } catch (error) {
@@ -456,6 +457,7 @@ async function runSet({
     venue = null,
     pingCaptains = false,
     actorId = null,
+    sendConfirmation = true,
     reply
 }) {
     let text = String(raw || '');
@@ -619,6 +621,10 @@ async function runSet({
     if (!result.ok) {
         return reply({ content: `❌ ${result.error}` });
     }
+
+    // The prefix scheduler already posts the announcement in the match channel;
+    // avoid duplicating it with a second success embed in the command channel.
+    if (!sendConfirmation) return;
 
     const noticeState = result.scheduledAnnouncement?.ok
         ? '✅ Posted in the match channel'
