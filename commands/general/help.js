@@ -55,7 +55,7 @@ module.exports = {
             moderation: '<:moderation:1486732346769281096>',
             economy: '💰',
             info: '<:Info:1486732443888259154>',
-            football: '<a:footballg:1486727534576930846>',
+            football: '⚽',
             cricket: '🏏',
             tournament: '<a:Tournament:1488533188547711079>',
             games: '🎮',

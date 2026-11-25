@@ -11,6 +11,8 @@
  *      creator is the person being replied to. Mass-ping bait is still rejected.
  */
 
+const { stripBlockedEmojiRefs } = require('./ai/emojiPolicy');
+
 const OWNER_ID = '856556430370930738';
 
 /* The channel where moderation/audit embeds are sent (same one index.js uses). */
@@ -96,7 +98,7 @@ const EVERYONE_LIKE = /@\s?(everyone|here)\b/gi;
  * the caller may actually ping.
  */
 function sanitizeAIText(raw, { maxUserPings = 1, allowOwnerPing = false } = {}) {
-    let text = String(raw ?? '');
+    let text = stripBlockedEmojiRefs(raw);
 
     // 1. @everyone / @here — always broken (zero-width space after the @)
     text = text.replace(EVERYONE_LIKE, match => `@\u200B${match.slice(1).replace(/^\s+/, '')}`);

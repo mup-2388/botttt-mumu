@@ -23,7 +23,7 @@ module.exports = {
         // 2. Create the "Fake" Goal Embed (Exact match to your goalAlerts logic)
         const testEmbed = new EmbedBuilder()
             .setColor(0x2ECC71) // Goal Green
-            .setTitle('<a:footballg:1486727534576930846> GOAL! - Primera División')
+            .setTitle('⚽ GOAL! - Primera División')
             .setDescription(`<:alerts:1486802066767610066> **Real Madrid** <:vsvs:1555297535361286225> **Barcelona**\nScore: **1 - 0**\n<:Stadium:1487010283506630776> **Venue:** Santiago Bernabéu`)
             .setTimestamp()
             .setFooter({ text: 'Mumu Live Test Alert' });

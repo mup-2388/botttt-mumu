@@ -45,6 +45,7 @@ module.exports = {
     aliases: ['nm', 'fixtures'],
     description: 'Shows a paginated team schedule with next match info.',
     usage: '.nm [team name]',
+    buildFixtureLine,
     hidden: false,
     cooldown: 5,
 
@@ -448,8 +449,7 @@ function buildFixtureLine(fixture, index, teamName) {
     if (isCompleted) {
         const home = fixture.result?.home ?? '-';
         const away = fixture.result?.away ?? '-';
-        const goal = slotEmoji('goals', fixture.guildId);
-        score = ` — **${goal} ${home}-${away} ${goal}**`;
+        score = ` — **${home}-${away}**`;
     }
 
     const badge = reservedBadge(fixture, { guildId: fixture.guildId });
